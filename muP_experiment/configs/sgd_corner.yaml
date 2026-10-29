@@ -1,0 +1,14 @@
+# SGD validation in the low-(λ, δ₀) corner at two η per condition (PLAN.md §8).
+name: sgd_corner
+N: [10, 20, 50]
+kappa: [1.0]
+readout: [learned, frozen, heads]
+delta0: [0.0]
+lam: [0.5, 1.0]
+seeds: 4
+solver: sgd
+eta: [0.05, 0.025]
+sgd_contraction: 0.05
+D_factor: 4
+T_factor: 10.0
+batch_size: 64

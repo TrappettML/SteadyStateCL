@@ -1,0 +1,19 @@
+# Stage 1 (Table 1 of the plan): population solver.
+# 5 N × 2 κ × 3 readouts × 6 δ₀ × 4 λ × 8 seeds = 5760 runs.
+name: stage1
+N: [5, 10, 20, 50, 100]
+kappa: [1.0, 2.0]
+readout: [learned, frozen, heads]
+delta0: [-0.75, -0.5, 0.0, 1.0, 4.0, 16.0]
+lam: [0.5, 1.0, 2.0, 4.0]
+seeds: 8
+solver: pop
+eta: [1.0]
+h_max: 1.0
+# h ā² ≤ 0.1 (plan).  scripts/validate.py measures an O(h) Euler bias of
+# ΔS(0) ≈ +0.017 (frozen) / +0.005 (learned) at this value at N=10, λ=1;
+# 0.01 costs 10× the steps (n_steps = 100λ per task) and reduces it 10×.
+pop_contraction: 0.1
+D_factor: 4
+T_factor: 10.0
+batch_size: 64

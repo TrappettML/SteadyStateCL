@@ -1,0 +1,15 @@
+# Laptop pilot: small widths, population solver, all three readouts.
+name: pilot
+N: [10, 20]
+kappa: [1.0]
+readout: [learned, frozen, heads]
+delta0: [0.0, 4.0]
+lam: [1.0, 4.0]
+seeds: 2
+solver: pop
+eta: [1.0]
+h_max: 1.0
+pop_contraction: 0.1
+D_factor: 4
+T_factor: 10.0
+batch_size: 64
