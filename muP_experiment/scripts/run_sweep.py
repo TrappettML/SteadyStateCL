@@ -18,6 +18,18 @@ from mup.config import Config
 
 
 def main(argv=None):
+    """
+    Command-line entry point (see the module docstring).
+
+    Parameters
+    ----------
+    argv : list of str, optional
+
+    Returns
+    -------
+    int
+        Exit code (1 if any batch failed under the driver).
+    """
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", default=None, help="results dir (default results/<config name>)")
@@ -35,10 +47,9 @@ def main(argv=None):
     config_path = os.path.abspath(args.config)
 
     if args.batch_id is not None:
-        # single batch; the manifest already exists (written by the launcher)
-        man = io.read_manifest(out)
-        batches = io.plan_sweep(Config(**man["config"]), out, None, man.get("config_path", config_path))
-        run_batch(out, args.batch_id, batches[args.batch_id], args.log_every)
+        # one batch under the driver: the driver owns the manifest, so only write the batch file
+        batches = io.batches_from_manifest(out)
+        run_batch(out, args.batch_id, batches[args.batch_id], args.log_every, update_manifest=False)
         return 0
 
     batches = io.plan_sweep(cfg, out, args.N, config_path)
@@ -68,7 +79,24 @@ def main(argv=None):
     return 0
 
 
-def run_batch(out, i, batch, log_every):
+def run_batch(out, i, batch, log_every, update_manifest=True):
+    """
+    Run one batch in-process and write its batch file (and trace files for trace runs).
+
+    Infeasible runs (δ₀ ≤ −min_i Q0_i) are skipped and listed under ``skipped``
+    in the batch metadata.
+
+    Parameters
+    ----------
+    out : str
+        Results directory.
+    i : int
+        Batch id.
+    batch : list of Run
+    log_every : int
+    update_manifest : bool
+        False under the driver, which owns the manifest.
+    """
     from mup.protocol import feasible, run_stream
     r = batch[0]
     print(f"batch {i}: {len(batch)} runs  N={r.N} κ={r.kappa_label} {r.solver} n_steps={r.n_steps} T={r.T_burn + r.T_meas}", flush=True)
@@ -78,8 +106,12 @@ def run_batch(out, i, batch, log_every):
         print(f"  skipping {len(skipped)} infeasible runs (δ₀ ≤ −min_i Q0_i): {skipped[0]} …", flush=True)
     kept = [batch[j] for j in range(len(batch)) if ok[j]]
     res = run_stream(kept, log=lambda m: print("  " + m, flush=True), log_every=log_every) if kept else {}
+    if "trace" in res:
+        io.save_traces(out, i, res, kept)          # per-run trace files; the batch file stays small
+        res = {k: v for k, v in res.items() if k not in ("trace", "trace_idx")}
     io.save_batch(out, i, res, kept, extra={"skipped": skipped})
-    io.set_status(out, i, "done")
+    if update_manifest:
+        io.set_status(out, i, "done")
 
 
 if __name__ == "__main__":

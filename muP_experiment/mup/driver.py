@@ -30,6 +30,19 @@ RUN_SWEEP = os.path.join(os.path.dirname(HERE), "scripts", "run_sweep.py")
 
 
 def _command(config_path: str, out_dir: str, batch_id: int, numa_node: Optional[int]) -> list[str]:
+    """
+    Command line of one batch subprocess, optionally bound to a NUMA node.
+
+    Parameters
+    ----------
+    config_path, out_dir : str
+    batch_id : int
+    numa_node : int or None
+
+    Returns
+    -------
+    list of str
+    """
     cmd = [sys.executable, RUN_SWEEP, "--config", config_path, "--out", out_dir, "--batch-id", str(batch_id)]
     if numa_node is not None and shutil.which("numactl"):
         cmd = ["numactl", f"--cpunodebind={numa_node}", f"--membind={numa_node}"] + cmd
@@ -45,11 +58,36 @@ def launch(
     batch_ids: Optional[list[int]] = None,
     log=print,
 ) -> dict:
-    """Run every pending batch of ``out_dir``'s manifest with ``workers`` subprocesses."""
+    """
+    Run every pending batch of ``out_dir``'s manifest with ``workers`` subprocesses.
+
+    Parameters
+    ----------
+    config_path : str
+        YAML config the manifest was made from.
+    out_dir : str
+    workers : int
+        Pool size (one thread-pinned process per batch at a time).
+    numa_nodes : int
+        Bind workers round-robin to this many NUMA nodes with ``numactl`` (0: no binding).
+    threads_per_worker : int
+        XLA/BLAS threads per process (1 recommended, PLAN.md decision 5).
+    batch_ids : list of int, optional
+        Batches to run (default: the manifest's pending ones).
+    log : callable
+
+    Returns
+    -------
+    dict
+        ``done`` and ``failed`` lists of batch ids.
+    """
     ids = batch_ids if batch_ids is not None else io.pending_batches(out_dir)
     if not ids:
         log("nothing to do")
         return {"done": [], "failed": []}
+    if numa_nodes > 0 and not shutil.which("numactl"):
+        log("warning: numactl not found; running without NUMA binding")
+        numa_nodes = 0
     env = dict(os.environ)
     env.update(PINNED_ENV)
     if threads_per_worker != 1:
@@ -59,6 +97,7 @@ def launch(
     done, failed = [], []
 
     def worker(k: int, bid: int):
+        """Run one batch subprocess, logging to ``logs/batch_<id>.log``; returns (id, return code)."""
         node = (k % numa_nodes) if numa_nodes > 0 else None
         cmd = _command(config_path, out_dir, bid, node)
         with lock:

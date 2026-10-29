@@ -1,0 +1,16 @@
+# Per-step norm traces (PLAN.md §12.2): laptop-sized, population solver.
+# N ∈ {10, 50, 100}, κ = 1 and √N (ungated readouts are listed once per N), δ₀ ∈ {0, 4}, λ ∈ {1, 4},
+# all five readouts, 2 seeds.  The SGD corner is configs/trace_sgd.yaml.
+name: trace
+N: [10, 50, 100]
+kappa: [1.0, sqrtN]
+readout: [gated_shared, learned_shared, gated_frozen, frozen, task_heads]
+delta0: [0.0, 4.0]
+lam: [1.0, 4.0]
+seeds: 2
+solver: pop
+eta: [1.0]
+pop_contraction: 0.1
+trace: true
+trace_points: 200
+batch_size: 64

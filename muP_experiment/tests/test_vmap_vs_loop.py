@@ -20,7 +20,7 @@ from mup.protocol import init_batch, run_task, batched_run_task, run_stream
 
 def _single(run, T, ages):
     p = jax.tree_util.tree_map(lambda x: x[0], init_batch([run])[1])
-    st = model.init_state(jax.random.PRNGKey(run.seed), p, run.N, run.D, T)
+    st = model.init_state(jax.random.PRNGKey(run.rng_seed()), p, run.N, run.D, T)
     f = jax.jit(functools.partial(run_task, n_steps=run.n_steps, solver=run.solver))
     outs = []
     for _ in range(T):
@@ -33,7 +33,7 @@ def test_batch_equals_singles(small_runs):
     runs = small_runs
     assert [r.readout for r in runs] == ["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"]
     T = runs[0].T_burn + runs[0].T_meas
-    ages = jnp.asarray(age_schedule(runs[0].N, runs[0].kappa, T))
+    ages = jnp.asarray(age_schedule(runs[0].N, runs[0].kappa, T, runs[0].n_ages_geom, runs[0].m_max_factor))
     st, p = init_batch(runs)
     f = batched_run_task(runs[0].n_steps, runs[0].solver)
     bouts = []

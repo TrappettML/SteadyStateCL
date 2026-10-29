@@ -1,0 +1,13 @@
+# Per-step norm traces for the SGD corner (PLAN.md §12.2): N = 20, η = 0.05, 2 seeds.
+name: trace_sgd
+N: [20]
+kappa: [1.0]
+readout: [gated_shared, learned_shared, gated_frozen, frozen, task_heads]
+delta0: [0.0]
+lam: [1.0]
+seeds: 2
+solver: sgd
+eta: [0.05]
+trace: true
+trace_points: 200
+batch_size: 64

@@ -57,3 +57,20 @@ def test_age_schedule_and_half_life():
     m, cens = half_life(np.arange(10), S)
     assert not cens and abs(m - 3 * math.log(2)) < 0.15
     assert half_life(np.arange(3), np.ones(3))[1] is True
+
+
+def test_legacy_readout_names_load():
+    """Batch files of the first code version named readouts learned/frozen/heads (PLAN.md §4 renamed them)."""
+    from mup.config import Run, is_gated
+    r = Run(N=10, D=40, kappa=1.0, readout="gated_shared", delta0=0.0, lam=1.0, seed=0, solver="pop", eta=1.0,
+            h=0.1, n_steps=10, alpha_task=1.0, T_burn=4, T_meas=4)
+    d = r.to_dict(); d.pop("gated"); d["readout"] = "learned"       # schema-1 files carry no "gated" key
+    assert Run.from_dict(d).readout == "gated_shared"
+    d["readout"] = "heads"
+    assert Run.from_dict(d).readout == "task_heads"
+    d["readout"] = "frozen"
+    assert Run.from_dict(d).readout == "gated_frozen"
+    d["kappa_label"] = "sqrtN"
+    assert Run.from_dict(d).readout == "frozen"
+    assert Run.from_dict(r.to_dict()).readout == "gated_shared"
+    assert is_gated("frozen") is False and is_gated("learned") is True and is_gated("gated_frozen") is True

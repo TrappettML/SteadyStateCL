@@ -21,7 +21,24 @@ from mup.protocol import batched_run_task, init_batch
 
 
 def bench(N, B, solver, n_tasks, eta):
-    cfg = Config(N=[N], readout=["learned"], delta0=[0.0], lam=[1.0], seeds=B, solver=solver, eta=[eta], T_min=8)
+    """
+    Time ``run_task`` for one batch shape after a warm-up compile.
+
+    Parameters
+    ----------
+    N : int
+    B : int
+        Batch size (as seeds of one condition).
+    solver : {"pop", "sgd"}
+    n_tasks : int
+        Tasks timed after the compile call.
+    eta : float
+
+    Returns
+    -------
+    (run_steps_per_s, s_per_task, compile_s, n_steps)
+    """
+    cfg = Config(N=[N], readout=["gated_shared"], delta0=[0.0], lam=[1.0], seeds=B, solver=solver, eta=[eta], T_min=8)
     runs = make_runs(cfg)
     T = runs[0].T_burn + runs[0].T_meas
     ages = jnp.asarray(age_schedule(N, runs[0].kappa, T))
@@ -38,6 +55,17 @@ def bench(N, B, solver, n_tasks, eta):
 
 
 def main(argv=None):
+    """
+    Command-line entry point: prints a table of run-steps/s vs (N, B).
+
+    Parameters
+    ----------
+    argv : list of str, optional
+
+    Returns
+    -------
+    int
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--N", type=int, nargs="+", default=[20, 100])
     ap.add_argument("--B", type=int, nargs="+", default=[1, 8, 32, 64, 128])
