@@ -97,15 +97,15 @@ muP_experiment/
     run_sweep.py       --config configs/stage1.yaml [--N 50] [--workers 90 --numa-nodes 4] [--dry-run] [--batch-id i]
     bench.py           run-steps/s vs B at fixed N on this machine
     validate.py        η-halving, Kaczmarz collapse, CV exponent
-    analyze.py         S(m), E(m) (columns = N, traces = readout), m_half vs N
-                       at matched E(0), checks 1–4, figures (§12.4 for the layout)
-    plot_norms.py      weight-norm figures (§12.3) from batch files and trace files
-    plot_check2.py     steady-state figures (C2-A … C2-E) and check2_cells.csv (§12.6)
+    analyze.py         summary.csv, curves.json, the four figure families F1–F4 and the
+                       checks table (§12.3, §12.6); diagnostic figures only with --diag
+    plot_norms.py      F1/F2 (norms vs task) from batch files; by_step/ with --diag (§12.3)
+    plot_check2.py     check statistics → checks table + csv (§12.6); C2 figures with --diag
   configs/
     pilot.yaml  stage1.yaml  sgd_corner.yaml  trace.yaml  (trace: per-step norms, §12.2)
   tests/
     test_x64.py test_gradients.py test_projection.py test_conservation.py
-    test_vmap_vs_loop.py test_reproducible.py test_config.py conftest.py
+    test_vmap_vs_loop.py test_reproducible.py test_config.py test_plotting.py conftest.py
     reference_hash.txt (test 6's stored hash)
   results/             (gitignored) one subfolder per sweep:
     <sweep>/batch_*.npz  manifest.json  summary.csv  curves.json  logs/
@@ -273,17 +273,16 @@ and can be added later if wanted. Probe evaluation uses `heads[k]` when
   values, not just the flag.
 - `m_half`: first age with `S(m) ≤ S(0)/2`, linear interpolation between
   bracketing ages; `NaN` with `censored=True` if not reached.
-- Figures for `S(m)` and `E(m)` (`analyze.py`): one figure per
-  (κ, δ₀, λ, solver, η); two rows (`S`, `E`); **columns indexed by N**
-  (each column is one width and hence one stream length T = 20N/κ²);
-  **traces within a panel are the readout types** in the fixed colours of
-  `plotting.py`, so the five readouts are compared directly at each N. The
-  ungated conditions have no κ and are repeated in every κ figure; they
-  are run on the κ_min schedule, so in the κ = κ_min figure they cover the
-  full age axis, and in a larger-κ figure (shorter axis) they are simply
-  truncated to that figure's `m_max`. `analyze.py` asserts that every
-  trace in a panel has data at the panel's last age and warns otherwise,
-  so a half-plotted trace is caught, not shipped.
+- Figures for `S(m)` and `E(m)` (`analyze.py`, families F3 and F4 of
+  §12.3): one figure per (κ, δ₀, λ, solver, η); two rows (`S`, `E`);
+  in F3 **columns indexed by N** and **traces = the readout types** in
+  the fixed colours of `plotting.py`; in F4 columns = readouts and
+  traces = N. The ungated conditions have no κ and are repeated in every
+  κ figure; they are run on the κ_min schedule, so in the κ = κ_min
+  figure they cover the full age axis, and in a larger-κ figure (shorter
+  axis) they are simply truncated to that figure's `m_max`. `analyze.py`
+  asserts that every trace in a panel has data at the panel's last age
+  and warns otherwise, so a half-plotted trace is caught, not shipped.
 - Per task: `abar2`, mean `Q_ii`, mean `a_i²`, mean and max of `|a_i|√Q_ii`,
   `E(0)`, `L_end` — all taken *after* the last projection of the task. §12
   adds the same norms *before* that projection and the per-step traces.
@@ -293,9 +292,9 @@ and can be added later if wanted. Probe evaluation uses `heads[k]` when
 | check | where |
 |---|---|
 | 1 gauge | `max|Δ_i − Δ₀|` over active units and `|u_c^{after} − u_c^{before}|` after the last projection of each task, returned by `run_task`; expect ~1e-13 in float64 |
-| 2 bounded norms | half-window means of the per-task scalars and of `S(0)`, `S(m)`; flag if halves differ by > 3 s.e. |
+| 2 bounded norms | half-window means of the per-task scalars and of `S(0)`, `S(m)`; flag if halves differ by > 3 s.e.; reported in the checks table (§12.6), read off F1/F2 (§12.3) |
 | 3 self-averaging | CV of `s_k` at fixed age from the running moments; fit the exponent vs N (the plan's N^{-1/2} is the frozen-readout prediction) |
-| 4 Kaczmarz | `S(m)/S(0)` vs `κ²m/N` collapse across N for gated frozen, in `analyze.py` (for ungated frozen the variable is `m/N`, which needs ages up to ∝ N — the κ_min schedule of §5) |
+| 4 Kaczmarz | `S(m)/S(0)` vs `κ²m/N` collapse across N for gated frozen, the `_lt` file of F4 (§12.3) and a row of the checks table (for ungated frozen the variable is `m/N`, which needs ages up to ∝ N — the κ_min schedule of §5) |
 
 ## 7. Tests (`pytest`, run on the laptop before every push)
 
@@ -317,6 +316,8 @@ and can be added later if wanted. Probe evaluation uses `heads[k]` when
 8. `test_config`: grid expansion, task duration, bucketing and the age
    schedule; ungated runs get `T_burn`, `T_meas` and `ages` equal to those
    of the κ_min gated run at the same N.
+10. `test_plotting`: F1–F4 and the checks table render from a small
+   synthetic record set without a `plotting.save` warning (§12.7.1).
 7. `scripts/validate.py`: η-halving at fixed λ — the gap between SGD and the
    population curve should halve, consistent with the η² term in the plan;
    frozen-readout collapse; CV exponent.
@@ -372,7 +373,7 @@ Xeon results come back by `rsync`, not by git.
 |---|---|---|---|
 | L1 | `pytest tests` | tests 1–6 of §7 (~15 s) | nothing else is trusted until the kernels, projection, batching and the stored hash pass |
 | L2 | `python scripts/run_sweep.py --config configs/pilot.yaml` | in-process (`--workers 0`) pilot at N ∈ {10, 20}, κ = 1, all readouts, 2 seeds (~10 s) → `results/pilot/` | the smallest end-to-end exercise of the full protocol (burn-in, probes, moments, `.npz` schema) |
-| L3 | `python scripts/analyze.py results/pilot` | `summary.csv`, `curves.json`, `figures/{curves,mhalf,kaczmarz,norms,check2}/` for the pilot | look at S(m), E(m) (columns = N, traces = readouts), the norm trajectories (`norms/by_task`, `check2/traj_*`) and the check-1/2 output before spending Xeon time; a wrong sign, a non-stationary norm or a censored `m_half` shows here |
+| L3 | `python scripts/analyze.py results/pilot` | `summary.csv`, `curves.json`, `figures/{norms,curves,checks}/` for the pilot (§12.3) | look at the norm trajectories (F1, F2), S(m), E(m) (F3, F4) and the checks table before spending Xeon time; a wrong sign, a non-stationary norm or a ✗ shows here |
 | L4 | `python scripts/validate.py [--N-max 40 --seeds 4]` | validation 7: η-halving at fixed λ, Kaczmarz collapse for gated frozen, CV exponent → `results/validate/` | these are the physics checks that the equations, not just the code, are right; minutes on the laptop, so they run here, not on the Xeon |
 | L5 | `python scripts/bench.py --N 20 100 --B 1 32 128` | run-steps/s vs batch size | optional on the laptop; gives a baseline to compare against the Xeon number in X1 |
 
@@ -441,7 +442,7 @@ one width with `--N 100`.
   hashes differ, that is not an error, just a reason to compare curves
   instead of hashes.
 
-## 12. Weight-norm diagnostics (plots of how the norms evolve)
+## 12. Figures: weight norms vs task, memory vs age, and the checks table
 
 Purpose: see with our own eyes whether the norms are stationary across tasks
 (check 2) and what a single task does to them step by step, for every
@@ -473,7 +474,16 @@ needs installing). Mathtext for symbols (`$Q_{ii}$`, `$|a_i|\sqrt{Q_{ii}}$`,
 `$t\kappa^2/N$`), plain words otherwise. At most 4 major ticks per
 linear axis (`MaxNLocator(4)`), scientific offset text turned off
 (`axes.formatter.useoffset = False`); log axes use `LogLocator` with
-`numticks=4` and plain `10^k` labels.
+`numticks=4` and plain `10^k` labels. An axis that carries ≤ 6 discrete
+values (the sweep's N, a categorical cell axis) instead gets ticks at
+exactly those values with plain labels, log or not. Parameter values
+print through `plotting.fmt` (`:g`, so `δ₀ = 4`, `λ = 1`, never `4.0`);
+a figure-level number (a colour limit, a fitted slope) prints to 2
+significant figures, and small magnitudes get a scale in the axis label
+(`β (10⁻⁴ per lifetime)`) rather than `0.00025` tick labels. Quantities
+are named only through `plotting.QUANTITY_LABEL` (key → mathtext), never
+by their schema key (`aQ_act_post`, `dm_half`); file stems keep the keys.
+Captions wrap to the figure width.
 
 **Axes.** No top/right spines. Light grid (`alpha 0.25, lw 0.5`) on the
 major ticks only. Column titles `N = …` on the top row only; y-labels on
@@ -491,44 +501,57 @@ shared `#56B4E9`, gated frozen `#D55E00`, frozen `#E69F00`, task heads
 `#009E73`. Ungated conditions are also dashed (`READOUT_STYLE`) so
 gating is visible without colour. Width N, when it is a trace rather
 than a column, uses `N_SHADES` (one sequential blue, light → dark with
-N); the legend then lists N. Two sequential/diverging maps only:
-`viridis` for an ordered index (task number), `RdBu_r` centred at zero
-for signed quantities. Reference lines and error bars in `0.4` grey;
-burn-in shading `0.92` grey; flags in black with a red `×` (`#CC0000`).
-Nothing else introduces a colour.
+N); the legend then lists N. Where a marker stands in for a line
+(points, dumbbells), ungated readouts use hollow markers, the
+counterpart of dashing and of hatched boxes. Three maps only: `viridis`
+for an ordered index (task number), `RdBu_r` centred at zero for signed
+quantities. Reference lines and error bars in `0.4` grey; burn-in
+shading `0.92` grey (diagnostic figures only; F1/F2 shade nothing);
+not-applicable slots hatched `0.85` grey; a failed check in the table
+is `#CC0000` on a light red fill (§12.6). Sign is never a colour: the
+direction of a change is read from the zero line. Nothing else
+introduces a colour.
 
 **Lines and layering (bottom → top).** (1) burn-in `axvspan` and
 reference lines, `lw 0.8`; (2) per-task or per-seed overlays, `lw 0.6,
 alpha 0.08` (tasks) or `alpha 0.5` (seeds, ≤ 8 lines); (3) bands,
 `fill_between` with `alpha 0.2`, no edge; (4) the main trace per readout,
-`lw 1.6`; (5) medians and seed-means, `lw 2.2`, black when they summarise
+`lw 1.6` (on a per-task x-axis this is a block mean, §12.7 G10, never
+the raw per-task value); (5) medians and seed-means, `lw 2.2`, black when they summarise
 one readout's overlay, readout colour when several readouts share a
 panel; (6) markers only where there is one point per cell (dumbbells,
 m_half ticks), size 4–5. Half-boundary and other event lines dotted
 black `lw 0.8`.
 
-**Legend.** One per figure, in the first panel (upper right unless it
-covers data, then `loc="best"`), no frame, handles in the fixed readout
-order of §4 (`plotting.readout_legend(ax)`); overlays and bands are not
-listed, the suptitle or a one-line caption below it (`fig.text` at 9 pt,
+**Legend.** One per figure, as a single row above the panels and below
+the caption, with its height reserved in the layout
+(`plotting.fig_legend(fig, readouts, styles=None)`); never inside a
+panel, where it covers data. No frame, handles in the fixed readout
+order of §4. When line style means something other than gating in a
+figure, the readout handles are drawn solid and `styles` adds one
+handle per style meaning to the same row.
+Overlays and bands are not listed: the caption (`fig.text` at 9 pt,
 `0.3` grey) says what they are, e.g. "thin: individual tasks; black:
 median over tasks; band: 10–90 %".
 
 **Helpers in `plotting.py`.** `grid`, `save`, `cell_title`,
-`readout_legend`, `plot_readout(ax, x, y, ro, **kw)` (colour + style
+`plot_readout(ax, x, y, ro, **kw)` (colour + style
 from the tables), `shade_burnin(ax, T_burn, T_meas)` (shading plus the
 half-boundary line), `label_cols_N(axes, Ns)`, `overlay(ax, X, Y,
 color)` (thin lines + median + 10–90 % band in one call),
-`dumbbell(ax, x, y0, y1, se, color, flagged)`, `drift_map(ax, beta,
-d0s, lams, vmax)`, `readout_boxes(ax, values_by_readout, band=3)` (one
-box per readout in fixed order and colour, zero line, threshold band),
-`flag_bars(ax, frac_by_readout_quantity, counts)`. The existing `rcParams.update` block in `plotting.py`
-is replaced by the values above (`plotting.apply_style()`, called at
-import).
+`check_table(ax, marks, rows, cols)` (§12.6), and the §12.7 helpers
+`fig_legend`, `fmt`, `QUANTITY_LABEL`, `na_slot`, `block_mean`,
+`age_axis`. The diagnostic families (`--diag`, §12.3) keep `dumbbell`
+and `drift_map`. The existing `rcParams.update` block in
+`plotting.py` is replaced by the values above (`plotting.apply_style()`,
+called at import).
 
 **Figure-level checks** (`plotting.save` warns): any axis with > 6
 ticks, any text smaller than 8 pt, a panel narrower than 2 in, a figure
-wider than 6 panels, and a figure without a suptitle.
+wider than 6 panels, a figure without a suptitle, any text extending
+past the figure edge, a legend inside an axes, and a panel whose
+plotted values are all identical (that panel should be an n/a slot,
+§12.7 G4).
 
 ### 12.1 What "the norm" is, and "before rescaling"
 
@@ -542,7 +565,7 @@ Record, per unit, `Q_i = |W_i|²/D` and `a_i²`; reduce to
 | `a2_act`, `a2_all` | mean of `a_i²` over active / all units | readout norm; frozen readouts should be flat exactly |
 | `aQ_act` | mean over active units of `|a_i|√Q_i` | invariant under the projection (A′B′ = AB), so this is the *only* norm that is the same before and after rescaling and the one to compare across readouts |
 | `heads_fro2` | mean over stored heads of `|heads[k]|²` (task-heads readout only) | stored heads are divided by f every projection, so their norm drifts even though `a` is reset per task |
-| `Q_q05`, `Q_q50`, `Q_q95`, `aQ_q05`, `aQ_q95` | quantiles of `Q_i` and `|a_i|√Q_i` over active units | the write-up commits to these: a mean can be stationary while a few units run away (§12.6 C2-A bands, `aQ_max` row) |
+| `Q_q05`, `Q_q50`, `Q_q95`, `aQ_q05`, `aQ_q95` | quantiles of `Q_i` and `|a_i|√Q_i` over active units | the write-up commits to these: a mean can be stationary while a few units run away (the 5 %/95 % lines and `aQ_max` row of F1/F2, §12.3) |
 
 **Before rescaling.** The projection of §3.4 runs after *every* step, not
 once per task, so there is no single "end of training, before rescaling"
@@ -595,74 +618,124 @@ population sweep is `T × n_steps = 2000 × 40` floats per run per quantity,
   A trace run also writes its ordinary `batch_*.npz`, so §12.1 figures can
   be made from the same sweep.
 
-### 12.3 The figures (`scripts/plot_norms.py`)
+### 12.3 The figures: four families, nothing else by default
 
-Conventions of §12.0 throughout: ungated dashed; columns indexed by N;
-burn-in window shaded in every task-axis panel; one figure = one
-`(solver, η)` and one of the cells below; file names carry the cell
-exactly as `analyze.py` does.
+The core question is whether the weight norms are bounded, where they
+stop trending (burn-in → steady state), and how that scales with N; the
+memory curves S(m), E(m) are the second question. Everything else is a
+check and goes in one table (§12.6). So the default output of
+`analyze.py` is four figure families, built from two choices: **what is
+on the y-axis** (norms vs task, or S(m)/E(m) vs age) and **what the
+traces are** (the readouts at fixed N, to compare methods; or N at a
+fixed readout, to see the scaling).
 
-**A. Norms vs task** (`figures/norms/by_task/`). One figure per
-(κ, δ₀, λ, solver, η); rows = quantity (`Q_act_pre`, `a2_act_post`,
-`aQ_act`, `logf_sum`), columns = N, traces = readouts, x = task index,
-seeds as thin lines in the readout colour with the seed-mean on top. Plot
-`Q_act_pre` (not post) as the headline row: post is pinned by construction
-for the projected readouts and shows nothing. Add a second file,
-`..._prepost.png`, with `Q_act_pre − Q_act_post` and `logf_sum` so the size
-of the rescaling is visible on its own axis. Also, since §9.1 L3 is where
-problems are caught, print the check-2 half-window comparison for every
-key of §12.1 next to the figure.
+| | traces = readouts, columns = N | traces = N, columns = readouts |
+|---|---|---|
+| norms vs task | **F1** `norms/norms_…` | **F2** `norms/normsN_…` |
+| S(m), E(m) vs age | **F3** `curves/curves_…` | **F4** `curves/curvesN_…` |
 
-**B. Norms vs step within a task** (`figures/norms/by_step/`). One figure
-per (readout, solver, η, κ, δ₀, λ) — the "method/combination" — with
-columns = N and rows = quantity (`Q_act`, `a2_act`, `aQ_act`, `log f`).
-In each panel: every task of the measurement window as a line at α ≈ 0.05
-in the readout colour, the across-task **median** as a heavy black line,
-the 10–90 % band as a light fill, x = step within the task. Burn-in tasks
-are left out of the overlay (or drawn in grey if wanted) so the median is a
-steady-state statistic. Two seeds → two panels side by side or two
-columns; do not pool seeds into one median without saying so.
+Each family is one file per cell (κ, δ₀, λ, solver, η), stems as in
+§12.4. The pilot gives 4 cells → 16 files (+ the `_lt` variants below);
+Stage 1 gives 48 cells per solver, and `--cells d0=0,lam=1` restricts
+to the ones being looked at. The old `check2/`, `mhalf/`, `kaczmarz/`
+and `norms/by_step/` families are produced only with `--all` (or
+`--diag <family>`) when a check in the table fails and needs locating;
+they are not part of the normal look.
+
+**Common to F1 and F2 (norms vs task).** Rows = `Q_act_pre`,
+`a2_act_post`, `aQ_act_post` (mean |aᵢ|√Qᵢᵢ), `aQ_max_post`,
+`logf_sum` — the §12.1 quantities, S(0) left to F3/F4; `heads_fro2` as
+a sixth row only when the task-heads readout is in the figure (§12.5
+item 9). The §12.1 quantile scalars (5 % and 95 % of `Qᵢ` and
+`|aᵢ|√Qᵢᵢ` over active units) are drawn as two thin lines in the trace
+colour and style. **x = task index t over the whole stream, 0 … T−1**;
+nothing is shaded: the figure is for seeing with one's own eyes where a
+curve stops trending, so it must not presuppose where the burn-in ends.
+The only marks are a dotted black line at the half boundary
+`T_burn + T_meas/2` ("first half | second half", the split check 2
+uses) and, at the top of the top row, a secondary axis in lifetimes
+`t κ_s²/N` (κ_s = schedule κ, §5). Each trace is the block mean of
+§12.7 G10 (blocks of half a lifetime, mean over block × seeds, ±1 s.e.
+band) with the raw per-task seed mean faint behind it; individual seeds
+are not drawn. A row that is constant by construction for a trace
+(`logf_sum` for the two frozen readouts; `a2_act_post` for ungated
+frozen) is left out of that panel and named in the caption (§12.7 G4).
+Reading: a curve that flattens well before the dotted line and stays
+flat after it = bounded, steady; one still bending at the dotted line =
+burn-in too short for that cell (lengthen `T_factor`); monotone through
+the stream = no steady state at that (δ₀, λ).
+
+**F1. Norms vs task, traces = readouts**
+(`norms/norms_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}`). `plotting.grid(5,
+len(Ns), sharex="col", sharey="row")`; columns = N; traces = the five
+readouts in `READOUT_COLOR`/`READOUT_STYLE`, legend above the panels.
+Every trace at one N shares one task axis and one half boundary (the
+κ_s schedule of §5; see the note in §12.7).
+
+**F2. Norms vs task, traces = N**
+(`norms/normsN_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}`). `plotting.grid(5,
+len(readouts), sharey="row")`; columns = readouts (column title = the
+readout name in its colour, dashed for ungated); traces = N in
+`N_SHADES`, light → dark, legend lists N. With x = t the streams have
+different lengths (T = 20N/κ_s²) and the half boundary is one dotted
+line per N, in that N's shade; the columns share the x-range of the
+largest N. A second file, `normsN_lt_…`, is the same figure with **x =
+t κ_s²/N (lifetimes)**: the half boundary is then one line for all N
+and the N traces lie on top of each other if the burn-in is a fixed
+number of lifetimes — which is the scaling claim — and fan out if it is
+not. Both files are written; the `_lt` one is the one to look at first.
+
+**F3. S(m), E(m) vs age, traces = readouts**
+(`curves/curves_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}`): the §5 figure,
+unchanged in content — rows S, E; columns N; traces readouts; band ±1
+s.e.m. over seeds — with the age axis of §12.7 G13 (symlog, age 0
+plotted) and the few-sample thinning of G14. No `m_half` ticks (the
+number is in `summary.csv` and the checks table).
+
+**F4. S(m), E(m) vs age, traces = N**
+(`curves/curvesN_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}`): rows S, E;
+columns = readouts; traces = N in `N_SHADES`. A second file,
+`curvesN_lt_…`, plots `S(m)/S(0)` and `E(m)` against **`m κ_s²/N`**:
+this is the collapse variable of check 4, so the old `kaczmarz/` figure
+is this file's S row restricted to the frozen readouts and is no longer
+made separately. Collapse across N in the `_lt` file = the lifetime
+scales as N/κ²; a fan = it does not, and the direction of the fan says
+which way.
 
 ### 12.4 Figure and data organisation
 
 Every figure is a `.png` (§12.0); the tree lists stems only. A stem names the cell it belongs to in the fixed order
 `k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}`, dropping only the fields the figure
-varies over (so a figure whose columns are N has no `N` in its name, and
-one with x = δ₀, λ has no `d`/`lam`). `{readout}` appears only when the
-figure is for a single readout.
+varies over. `{readout}` appears only when the figure is for a single
+readout. `_lt` marks a lifetimes x-axis.
 
 ```
 results/<sweep>/figures/
-  curves/      curves_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}             (S, E vs age; §5)
-  mhalf/       mhalf_vs_N_k{κ}_d{δ₀}_{solver}_eta{η}   mhalf_vs_E0_k{κ}_{solver}_eta{η}
-  kaczmarz/    kaczmarz_{readout}_k{κ}_lam{λ}_{solver}_eta{η}
-  checks/      cv_exponent_{solver}_eta{η}
-  norms/                                                            (§12.3)
-    by_task/   norms_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}   norms_prepost_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}
-    by_step/   steps_{readout}_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}   steps_summary_{solver}_eta{η}
-  check2/                                                           (§12.6)
-    traj_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}            (C2-A)
-    halves_{quantity}_{solver}_eta{η}   halves_ratio_{quantity}_{solver}_eta{η}   (C2-B)
-    drift_{quantity}_{solver}_eta{η}                  (C2-C)
-    Sm_halves_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}       (C2-D)
-    summary_{solver}_eta{η}   summary_rho_{solver}_eta{η}   summary_beta_{solver}_eta{η}   (C2-E boxes)
-    flags_{solver}_eta{η}                             (C2-E bars)
-    summary_{solver}_eta{η}.npz   check2_cells.csv    (figure data, not for reading)
-  INDEX.md     written by analyze.py: one line per figure (family, cell, file), so the folder is searchable
+  norms/     norms_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}                 (F1)
+             normsN_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}   normsN_lt_…   (F2)
+  curves/    curves_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}                (F3)
+             curvesN_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}  curvesN_lt_…  (F4)
+  checks/    checks_{solver}_eta{η}            the ✓/✗ table (§12.6)
+             checks_{solver}_eta{η}.csv        every number behind a mark
+  INDEX.md   written by analyze.py: one line per figure (family, cell, file)
+  diag/      only with --all / --diag: mhalf/, kaczmarz/, by_step/, check2/ (the
+             C2-A … C2-E and cv_exponent figures of the previous revision, kept
+             in plot_check2.py / plot_norms.py for locating a failed check)
 results/<sweep>/traces/   run_<id>.npz  manifest.json
 results/validate/figures/ eta_halving  kaczmarz_collapse  cv_exponent   (validate.py; same conventions)
 ```
 
-`analyze.py --fig-dir` keeps working but now creates the subfolders and
-calls `plot_norms.py` (fills `norms/`) and `plot_check2.py` (fills
-`check2/`) unless `--no-norms` / `--no-check2`; both can also be run on
-their own against a sweep. `validate.py` writes into
-`results/validate/figures/` with the same style (§12.0). Figure data (the arrays actually plotted)
-are written next to the figure as `.npz` with the same stem when
-`--save-figdata` is given, so a figure can be restyled without rerunning
-the merge.
+`analyze.py results/<name>` writes `summary.csv`, `curves.json`, the
+four families and the checks table; `plot_norms.py` draws F1/F2 and is
+called by `analyze.py`; `plot_check2.py` computes the check statistics
+behind the table and, only under `--all`, the diagnostic figures.
+Figure data (the arrays actually plotted) are written next to the
+figure as `.npz` with the same stem when `--save-figdata` is given.
 
 ### 12.5 Pushback and suggestions (decide before implementing)
+
+Items 3–5, 8 and 10 concern the per-step overlay (`by_step/`), which is
+now a `--diag` family; they stand but are not on the default path.
 
 1. **"Before rescaling" is not one number here.** Because the projection
    is per step, the pre-projection norm is one step away from the pinned
@@ -696,8 +769,8 @@ the merge.
    is mostly units that did nothing this task. Always plot `Q_act` and
    show `Q_all` as a dotted companion rather than mixing them.
 7. **Per-unit distributions, not just means.** Adopted: the quantile
-   scalars are in the §12.1 table and the write-up; family A and C2-A draw
-   the 5–95 % band.
+   scalars are in the §12.1 table and the write-up; F1 and F2 draw the
+   5 % and 95 % lines.
 8. **Figure count.** Family B as specified is 5 readouts × 2 κ × 2 δ₀ ×
    2 λ × 3 N ≈ 120 panels per solver. Keep the per-(readout, combination)
    files for inspection but add one summary figure per solver:
@@ -706,7 +779,7 @@ the merge.
 9. **Task-heads readout.** `a` is reset every task, so `a2_act` by step is
    the head's trajectory from its fresh draw, while the stored heads are
    being rescaled by 1/f behind it; `heads_fro2` vs task is the quantity
-   that can blow up. Include it in family A for that readout only.
+   that can blow up. Include it as a sixth row of F1/F2 for that readout only.
 10. **Trace runs are a separate config, not a flag on the sweep.** This
     keeps `batch_*.npz` small and the sweep bit-identical with or without
     tracing (test 9). If per-step data for the full grid is ever wanted,
@@ -714,143 +787,155 @@ the merge.
     carry instead of the raw trace — `(n_steps, n_quant, 2)` per run,
     independent of T — and the median becomes a mean ± std.
 
-### 12.6 Plots that verify check 2 (bounded norms, steady state without weight decay)
+### 12.6 The checks table (`checks/checks_{solver}_eta{η}.png`)
 
-Check 2 in the write-up compares the half-window means of mean `Q_ii`,
-mean `a_i²`, mean and max `|a_i|√Q_ii`, `S(0)` and `S(m)`; its section
-"Verifying the steady state" (`\label{sec:check2}`) describes in prose
-the five figures specified here, and the two must be kept in step.
-That is one bit per quantity; the figures below show the whole trajectory
-so one can see *where* a curve stops trending, whether "flat in the
-second half" is an asymptote or a slower drift, and where in the (δ₀, λ)
-plane the steady state is lost. All five families go to
-`figures/check2/` and are produced by `scripts/plot_check2.py` (called by
-`analyze.py`). Two facts shape what is worth plotting:
+The checks of §6 and the stationarity statistics of the write-up's
+`sec:check2` are reported as **one PNG table per (solver, η)**, not as
+figures. The table answers "did it pass" at a glance; the numbers behind
+every mark are in `checks_{solver}_eta{η}.csv` (one row per mark, with
+the statistic, its threshold and the worst cell), and the diagnostic
+figures of the previous revision are made on demand with `--diag` to
+locate a ✗. The table is drawn by `plotting.check_table(ax, marks,
+rows, cols)` and follows §12.0 (text ≥ 8 pt, one suptitle, nothing
+else).
 
-- mean `Q_ii` is pinned by the projection for the three projected
-  readouts, so for them it is flat by construction and says nothing; the
-  non-trivial norm checks are `|a_i|√Q_ii` (projection-invariant) for all
-  readouts, `Q_ii` for the two frozen readouts, and `logf_sum` (§12.1)
-  for the projected ones — the quantity that would grow if the
-  *unprojected* dynamics had no steady state. State this in the write-up.
-- the check-2 standard error treats tasks as independent, so it is
-  over-sensitive to slow drift (PLAN §5); the plots therefore always show
-  the sign and size of the half-to-half change, not only the flag.
+**Layout.** Columns = readout × N, grouped by readout (readout name
+once per group in its colour; N under it); rows = the checks below.
+Each cell holds a mark and, under it at 8 pt, the number it was judged
+on: **✓** (black) passed; **✗** (`#CC0000`, on a light red fill) failed;
+**~** (`0.4` grey) "within tolerance but worth a look" (one of the ≤ 48
+cells flagged, or a slope on the wrong side by less than its s.e.);
+**—** on hatched `0.85` grey = not applicable by construction (§12.7
+G4). Nothing else is coloured.
 
-**C2-A. Trajectories vs task, burn-in and half boundary marked**
-(`check2/traj_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}`). `plotting.grid(6, len(Ns), sharex="col", sharey="row")`. Rows: `Q_act_pre`, `a2_act`, `aQ_mean`, `aQ_max`,
-`logf_sum`, `S(0)`. Columns: N. Traces: readouts (`plot_readout`), seeds
-as thin lines (`lw 0.5, alpha 0.6`) with the seed-mean on top (`lw 1.25`).
-**x-axis = task index in lifetimes, `t κ²/N`**, so the columns are
-comparable and "several lifetimes of burn-in" can be read off; secondary
-top axis in raw task index on the top row only. `shade_burnin` on every
-panel, dotted line at the half boundary. Per-unit spread: the 5–95 %
-band of `Q_i` and of `|a_i|√Q_i` over active units (the quantile scalars
-of §12.1) as `fill_between` in the readout colour, `alpha 0.2`; the
-`aQ_max` row is what catches a runaway unit while the mean stays flat.
-Reading: flat before `T_burn` ends = good; still bending at `T_burn` =
-burn-in too short (lengthen `T_factor`, do not touch the check);
-monotone through the window = no steady state at that (δ₀, λ).
+**Rows and pass criteria** (thresholds are the plan's; set them once in
+`plot_check2.py:CRITERIA` and print them in the caption):
 
-**C2-B. Half-window dumbbells across the grid**
-(`check2/halves_{quantity}_{solver}_eta{η}`, one file per
-quantity in the list above). `plotting.grid(len(readouts),
-len(Ns), sharey="row")`; rows =
-readouts (row colour = readout colour), columns = N. In each panel the
-x-axis is the (δ₀, λ) cells (categorical, label `δ₀=…, λ=…`, rotated 90°
-at 5 pt); for each cell a dumbbell: open circle at `half0`, filled circle
-at `half1`, joined by a line in the readout colour, ±3 s.e. error bars in
-`0.5` grey, `lw 0.5`; a pair flagged by check 2 is drawn in black with a
-red `×` above it. A second row of the same file (or a companion
-`halves_ratio_*.png`) plots `half1/half0 − 1` on a symmetric axis with a
-zero line, markers coloured by sign (`#D55E00` up, `#0072B2` down): a
-grid of small same-sign ratios is drift even when nothing is flagged
-individually. This is the write-up's check in one figure per solver.
+| row | statistic (per readout, N; worst over (κ, δ₀, λ) cells) | ✓ | ~ | ✗ |
+|---|---|---|---|---|
+| 1 gauge: Δᵢ pinned | max over tasks of `max|Δᵢ − Δ₀|` | < 1e-10 | < 1e-8 | else |
+| 1 gauge: u_c invariant | max over tasks of `|u_c^after − u_c^before|` | < 1e-10 | < 1e-8 | else |
+| 2 bounded: mean |a|√Q | cells with |z| > 3 (`z` = (half1 − half0)/se) | 0 | 1 | ≥ 2 |
+| 2 bounded: max |a|√Q | same | 0 | 1 | ≥ 2 |
+| 2 bounded: Q_act (pre) | same | 0 | 1 | ≥ 2 |
+| 2 bounded: a²_act | same (— for ungated frozen) | 0 | 1 | ≥ 2 |
+| 2 bounded: Σ log f | same (— for the two frozen readouts) | 0 | 1 | ≥ 2 |
+| 2 steady memory: S(0) | same | 0 | 1 | ≥ 2 |
+| 2 steady memory: m½ | cells with `|Δm½| > 2 s.e.(m½ over seeds)`; censored cells counted separately | 0 | 1 | ≥ 2 or any censored |
+| 2 drift: β | cells with `|β/se_β| > 3` for mean |a|√Q (and Q_act pre for the frozen readouts) | 0 | 1 | ≥ 2 |
+| 3 self-averaging | slope γ of log CV(s, m = 1) vs log N over the sweep's N (one value per readout, so the same mark in every N column) | γ ≤ −0.4 | −0.4 < γ ≤ −0.2 | else |
+| 4 collapse | max over m of the spread across N of `S(m)/S(0)` at matched `m κ_s²/N` (frozen readouts; — for the others) | < 0.05 | < 0.10 | else |
+| feasibility | runs skipped for infeasible δ₀ (§3.5), printed as `k/n` | 0 | ≤ 10 % | else |
 
-**C2-C. Drift-rate map over (δ₀, λ)**
-(`check2/drift_{quantity}_{solver}_eta{η}`). For each run fit
-`log q(t) = c + β·(t κ²/N)` by least squares over the measurement window
-(β = fractional change per lifetime); average β over seeds. `plotting.grid(
-len(readouts), len(Ns))`; each
-panel is `imshow` of β on the (δ₀ rows, λ columns) grid, `RdBu_r`,
-`vmin=−vmax` with `vmax` shared across the whole figure (printed in the
-suptitle), one colorbar per figure at the right with 3 ticks;
-cells with |β| above `3·se(β)` outlined in black; infeasible/skipped
-cells hatched grey. The quantity that defines "steady state lost" is
-`aQ_mean` for all readouts and `Q_act_pre` for the frozen ones; also make
-the map for `logf_sum`. This gives the boundary in the (Δ₀, Λ) plane that
-the write-up's sentence "growth beyond the burn-in means no steady state
-at that (Δ₀, Λ)" is really asking for, and it does not depend on where
-the halves are cut.
+Row 2's `z` treats consecutive tasks as independent, so it is
+over-sensitive to slow drift (§5); that is why one flagged cell is `~`
+and not `✗`, and why the table prints the count rather than only the
+mark. Check 3's γ needs ≥ 3 widths to mean anything; with two (the
+pilot) the cell prints the two-point slope in grey and no mark. The
+checks that need figures to interpret (where in (δ₀, λ) a drift is;
+whether a bend is burn-in or no steady state) are answered by F1/F2,
+not by the table.
 
-**C2-D. `S(m)` and `E(m)` from the two halves overlaid**
-(`check2/Sm_halves_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}`). Same
-grid as the §5 curves figure (rows `S`, `E`; columns N; traces readouts)
-but each readout drawn twice: half 0 as a solid line, half 1 as the same
-colour with `READOUT_STYLE` overridden to dotted (`":"`, `lw 1.0`) — the
-gated/ungated dashing is dropped in this figure since the legend lists
-readouts by colour. `m_half` of each half marked by a small vertical tick
-on the x-axis in the readout colour, and `Δm_half = m_half(1) −
-m_half(0)` printed in the panel corner at 5 pt. Curves on top of each
-other = the memory statistics are stationary, which is the claim the rest
-of the experiment relies on; a shift in `m_half` between halves is the
-concise number and is also written to `summary.csv`.
+**Output.** `plot_check2.py` also prints the table as text to stdout
+(the same marks, so a run log carries the verdict) and the three worst
+cells per ✗. `check2_cells.csv` (per-cell statistics, columns as before)
+is still written as the machine-readable export; `summary_*.npz` is
+written only with `--save-figdata`.
 
-**C2-E. Check-2 summary: distributions of the drift statistics**
-(`check2/summary_{solver}_eta{η}`, plus `check2/flags_{solver}_eta{η}`).
-The question check 2 asks — *is any readout drifting, in which quantity,
-and does it get better or worse with N* — is a comparison of
-distributions across the (κ, δ₀, λ) grid, so it is drawn as one. Three
-statistics per run-cell, all dimensionless so they share axes across
-quantities:
+**What the write-up cites.** The checks table replaces the table and
+the five check-2 figures in `sec:check2`; the prose there must be
+brought in step (what each row tests, the thresholds, and that F1/F2
+are where a failure is read).
 
-- `z = (half1 − half0) / se` — the check-2 statistic itself; |z| > 3 is
-  the flag. Sign carries the direction of drift.
-- `ρ = half1/half0 − 1` — the size of the change, which `z` hides when
-  `se` is tiny.
-- `β` — the per-lifetime drift rate from C2-C, with its own `se_β`.
+### 12.7 Readability notes from the pilot figures
 
-**Summary figure** (`summary_*`): `plotting.grid(len(quantities),
-len(Ns), sharey="row")`; rows = quantity (`aQ_mean`, `aQ_max`, `Q_act_pre`,
-`a2_act`, `logf_sum`, `S(0)`, `Δm_half/m_half_0`), columns = N. In each
-panel, one **box plot per readout** in the fixed readout order and
-colour (box = IQR, whisker = 5–95 %, median line black, outliers as
-small dots in the readout colour, ungated boxes hatched since dashing
-does not apply), the box pooling that readout's (κ, δ₀, λ) cells with
-seeds averaged first (so a box summarises ≤ 48 cells, never seeds).
-The y-variable is `z`; a `0.4` grey zero line and a `0.92` grey band at
-|z| ≤ 3 make the flag threshold visible without a legend. A box that sits
-inside the band is a quantity that is stationary across the whole grid
-for that readout; a box straddling the band with a long tail is a few
-bad (δ₀, λ) cells (go to C2-C to find them); a box entirely outside is
-systematic drift (go to C2-A). Reading across a row shows whether the
-problem shrinks with N — the self-averaging claim — which no table shows.
-A companion file `summary_rho_*` is the same layout with `ρ` on a
-symmetric log-ratio axis (`symlog`, linthresh 0.01) for the size of the
-effect, and `summary_beta_*` with `β/se_β`.
+Reviewed on 2026-10-29: `results/pilot/figures/checks/` and
+`results/pilot/figures/check2/` — population solver, η = 1, N ∈ {10,
+20}, κ = 1, δ₀ ∈ {0, 4}, λ ∈ {1, 4}, 2 seeds. Most of those figures are
+now diagnostics (§12.3), so only the findings that bear on F1–F4 and
+the table are kept here; the changes to the figure standard are in
+§12.0.
 
-**Flag-fraction bars** (`flags_*`): the one-glance version for the
-write-up. `plotting.grid(1, len(Ns))`; in each panel a horizontal
-grouped bar chart, y = quantity (same order as the rows above), one bar
-per readout in readout colour, bar length = fraction of (κ, δ₀, λ) cells
-flagged (|z| > 3), with the count printed at the bar end (`"3/48"`) so
-an empty-looking bar is still legible. A `0.4` grey reference line at
-the fraction expected from chance at the 3-s.e. level (0.3 %) shows what
-"no drift" looks like. Bars sorted by the fixed readout order, not by
-length, so the same readout is always in the same place across panels.
+Not a plotting issue, but visible in these figures: §5's schedule κ
+(`kappa_sched`) is not in the code yet (nothing in `mup/` defines it,
+and the pilot's ungated runs have T = 20). That is why the ungated S(m)
+traces stop at age ≈ 20 while the gated ones run to ≈ 300, and why the
+ungated norm traces have one point per lifetime. Implement §5 and rerun
+the pilot (§9.1 L2–L3) before judging those traces.
 
-**Half-life shift** (last row of `summary_*`): `Δm_half/m_half_0` per
-cell is a box like the others (the natural zero band is the seed scatter
-of `m_half`, ±2 s.e. over seeds, drawn in the same grey); censored cells
-are excluded and their number printed in the panel corner.
+- **G1. Legend outside the panels.** The legend covered data in every
+  figure that had one. `fig_legend` (§12.0 Legend) for F1–F4.
+- **G2. Display labels, never schema keys.** `aQ_act_post`, `logf_sum`,
+  `S0` appeared in titles and axes. `QUANTITY_LABEL` is the only source
+  of names (§12.0 Text).
+- **G3. Numbers.** `κ = 1.0`, `δ₀=0.0`, colorbar ticks `0.00025`.
+  `fmt` and the scale-in-label rule (§12.0 Text).
+- **G4. Constant by construction is n/a, not data.** Σ log f is
+  identically 0 for the two frozen readouts and a²_act is constant for
+  ungated frozen; the pilot drew them as flat lines, zero-height boxes
+  and, divided by their own rounding noise, as a "drift". `NA_BY_CONSTRUCTION
+  = {(key, readout): reason}` in `plot_check2.py` — (`logf_sum`,
+  `frozen`/`gated_frozen`): "not projected, f = 1"; (`a2_act_post`,
+  `frozen`): "a fixed, all units active"; (`Q_act_post`, the projected
+  readouts): "pinned by the projection". No statistic is computed for
+  these; F1/F2 leave the trace out and say so in the caption; the table
+  shows —. `gated_frozen` keeps `a2_act` (its active set changes every
+  task).
+- **G10. Block means on per-task axes.** The task-to-task scatter (S(0)
+  moved between ≈ 0 and 0.9 from one task to the next) was far larger
+  than the drift the figure is meant to show, and five per-task traces
+  tangled into one band. `block_mean(x, y, w)` with `w = max(1,
+  round(N/(2κ_s²)))` tasks (half a lifetime; 5 tasks at N = 10, κ = 1):
+  mean over the block and the seeds, ±1 s.e. band over the block's
+  task × seed values, the raw per-task mean faint behind it. Blocks are
+  cut at the half boundary so a block never mixes the two halves.
+- **G11. Captions fit.** The check-3 caption ran off both sides.
+  `caption` wraps to the figure width; `_check` warns about text outside
+  the figure.
+- **G12. Ticks at the sweep's N.** A log axis over N = 10, 20 labelled
+  only "10¹". Discrete-value axes (§12.0 Text); applies to the γ fit
+  behind the table only now.
+- **G13. Age 0 on the age axis.** `ages[1:]` on a log axis dropped
+  S(0). `age_axis(ax)`: `symlog`, `linthresh = 1`, `linscale = 0.3`,
+  age 0 plotted (F3, F4).
+- **G14. Few-sample ages do not set the scale.** In the pilot the
+  task-heads E(m) climbed to ≈ 8 over the last few ages (half 1, κ = 1,
+  δ₀ = 0, λ = 1) and set the E range to 0–8 while every other trace
+  stayed below 2.5. Fewer tasks contribute at the oldest ages, but the
+  climb may be real (stored heads are rescaled by 1/f every step, §12.5
+  item 9), so it must stay visible without flattening the rest: ages
+  where a trace's pooled count is below 25 % of its maximum are drawn
+  thin (`lw 0.6`, α 0.5) and kept out of the autoscaling, out-of-range
+  points get an edge marker, and the count at the last age goes in the
+  caption (F3, F4).
 
-**What the write-up cites.** The summary figure and the flag bars replace
-the table in the write-up's `sec:check2` (five figures, not four; keep
-the prose in step). The full per-cell statistics are still written, but
-as figure data — `check2/summary_{solver}_eta{η}.npz` (arrays indexed by
-`(quantity, readout, N, κ, δ₀, λ)` for `half0, half1, se, z, rho, beta,
-se_beta, m_half_0, m_half_1, flag, censored`) with `--save-figdata`, and
-`check2/check2_cells.csv` as a machine-readable export — so a specific
-number can be looked up.
-`plot_check2.py` prints only the flag counts per (readout, quantity) and
-the worst three cells by |z|.
+Findings that applied only to the now-diagnostic figures (box plots
+of four values, per-panel y-ranges, sign colours, flag marks, the
+`m_half` tick bug in `Sm_halves`, the one-panel check-3 figure) are
+recorded in the git history of this file; if a `--diag` figure is
+brought back into regular use, fix those first.
+
+#### 12.7.1 Order of work and acceptance
+
+1. `plotting.py`: `fmt`, `QUANTITY_LABEL`, `fig_legend`, caption
+   wrapping, discrete-value ticks, `age_axis`, `block_mean`,
+   `na_slot`, `check_table`, and the `_check` warnings of §12.0; remove
+   `UP`/`DOWN`, `boxes_by_readout`, `flag_bars` and the in-panel
+   `readout_legend`.
+2. `plot_norms.py`: F1 and F2 (+ `_lt`); drop the burn-in shading and
+   the `norms_prepost` file (pre − post is one step of drift and is
+   covered by `logf_sum`); `by_step/` behind `--diag`.
+3. `analyze.py`: F3 with `age_axis`/`fig_legend`; F4 (+ `_lt`); the
+   `mhalf/`, `kaczmarz/`, `cv_exponent` figures behind `--diag`.
+4. `plot_check2.py`: `NA_BY_CONSTRUCTION`, `CRITERIA`, the table and
+   its CSV and stdout form; C2-A … C2-E behind `--diag`.
+5. Test 10 (`tests/test_plotting.py`, §7): render F1–F4 and the table
+   from a small synthetic record set (two widths, two cells, gated and
+   ungated readouts) and fail on any `plotting.save` warning.
+6. `python scripts/analyze.py results/pilot` (§9.1 L3; after §5's
+   `kappa_sched` if it has landed), then check by eye: `figures/` holds
+   only `norms/`, `curves/`, `checks/`, `INDEX.md`; every legend above
+   the panels; no shaded burn-in; the half boundary one dotted line per
+   trace set; the `_lt` files of F2/F4 overlay their N traces on one
+   axis; every table cell legible at 100 % zoom.
+7. Keep the write-up's `sec:check2` prose in step (§12.6).

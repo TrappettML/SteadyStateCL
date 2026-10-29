@@ -56,9 +56,13 @@ class RunRecord:
         """Condition key ``(N, kappa_label, readout, delta0, lam, solver, eta)``."""
         return tuple(getattr(self.run, k) for k in COND_KEYS)
 
-    def lifetimes(self) -> np.ndarray:
-        """Task index in lifetimes, ``t κ²/N`` (κ = √N for an ungated run, so simply ``t``)."""
-        return np.arange(self.T) * self.run.kappa ** 2 / self.run.N
+    def kappa_sched(self, kappa_min: float = 1.0) -> float:
+        """Schedule κ of PLAN.md §5: the run's κ when gated, ``kappa_min`` (the sweep's smallest gated κ) when ungated."""
+        return float(self.run.kappa) if is_gated(self.run.readout) else float(kappa_min)
+
+    def lifetimes(self, kappa_min: float = 1.0) -> np.ndarray:
+        """Task index in lifetimes, ``t κ_s²/N`` with κ_s the schedule κ (``kappa_sched``)."""
+        return np.arange(self.T) * self.kappa_sched(kappa_min) ** 2 / self.run.N
 
     def curve(self, halves=(0, 1)) -> dict:
         """``S``, ``E``, ``cv_s``, ``cv_e``, ``n`` of this run as (n_ages,) arrays."""
@@ -96,6 +100,12 @@ def load_runs(out_dir: str) -> tuple[list[RunRecord], list[str]]:
             mom = {f: np.asarray(res[f][i]) for f in Moments.FIELDS}
             records.append(RunRecord(r, sc, mom, np.asarray(res["ages"]), T_burn, T_meas, float(res["alpha_task"][i])))
     return records, skipped
+
+
+def kappa_min(records: Iterable[RunRecord]) -> float:
+    """Smallest κ among the gated records (the schedule κ of ungated runs, PLAN.md §5); 1.0 when there are none."""
+    ks = [r.run.kappa for r in records if is_gated(r.run.readout)]
+    return float(min(ks)) if ks else 1.0
 
 
 def group_by(records: Iterable[RunRecord], fields: tuple) -> dict:

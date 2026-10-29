@@ -4,9 +4,9 @@ Implementation of `PLAN.md` (JAX, float64, CPU).  Run everything from this
 directory with the project venv active (`code/sscl_env`).
 
 ```bash
-pytest tests                                              # 19 tests, ~15 s
+pytest tests                                              # 27 tests, ~30 s
 python scripts/run_sweep.py --config configs/pilot.yaml   # laptop pilot, ~10 s
-python scripts/analyze.py results/pilot                   # summary.csv, curves.json, figures/
+python scripts/analyze.py results/pilot                   # summary.csv, curves.json, figures/{norms,curves,checks}/ (--all for diagnostics)
 python scripts/validate.py                                # η-halving, Kaczmarz collapse, CV exponent
 python scripts/bench.py --N 20 100 --B 1 32 128           # run-steps/s vs batch size
 ```
@@ -33,10 +33,10 @@ finished batches are skipped on rerun, so an interrupted sweep resumes.
 | `mup/config.py` | `Config` (YAML), `Run`, task duration (§3.6), grid → runs → batches |
 | `mup/io.py` | `.npz` per batch + JSON manifest, resume |
 | `mup/driver.py` | subprocess pool with thread pinning and optional `numactl` |
-| `mup/plotting.py` | the only style file (PLAN.md §12.0): panel-sized PNG grids, fixed readout colours, `grid`/`save`/`overlay`/`dumbbell`/`drift_map` helpers and figure-level checks |
+| `mup/plotting.py` | the only style file (PLAN.md §12.0, §12.7): panel-sized PNG grids, fixed readout colours, `QUANTITY_LABEL`, the figure legend row, `block_mean`/`dist_by_readout`/`flag_table`/`drift_map` helpers and figure-level checks |
 | `mup/results.py` | per-run records from batch files (`load_runs`), grouping, half-window and drift statistics for the figure scripts |
-| `scripts/plot_norms.py` | weight-norm figures (§12.3): norms vs task from batch files, norms vs step from `traces/` |
-| `scripts/plot_check2.py` | steady-state figures (C2-A … C2-E) and `check2_cells.csv` (§12.6) |
+| `scripts/plot_norms.py` | F1/F2 norms vs task (§12.3) from batch files; the per-step family from `traces/` only with `--diag` |
+| `scripts/plot_check2.py` | check statistics → the ✓/✗ checks table, its CSV and `check2_cells.csv` (§12.6); the C2-A … C2-E figures only with `--diag` |
 | `configs/` | `pilot.yaml`, `stage1.yaml`, `sgd_corner.yaml`, `trace.yaml`, `trace_sgd.yaml` (per-step traces, §12.2) |
 
 ## Readouts (PLAN.md §4)
@@ -46,7 +46,7 @@ Config keys `gated_shared`, `learned_shared`, `gated_frozen`, `frozen`,
 density κ/√N, an ungated run has every unit active (pN = N) and no κ, so the
 sweep lists the ungated conditions once per (N, δ₀, λ, η, seed) with
 `kappa_label = "sqrtN"`.  Figures draw ungated conditions dashed.
-| `tests/` | tests 1–6 of the plan plus config/schedule tests; `reference_hash.txt` is test 6's stored hash |
+| `tests/` | tests 1–6 and 9–10 of the plan plus config/schedule tests; `reference_hash.txt` is test 6's stored hash |
 
 ## Result schema (`results/<name>/batch_*.npz`, schema 2)
 
@@ -63,9 +63,14 @@ for a task whose gate drew no unit.  Trace runs (`trace: true`) also write
 `traces/run_<batch>_<j>.npz` with a `(T, n_trace, 7)` float32 array
 (`protocol.TRACE_QUANT`) and `traces/manifest.json`.
 
-Figures go to `figures/{curves,mhalf,kaczmarz,checks,norms/by_task,norms/by_step,check2}/`
-as `.png` with `INDEX.md`; `--save-figdata` writes the plotted arrays next
-to each figure.  `analyze.py`
+Figures go to `figures/{norms,curves,checks}/` as `.png` with `INDEX.md`
+(PLAN.md §12.3–§12.4): F1 `norms_…` (traces = readouts), F2 `normsN_…` /
+`normsN_lt_…` (traces = N; x = task or lifetimes), F3 `curves_…`, F4
+`curvesN_…` / `curvesN_lt_…`, and one `checks_{solver}_eta{η}` table per
+solver with `checks_….csv` behind it.  `--cells d0=0,lam=1` restricts
+F1–F4; `--all` or `--diag mhalf kaczmarz by_step check2` adds the
+diagnostic families under `figures/diag/`; `--save-figdata` writes the
+plotted arrays next to each figure.  `analyze.py`
 pools seeds into `summary.csv` (one row per condition: `S0`, `E0`, `m_half`,
 `censored`, realized λ, gauge maxima, check-2 flag counts) and `curves.json`.
 
@@ -82,10 +87,20 @@ pools seeds into `summary.csv` (one row per condition: `S0`, `E0`, `m_half`,
 - Under the driver, a `--batch-id` subprocess never writes the manifest:
   the driver owns it (status updates) and the subprocess only writes its
   batch file.  The manifest records the `--N` filter it was made with.
-- `plotting.py` is the only style file (PLAN.md §12.0): PNG only, panels of
-  2.6 in × 2.0 in, DejaVu Sans at 10/9 pt, ≤ 4 ticks per axis; `save`
-  warns about panels narrower than 2 in, more than 6 columns, more than 6
-  ticks, text below 8 pt or a missing suptitle.
+- `plotting.py` is the only style file (PLAN.md §12.0, §12.7): PNG only,
+  panels of 2.6 in × 2.0 in, DejaVu Sans at 10/9 pt, ≤ 4 ticks per axis,
+  one legend row above the panels, quantities named only through
+  `QUANTITY_LABEL`; `save` warns about panels narrower than 2 in, more than
+  6 columns, more than 6 ticks, text below 8 pt or past the figure edge, a
+  missing suptitle, a legend inside an axes, a box from < 10 values or an
+  all-constant panel.  `tests/test_plotting.py` renders every family from
+  synthetic records and fails on any such warning.
+- The checks table (PLAN.md §12.6): thresholds live in
+  `plot_check2.CRITERIA` and are printed in the caption; pairs that are
+  constant by construction (`plot_check2.NA_BY_CONSTRUCTION`, e.g. Σ log f
+  for the frozen readouts) get no statistics and a — cell; check 3's γ is
+  printed without a mark when the sweep has fewer than three widths; the
+  table is also printed to stdout with the worst cell per ✗.
 - Batch files of the first code version (readouts named `learned`, `frozen`,
   `heads`, no `gated` key) load with the names mapped to today's
   (`config.LEGACY_READOUTS`; a legacy `frozen` at κ = √N is today's

@@ -4,7 +4,7 @@
     python scripts/validate.py [--N-max 40] [--seeds 4] [--out results/validate] [--parts eta kaczmarz cv]
 
 Each part runs its own small sweep in-process, prints a verdict and writes
-``<out>/figures/{eta_halving,kaczmarz_collapse,cv_exponent}.{pdf,png}`` in
+``<out>/figures/{eta_halving,kaczmarz_collapse,cv_exponent}.png`` in
 the style of PLAN.md §12.0.  Nothing here is needed by the Stage-1 sweep.
 """
 import argparse
@@ -77,12 +77,14 @@ def eta_halving(args, fig_dir, log):
     etas = [0.05, 0.025, 0.0125]
     sgd = pooled(Config(N=[N], readout=readouts, delta0=[d0], lam=[lam], seeds=args.seeds, solver="sgd", eta=etas), log)
     fig, axes = P.grid(1, 2, sharey=True)
+    from matplotlib.lines import Line2D
+    handles = [Line2D([], [], color="k", lw=P.LW_MEAN, label="population (fine h)")]
     print("\n[η-halving]  offsets from the fine-step population reference (h ā² = 0.001), same task streams per seed:")
     print("  population Euler error ∝ h (expect ×0.1 per row); SGD gap ∝ η (expect ×0.5 per row)")
     for j, ro in enumerate(readouts):
         ax = axes[0, j]
         ages, S_ref, E_ref, _, se_ref = ref[(N, ro, 1.0)]
-        ax.plot(ages[1:], S_ref[1:], color="k", lw=P.LW_MEAN, label="population (fine h)")
+        ax.plot(ages[1:], S_ref[1:], color="k", lw=P.LW_MEAN)
         P.band(ax, ages[1:], (S_ref - se_ref)[1:], (S_ref + se_ref)[1:], "k")
         for c in contractions:
             _, S, E, _, _ = pops[c][(N, ro, 1.0)]
@@ -93,13 +95,15 @@ def eta_halving(args, fig_dir, log):
             gaps.append(E[0] - E_ref[0])
             print(f"  {ro:14s} sgd η={eta:<8}   ΔS(0)={S[0] - S_ref[0]:+.5f}  ΔE(0)={E[0] - E_ref[0]:+.5f}  max_m|ΔS|={np.nanmax(np.abs(S - S_ref)):.5f}")
             col = P.n_shade(i + 1, len(etas) + 1)
-            ax.plot(ages[1:], S[1:], color=col, label=f"SGD η = {eta}")
+            ax.plot(ages[1:], S[1:], color=col)
+            if j == 0:
+                handles.append(Line2D([], [], color=col, lw=P.LW_TRACE, label=f"SGD η = {P.fmt(eta)}"))
             P.band(ax, ages[1:], (S - se)[1:], (S + se)[1:], col)
         with np.errstate(invalid="ignore", divide="ignore"):
             ratios = ["%.2f" % (gaps[i] / gaps[i + 1]) for i in range(len(gaps) - 1)]
         print(f"  {ro:14s} ΔE(0) ratios per halving: {ratios}")
         P.logaxis(ax, "x"); ax.set_title(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro]); ax.set_xlabel("age m (tasks)")
-    axes[0, 0].set_ylabel("S(m)"); axes[0, 1].legend()
+    axes[0, 0].set_ylabel("S(m)"); P.fig_legend(fig, None, handles=handles)
     P.cell_title(fig, None, d0, lam, None, None, f"η-halving, N = {N}")
     P.caption(fig, "band: ±1 s.e.m. over seeds")
     P.save(fig, os.path.join(fig_dir, "eta_halving"))
@@ -124,10 +128,10 @@ def kaczmarz(args, fig_dir, log):
         ages, S, _, _, se = res[(N, "gated_frozen", 1.0)]
         x = ages / N
         col = P.n_shade(i, len(Ns))
-        ax.plot(x[1:], (S / S[0])[1:], color=col, label=f"N = {N}")
+        ax.plot(x[1:], (S / S[0])[1:], color=col)
         P.band(ax, x[1:], ((S - se) / S[0])[1:], ((S + se) / S[0])[1:], col)
         print(f"  N={N:3d}  S/S0 = {np.interp(0.5, x, S / S[0]):.3f}")
-    P.logaxis(ax, "x"); ax.set_xlabel(r"$\kappa^2 m / N$"); ax.set_ylabel("S(m) / S(0)"); ax.legend()
+    P.logaxis(ax, "x"); ax.set_xlabel(r"$\kappa^2 m / N$"); ax.set_ylabel("S(m) / S(0)"); P.fig_legend(fig, None, handles=P.n_handles(Ns))
     P.cell_title(fig, 1.0, 0.0, 1.0, "pop", None, "gated frozen")
     P.caption(fig, "band: ±1 s.e.m. over seeds")
     P.save(fig, os.path.join(fig_dir, "kaczmarz_collapse"))
@@ -156,7 +160,8 @@ def cv_scaling(args, fig_dir, log):
         P.plot_readout(ax, Ns, cvs, ro, marker="o")
         print(f"  {ro:14s} γ = {gam[ro]:+.3f}   CV = {['%.3f' % v for v in cvs]}")
     P.logaxis(ax, "x"); P.logaxis(ax, "y"); ax.set_xlabel("N"); ax.set_ylabel("CV of s at m = 1")
-    P.readout_legend(ax, readouts)
+    P.discrete_ticks(ax, Ns, "x")
+    P.fig_legend(fig, readouts)
     P.cell_title(fig, 1.0, 0.0, 1.0, "pop", None, "check 3")
     P.caption(fig, "γ: " + ", ".join(f"{P.READOUT_LABEL[r]} {g:+.2f}" for r, g in gam.items()))
     P.save(fig, os.path.join(fig_dir, "cv_exponent"))

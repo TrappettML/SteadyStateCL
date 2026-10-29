@@ -1,20 +1,19 @@
 #!/usr/bin/env python
-"""Weight-norm figures (PLAN.md §12.3): norms vs task from batch files, norms vs step from trace files.
+"""Weight-norm figures F1 and F2 (PLAN.md §12.3): norms vs task from batch files; per-step traces only with ``--diag``.
 
-    python scripts/plot_norms.py results/<sweep> [--fig-dir DIR] [--save-figdata]
+    python scripts/plot_norms.py results/<sweep> [--fig-dir DIR] [--save-figdata] [--diag]
 
-Family A (``figures/norms/by_task/``): one figure per (κ, δ₀, λ, solver, η);
-rows = quantity, columns = N, traces = readouts, seeds thin with the seed
-mean on top; a companion ``norms_prepost_*`` shows the size of the
-rescaling.  Family B (``figures/norms/by_step/``): from ``traces/``, one
-figure per (readout, κ, δ₀, λ, solver, η) with every measurement task
-overlaid (coloured by task index), the across-task median and the 10–90 %
-band, plus one ``steps_summary`` per solver.  Called by ``analyze.py``.
+F1 (``norms/norms_…``): rows = quantity, columns = N, traces = readouts.
+F2 (``norms/normsN_…`` and ``normsN_lt_…``): rows = quantity, columns =
+readouts, traces = N (x = task, or lifetimes in the ``_lt`` file).
+Every trace is a block mean over half a lifetime (§12.7 G10) with the raw
+per-task seed mean faint behind it; nothing is shaded, the half boundary
+is one dotted line.  The by-step family of §12.2 (``diag/by_step/``) is
+drawn only with ``--diag``.  Called by ``analyze.py``.
 """
 import argparse
 import os
 import sys
-import warnings
 
 import numpy as np
 
@@ -23,135 +22,156 @@ import _path  # noqa: F401
 from mup import io
 from mup import plotting as P
 from mup.config import is_gated
-from mup.results import by_kappa, group_by, half_stats, load_runs, seed_stack
+from mup.results import by_kappa, group_by, kappa_min, load_runs, seed_stack
 
-#: family-A rows: (scalar key, axis label); task_heads adds heads_fro2_post
-ROWS_A = (("Q_act_pre", r"$Q_{act}$ (pre)"), ("a2_act_post", r"$a^2_{act}$"), ("aQ_act_post", r"$|a_i|\sqrt{Q_{ii}}$ act"), ("logf_sum", "Σ log f"))
-ROWS_PREPOST = (("Q_act_pre-Q_act_post", r"$Q_{act}$ pre − post"), ("logf_sum", "Σ log f"), ("logf_max", r"max $|\log f|$"))
-#: §12.1 keys printed in the half-window comparison
-CHECK_KEYS = ("Q_act_pre", "Q_all_pre", "W_fro2_pre", "a2_act_post", "a2_all_post", "aQ_act_post", "aQ_max_post",
-              "heads_fro2_post", "logf_sum", "Q_q05", "Q_q95", "aQ_q95")
-#: family-B rows: (trace quantity, relative to step 0?, axis label)
-ROWS_B = (("Q_act_pre", True, r"$Q_{act} - Q_{act}(0)$"), ("a2_act", True, r"$a^2_{act} - a^2_{act}(0)$"),
-          ("aQ_act", True, r"$|a|\sqrt{Q} - (0)$"), ("logf", False, r"$\log f$"))
+#: F1/F2 rows: (scalar key, quantile keys or None); heads_fro2_post is appended when task heads are present
+ROWS = (("Q_act_pre", ("Q_q05", "Q_q95")), ("a2_act_post", None), ("aQ_act_post", ("aQ_q05", "aQ_q95")),
+        ("aQ_max_post", None), ("logf_sum", None))
+#: family-B rows (diag): (trace quantity, relative to step 0?, axis label)
+ROWS_B = (("Q_act_pre", True, P.qlabel("Q_act_pre") + " − step 0"), ("a2_act", True, P.qlabel("a2_act") + " − step 0"),
+          ("aQ_act", True, P.qlabel("aQ_act") + " − step 0"), ("logf", False, P.qlabel("logf")))
 
 
-def _series(rec, key):
-    """
-    A per-task series by key; ``"A-B"`` gives the difference of two scalars.
-
-    Parameters
-    ----------
-    rec : RunRecord
-    key : str
-
-    Returns
-    -------
-    (T,) array
-    """
-    if "-" in key:
-        a, b = key.split("-")
-        return rec.scalars[a] - rec.scalars[b]
-    return rec.scalars[key]
+def _na():
+    from plot_check2 import NA_BY_CONSTRUCTION
+    return NA_BY_CONSTRUCTION
 
 
-def _draw_task_rows(axes, members, Ns, rows, band_keys=None):
-    """Draw family-A style panels: rows × N columns, readouts as traces, seeds thin, mean on top.
+def _rows(members):
+    rows = list(ROWS)
+    if any(r.run.readout == "task_heads" for r in members):
+        rows.append(("heads_fro2_post", None))
+    return rows
 
-    Parameters
-    ----------
-    axes : (n_rows, n_N) array of Axes
-    members : list of RunRecord
-    Ns : sorted widths
-    rows : sequence of (key, label)
-    band_keys : dict, optional
-        ``{row key: (lo key, hi key)}`` for a seed-mean 5–95 % band.
+
+def _block_trace(ax, x, Y, w, cuts, color, ls, quantiles=None):
+    """Block mean (lw 1.6, ±1 s.e. band) over the faint per-task seed mean; quantile block means as thin lines.
 
     Returns
     -------
-    dict
-        Figure data (seed means) keyed ``{readout}_N{N}_{key}``.
+    (xb, mb, sb)
     """
-    data = {}
-    for j, N in enumerate(Ns):
-        for ro in P.READOUT_COLOR:
-            recs = [r for r in members if r.run.N == N and r.run.readout == ro]
-            if not recs:
-                continue
-            x = np.arange(recs[0].T)
-            for i, (key, _) in enumerate(rows):
-                if key.split("-")[0] not in recs[0].scalars:
-                    continue
-                ys = np.stack([_series(r, key) for r in recs])
-                P.seeds_and_mean(axes[i, j], x, ys, ro)
-                if band_keys and key in band_keys:
-                    lo, hi = (np.nanmean(seed_stack(recs, k), 0) for k in band_keys[key])
-                    P.band(axes[i, j], x, lo, hi, P.READOUT_COLOR[ro])
-                data[f"{ro}_N{N}_{key}"] = np.nanmean(ys, 0)
-        for i in range(len(rows)):
-            P.shade_burnin(axes[i, j], recs[0].T_burn, recs[0].T_meas) if recs else None
-    return data
+    with np.errstate(invalid="ignore"):
+        raw = np.nanmean(np.asarray(Y, float), 0)
+    ax.plot(x, raw, color=color, ls=ls, lw=0.5, alpha=0.25, zorder=2)
+    xb, mb, sb = P.block_mean(x, Y, w, cuts)
+    ax.plot(xb, mb, color=color, ls=ls, lw=P.LW_TRACE, zorder=4)
+    P.band(ax, xb, mb - sb, mb + sb, color)
+    for Q in (quantiles or []):
+        _, qb, _ = P.block_mean(x, Q, w, cuts)
+        ax.plot(xb, qb, color=color, ls=ls, lw=P.LW_OVERLAY, zorder=3)
+    return xb, mb, sb
 
 
-def family_A(records, fig_dir, index, figdata):
-    """Norms vs task (§12.3 A) and the pre/post companion, one figure each per (κ, δ₀, λ, solver, η)."""
+def _omitted(members, rows):
+    """Caption text naming the (quantity, readout) pairs left out as constant by construction."""
+    na = _na()
+    ros = {r.run.readout for r in members}
+    parts = [f"{P.qlabel(k)} for {', '.join(P.READOUT_LABEL[ro] for ro in P.READOUT_COLOR if ro in ros and (k, ro) in na)}"
+             for k, _ in rows if any((k, ro) in na for ro in ros)]
+    return ("; omitted (constant by construction): " + "; ".join(parts)) if parts else ""
+
+
+def fig_F1(records, fig_dir, index, figdata):
+    """F1: norms vs task, columns = N, traces = readouts; one figure per (κ, δ₀, λ, solver, η)."""
+    na, kmin = _na(), kappa_min(records)
     for kappa, kmembers in by_kappa(records).items():
         for cell, members in group_by(kmembers, ("delta0", "lam", "solver", "eta")).items():
             d0, lam, solver, eta = cell
             Ns = sorted({r.run.N for r in members})
-            rows = list(ROWS_A) + ([("heads_fro2_post", r"mean $|a_k|^2$ (heads)")] if any(r.run.readout == "task_heads" for r in members) else [])
+            rows = _rows(members)
             fig, axes = P.grid(len(rows), len(Ns), sharex="col", sharey="row")
-            data = _draw_task_rows(axes, members, Ns, rows, {"Q_act_pre": ("Q_q05", "Q_q95")})
-            for i, (_, lab) in enumerate(rows):
-                axes[i, 0].set_ylabel(lab)
-            for j in range(len(Ns)):
-                axes[-1, j].set_xlabel("task")
-            P.ref_line(axes[rows.index(("logf_sum", "Σ log f")), 0], 0.0)
+            data = {}
+            for j, N in enumerate(Ns):
+                col = [r for r in members if r.run.N == N]
+                gated = [r for r in col if is_gated(r.run.readout)]
+                ref = gated[0] if gated else col[0]
+                scale = ref.kappa_sched(kmin) ** 2 / N
+                for ro in P.READOUT_COLOR:
+                    recs = [r for r in col if r.run.readout == ro]
+                    if not recs:
+                        continue
+                    r0 = recs[0]
+                    ks = r0.kappa_sched(kmin)
+                    x = np.arange(r0.T, dtype=float)
+                    w = max(1, int(round(N / (2 * ks ** 2))))
+                    cuts = (r0.T_burn + r0.T_meas // 2,)
+                    for i, (key, qk) in enumerate(rows):
+                        if (key, ro) in na or key not in r0.scalars:
+                            continue
+                        xb, mb, sb = _block_trace(axes[i, j], x, seed_stack(recs, key), w, cuts, P.READOUT_COLOR[ro], P.READOUT_STYLE[ro],
+                                                  [seed_stack(recs, k) for k in qk] if qk else None)
+                        data[f"{ro}_N{N}_{key}"] = np.stack([xb, mb, sb])
+                for half in sorted({r.T_burn + r.T_meas / 2 for r in col}):
+                    for i in range(len(rows)):
+                        P.event_line(axes[i, j], half)
+                top = axes[0, j].secondary_xaxis("top", functions=(lambda u, s=scale: u * s, lambda v, s=scale: v / s))
+                top.set_xlabel(r"$t\kappa_s^2/N$ (lifetimes)"); top.xaxis.set_major_locator(P.MaxNLocator(4))
+                axes[-1, j].set_xlabel("task t")
+            for i, (key, _) in enumerate(rows):
+                axes[i, 0].set_ylabel(P.qlabel(key))
+            P.ref_line(axes[[k for k, _ in rows].index("logf_sum"), 0], 0.0)
             P.label_cols_N(axes, Ns)
-            P.readout_legend(axes[0, 0], {r.run.readout for r in members})
+            P.fig_legend(fig, {r.run.readout for r in members})
             P.cell_title(fig, kappa, d0, lam, solver, eta)
-            P.caption(fig, "thin: seeds; thick: seed mean; grey: burn-in; dotted: half boundary; band: 5–95 % of $Q_i$ over active units")
+            P.caption(fig, "thick: mean over seeds and blocks of half a lifetime, band ±1 s.e.; faint: per-task seed mean; "
+                           "thin: 5 % and 95 % over active units; dotted: half boundary" + _omitted(members, rows))
             stem = P.cell_stem(kappa, d0, lam, solver, eta)
-            P.save(fig, os.path.join(fig_dir, "norms", "by_task", "norms_" + stem), data if figdata else None, index, "norms/by_task", stem)
-
-            fig, axes = P.grid(len(ROWS_PREPOST), len(Ns), sharex="col", sharey="row")
-            data = _draw_task_rows(axes, members, Ns, ROWS_PREPOST)
-            for i, (_, lab) in enumerate(ROWS_PREPOST):
-                axes[i, 0].set_ylabel(lab); P.ref_line(axes[i, 0], 0.0)
-            for j in range(len(Ns)):
-                axes[-1, j].set_xlabel("task")
-            P.label_cols_N(axes, Ns)
-            P.readout_legend(axes[0, 0], {r.run.readout for r in members})
-            P.cell_title(fig, kappa, d0, lam, solver, eta, "rescaling per task")
-            P.caption(fig, "thin: seeds; thick: seed mean; grey: burn-in")
-            P.save(fig, os.path.join(fig_dir, "norms", "by_task", "norms_prepost_" + stem), data if figdata else None, index, "norms/by_task", stem)
+            P.save(fig, os.path.join(fig_dir, "norms", "norms_" + stem), data if figdata else None, index, "norms", stem)
 
 
-def print_half_windows(records):
-    """Print the check-2 half-window comparison (half1/half0 − 1, seed mean) for every §12.1 key, per condition."""
-    print("half-window ratios (half 1 / half 0 − 1, mean over seeds; * = |z| > 3 in every seed):")
-    keys = [k for k in CHECK_KEYS if k in records[0].scalars]
-    print("  " + " " * 44 + " ".join(f"{k[:11]:>11s}" for k in keys))
-    for cond, recs in sorted(group_by(records, ("N", "kappa_label", "readout", "delta0", "lam")).items(), key=str):
-        cells = []
-        for k in keys:
-            hs = [half_stats(r.scalars[k], r.T_burn, r.T_meas) for r in recs]
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                ratio = np.nanmean([h["ratio"] for h in hs])
-            flag = all(h["z"] > 3 for h in hs)
-            cells.append(f"{ratio:+10.3f}{'*' if flag else ' '}")
-        N, kl, ro, d0, lam = cond
-        print(f"  N={N:4d} κ={kl:5s} {ro:14s} δ₀={d0:5.2f} λ={lam:3.1f} " + " ".join(cells))
+def fig_F2(records, fig_dir, index, figdata):
+    """F2: norms vs task, columns = readouts, traces = N; ``normsN_`` (x = task) and ``normsN_lt_`` (x = lifetimes)."""
+    na, kmin = _na(), kappa_min(records)
+    for kappa, kmembers in by_kappa(records).items():
+        for cell, members in group_by(kmembers, ("delta0", "lam", "solver", "eta")).items():
+            d0, lam, solver, eta = cell
+            Ns = sorted({r.run.N for r in members})
+            ros = [ro for ro in P.READOUT_COLOR if any(r.run.readout == ro for r in members)]
+            rows = _rows(members)
+            for lt in (False, True):
+                fig, axes = P.grid(len(rows), len(ros), sharex="all", sharey="row")
+                data = {}
+                for j, ro in enumerate(ros):
+                    for i_N, N in enumerate(Ns):
+                        recs = [r for r in members if r.run.N == N and r.run.readout == ro]
+                        if not recs:
+                            continue
+                        r0 = recs[0]
+                        ks = r0.kappa_sched(kmin)
+                        scale = ks ** 2 / N if lt else 1.0
+                        x = np.arange(r0.T, dtype=float) * scale
+                        w = max(1, int(round(N / (2 * ks ** 2))))
+                        cuts = (r0.T_burn + r0.T_meas // 2,)
+                        col = P.n_shade(i_N, len(Ns))
+                        for i, (key, qk) in enumerate(rows):
+                            if (key, ro) in na or key not in r0.scalars:
+                                continue
+                            xb, mb, sb = _block_trace(axes[i, j], x, seed_stack(recs, key), w, cuts, col, P.READOUT_STYLE[ro],
+                                                      [seed_stack(recs, k) for k in qk] if qk else None)
+                            data[f"{ro}_N{N}_{key}"] = np.stack([xb, mb, sb])
+                        half = (r0.T_burn + r0.T_meas / 2) * scale
+                        for i in range(len(rows)):
+                            axes[i, j].axvline(half, color=col, ls=":", lw=P.LW_EVENT, zorder=1)
+                    axes[0, j].set_title(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro])
+                    axes[-1, j].set_xlabel(r"$t\kappa_s^2/N$ (lifetimes)" if lt else "task t")
+                for i, (key, _) in enumerate(rows):
+                    axes[i, 0].set_ylabel(P.qlabel(key))
+                P.ref_line(axes[[k for k, _ in rows].index("logf_sum"), 0], 0.0)
+                P.fig_legend(fig, None, handles=P.n_handles(Ns))
+                P.cell_title(fig, kappa, d0, lam, solver, eta, "traces = N" + (", x in lifetimes" if lt else ""))
+                P.caption(fig, "thick: mean over seeds and blocks of half a lifetime, band ±1 s.e.; faint: per-task seed mean; "
+                               "thin: 5 % and 95 % over active units; dotted: half boundary of each N; dashed columns: ungated"
+                          + _omitted(members, rows))
+                stem = P.cell_stem(kappa, d0, lam, solver, eta)
+                P.save(fig, os.path.join(fig_dir, "norms", ("normsN_lt_" if lt else "normsN_") + stem), data if figdata else None, index, "norms", stem)
 
 
+# ---------------------------------------------------------------------------
+# diagnostics: per-step traces (PLAN.md §12.2), only with --diag
+# ---------------------------------------------------------------------------
 def family_B(out_dir, fig_dir, index, figdata):
-    """Norms vs step within a task (§12.3 B) from ``traces/``; one figure per (readout, κ, δ₀, λ, solver, η).
-
-    Columns are (N, seed) pairs (seeds are never pooled into one median),
-    split into several files when more than ``plotting.MAX_COLS``.  A
-    ``steps_summary`` per solver shows the medians only at δ₀ = 0, λ = 1.
-    """
+    """Norms vs step within a task from ``traces/``; one figure per (readout, κ, δ₀, λ, solver, η) → ``diag/by_step/``."""
     traces = io.load_traces(out_dir)
     if not traces:
         return
@@ -172,6 +192,10 @@ def family_B(out_dir, fig_dir, index, figdata):
                 x = tidx.astype(float)
                 for i, (q, rel, lab) in enumerate(ROWS_B):
                     ax = axes[i, j]
+                    if q == "logf" and "frozen" in ro:
+                        P.na_slot(ax, "not projected, f = 1"); continue
+                    if q == "a2_act" and "frozen" in ro:
+                        P.na_slot(ax, "a fixed within a task"); continue
                     y = tr[T_burn:T_burn + T_meas, :, quant.index(q)].astype(float)
                     if rel:
                         y = y - y[:, :1]
@@ -180,61 +204,31 @@ def family_B(out_dir, fig_dir, index, figdata):
                         ax.set_xscale("symlog", linthresh=10)
                     data[f"N{N}_seed{seed}_{q}_median"] = med
                     medians[(cell, N, seed, q)] = (x, med)
-                axes[0, j].set_title(f"N = {N}, seed {seed}")
+                axes[0, j].set_title(f"N = {P.fmt(N)}, seed {seed}")
                 axes[-1, j].set_xlabel("step within task")
             for i, (_, _, lab) in enumerate(ROWS_B):
                 axes[i, 0].set_ylabel(lab); P.ref_line(axes[i, 0], 0.0)
             P.cell_title(fig, kappa if is_gated(ro) else None, d0, lam, solver, eta, P.READOUT_LABEL[ro])
             P.caption(fig, "thin: individual measurement tasks (viridis = task index); black: median over tasks; band: 10–90 %")
             stem = P.cell_stem(kappa if is_gated(ro) else None, d0, lam, solver, eta, readout=ro) + (f"_part{part + 1}" if part else "")
-            P.save(fig, os.path.join(fig_dir, "norms", "by_step", "steps_" + stem), data if figdata else None, index, "norms/by_step", stem)
-
-    # summary per solver: readouts × N grid of medians at δ₀ = 0, λ = 1 (§12.5 item 8), lowest seed
-    for (solver, eta) in sorted({(c[4], c[5]) for c in groups}):
-        sel = {k: v for k, v in medians.items() if k[0][4] == solver and k[0][5] == eta and k[0][2] == 0.0 and k[0][3] == 1.0}
-        if not sel:
-            continue
-        ros = [r for r in P.READOUT_COLOR if any(k[0][0] == r for k in sel)]
-        Ns = sorted({k[1] for k in sel})
-        fig, axes = P.grid(len(ros), len(Ns), sharex="col", sharey=False)
-        data = {}
-        shade = {"Q_act_pre": None, "a2_act": "0.3", "aQ_act": "0.6"}
-        for i, ro in enumerate(ros):
-            for j, N in enumerate(Ns):
-                for q, rel, lab in ROWS_B[:3]:
-                    seeds = [k[2] for k in sel if k[0][0] == ro and k[1] == N and k[3] == q]
-                    if not seeds:
-                        continue
-                    x, med = sel[next(k for k in sel if k[0][0] == ro and k[1] == N and k[3] == q and k[2] == min(seeds))]
-                    axes[i, j].plot(x, med, lw=P.LW_TRACE, label=lab, color=shade[q] or P.READOUT_COLOR[ro], zorder=4)
-                    data[f"{ro}_N{N}_{q}"] = med
-                if solver == "sgd":
-                    axes[i, j].set_xscale("symlog", linthresh=10)
-                P.ref_line(axes[i, j], 0.0)
-            axes[i, 0].set_ylabel(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro])
-        P.label_cols_N(axes, Ns)
-        axes[0, 0].legend(loc="best")
-        for j in range(len(Ns)):
-            axes[-1, j].set_xlabel("step within task")
-        P.cell_title(fig, None, 0.0, 1.0, solver, eta, "step summary")
-        P.caption(fig, "medians over measurement tasks, relative to step 0; readout colour: $Q_{act}$, dark grey: $a^2_{act}$, light grey: $|a|\\sqrt{Q}$")
-        stem = P.cell_stem(None, None, None, solver, eta)
-        P.save(fig, os.path.join(fig_dir, "norms", "by_step", "steps_summary_" + stem), data if figdata else None, index, "norms/by_step", stem)
+            P.save(fig, os.path.join(fig_dir, "diag", "by_step", "steps_" + stem), data if figdata else None, index, "diag/by_step", stem)
 
 
-def run(out_dir, fig_dir, records=None, figdata=False):
-    """Make every norm figure of a sweep.
+def run(out_dir, fig_dir, records=None, figdata=False, diag=False):
+    """Make F1 and F2 (and, with ``diag``, the by-step family).
 
     Parameters
     ----------
     out_dir : str
         ``results/<sweep>``.
     fig_dir : str
-        Figure root (``figures/``); ``norms/by_task`` and ``norms/by_step`` are created under it.
+        Figure root (``figures/``).
     records : list of RunRecord, optional
         Loaded records (loaded here when omitted).
     figdata : bool
         Write the plotted arrays as ``.npz`` next to each figure.
+    diag : bool
+        Also draw ``diag/by_step/`` from the trace files.
 
     Returns
     -------
@@ -245,9 +239,10 @@ def run(out_dir, fig_dir, records=None, figdata=False):
         records, _ = load_runs(out_dir)
     index = []
     if records:
-        family_A(records, fig_dir, index, figdata)
-        print_half_windows(records)
-    family_B(out_dir, fig_dir, index, figdata)
+        fig_F1(records, fig_dir, index, figdata)
+        fig_F2(records, fig_dir, index, figdata)
+    if diag:
+        family_B(out_dir, fig_dir, index, figdata)
     return index
 
 
@@ -267,9 +262,10 @@ def main(argv=None):
     ap.add_argument("out_dir")
     ap.add_argument("--fig-dir", default=None)
     ap.add_argument("--save-figdata", action="store_true")
+    ap.add_argument("--diag", action="store_true", help="also draw the per-step family from traces/ (diag/by_step/)")
     args = ap.parse_args(argv)
     fig_dir = args.fig_dir or os.path.join(args.out_dir, "figures")
-    index = run(args.out_dir, fig_dir, None, args.save_figdata)
+    index = run(args.out_dir, fig_dir, None, args.save_figdata, args.diag)
     print(f"{len(index)} figures → {fig_dir}/norms")
     return 0
 
