@@ -1,4 +1,4 @@
-"""A batch of 3 runs (one per readout) equals three single runs with the same keys.
+"""A batch of 5 runs (one per readout) equals five single runs with the same keys.
 
 The plan asks for bit-for-bit equality.  XLA's CPU backend reduces the batched
 ``(B, N, D)`` matmul in a different order from the single ``(N, D)`` matvec, so
@@ -31,7 +31,7 @@ def _single(run, T, ages):
 
 def test_batch_equals_singles(small_runs):
     runs = small_runs
-    assert [r.readout for r in runs] == ["learned", "frozen", "heads"]
+    assert [r.readout for r in runs] == ["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"]
     T = runs[0].T_burn + runs[0].T_meas
     ages = jnp.asarray(age_schedule(runs[0].N, runs[0].kappa, T))
     st, p = init_batch(runs)
@@ -60,8 +60,12 @@ def test_batch_equals_singles(small_runs):
 
 def test_run_stream_runs(small_runs):
     res = run_stream(small_runs)
-    assert res["count"].shape[0] == 3
+    assert res["count"].shape[0] == 5
     assert np.isfinite(res["E0"]).all()
-    # frozen readout: a never moves, so a² mean is constant across tasks
-    i = [r.readout for r in small_runs].index("frozen")
-    assert np.ptp(res["a2_mean"][:, i]) == 0.0
+    ros = [r.readout for r in small_runs]
+    # frozen readouts: a never moves, so a² mean is constant across tasks
+    for ro in ("gated_frozen", "frozen"):
+        assert np.ptp(res["a2_mean"][:, ros.index(ro)]) == 0.0
+    # ungated runs: every unit active
+    for ro in ("learned_shared", "frozen"):
+        assert np.all(res["n_active"][:, ros.index(ro)] == 10)

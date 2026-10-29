@@ -8,7 +8,7 @@ import numpy as np
 
 
 def test_pop_duration_and_contraction():
-    cfg = Config(N=[20], delta0=[-0.75, 0.0, 16.0], lam=[0.5, 4.0], seeds=1, readout=["learned"])
+    cfg = Config(N=[20], delta0=[-0.75, 0.0, 16.0], lam=[0.5, 4.0], seeds=1, readout=["gated_shared"])
     for r in make_runs(cfg):
         assert abs(r.h * r.eta * (1 + r.delta0) - 0.1) < 1e-12 or r.h <= cfg.h_max
         assert abs(r.h * r.n_steps - r.alpha_task) < 1e-12
@@ -16,7 +16,7 @@ def test_pop_duration_and_contraction():
 
 
 def test_sgd_duration():
-    cfg = Config(N=[10], delta0=[0.0], lam=[1.0], seeds=1, solver="sgd", eta=[0.05], readout=["frozen"])
+    cfg = Config(N=[10], delta0=[0.0], lam=[1.0], seeds=1, solver="sgd", eta=[0.05], readout=["gated_frozen"])
     (r,) = make_runs(cfg)
     assert r.n_steps == round(1.0 / 0.05 * 40)
     with pytest.raises(ValueError):
@@ -33,6 +33,18 @@ def test_delta0_guard_and_batching():
     for b in batches:
         assert len(b) <= 4 and len({r.batch_key() for r in b}) == 1
     assert any(r.kappa_label == "sqrtN" and abs(r.kappa - math.sqrt(r.N)) < 1e-12 for r in runs)
+
+
+def test_ungated_listed_once_per_N():
+    cfg = Config(N=[10, 20], kappa=[1.0, 2.0], delta0=[0.0], lam=[1.0], seeds=3)
+    runs = make_runs(cfg)
+    gated = [r for r in runs if r.gated == 1.0]
+    ungated = [r for r in runs if r.gated == 0.0]
+    assert len(gated) == 2 * 2 * 3 * 3 and len(ungated) == 2 * 2 * 3
+    for r in ungated:
+        assert r.kappa_label == "sqrtN" and r.pN == r.N and r.T_burn == max(cfg.T_min, round(cfg.T_factor))
+    with pytest.raises(ValueError):
+        make_runs(Config(readout=["learned"]))
 
 
 def test_age_schedule_and_half_life():

@@ -46,7 +46,7 @@ def eta_halving(args, fig_dir, log):
     error is ∝ h (ratio ≈ 10 per decade in h).  Reference: h ā² = 0.001.
     """
     N, lam, d0 = 10, 1.0, 0.0
-    readouts = ["learned", "frozen"]
+    readouts = ["gated_shared", "gated_frozen"]
     contractions = [0.1, 0.01]
     ref = pooled(Config(N=[N], readout=readouts, delta0=[d0], lam=[lam], seeds=args.seeds, solver="pop", pop_contraction=0.001), log)
     pops = {c: pooled(Config(N=[N], readout=readouts, delta0=[d0], lam=[lam], seeds=args.seeds, solver="pop", pop_contraction=c), log)
@@ -61,14 +61,14 @@ def eta_halving(args, fig_dir, log):
         axes[j].plot(ages[1:], S_ref[1:], color="k", lw=1.2, label="population (fine h)")
         for c in contractions:
             _, S, E, _, _ = pops[c][(N, ro, 1.0)]
-            print(f"  {ro:8s} pop h ā²={c:<6}   ΔS(0)={S[0] - S_ref[0]:+.5f}  ΔE(0)={E[0] - E_ref[0]:+.5f}  max_m|ΔS|={np.nanmax(np.abs(S - S_ref)):.5f}")
+            print(f"  {ro:14s} pop h ā²={c:<6}   ΔS(0)={S[0] - S_ref[0]:+.5f}  ΔE(0)={E[0] - E_ref[0]:+.5f}  max_m|ΔS|={np.nanmax(np.abs(S - S_ref)):.5f}")
         gaps = []
         for i, eta in enumerate(etas):
             _, S, E, _, _ = sgd[(N, ro, eta)]
             gaps.append(E[0] - E_ref[0])
-            print(f"  {ro:8s} sgd η={eta:<8}   ΔS(0)={S[0] - S_ref[0]:+.5f}  ΔE(0)={E[0] - E_ref[0]:+.5f}  max_m|ΔS|={np.nanmax(np.abs(S - S_ref)):.5f}")
+            print(f"  {ro:14s} sgd η={eta:<8}   ΔS(0)={S[0] - S_ref[0]:+.5f}  ΔE(0)={E[0] - E_ref[0]:+.5f}  max_m|ΔS|={np.nanmax(np.abs(S - S_ref)):.5f}")
             axes[j].plot(ages[1:], S[1:], color=n_shade(i + 1, len(etas) + 1), label=f"SGD η={eta}")
-        print(f"  {ro:8s} ΔE(0) ratios per halving: {['%.2f' % (gaps[i] / gaps[i + 1]) for i in range(len(gaps) - 1)]}")
+        print(f"  {ro:14s} ΔE(0) ratios per halving: {['%.2f' % (gaps[i] / gaps[i + 1]) for i in range(len(gaps) - 1)]}")
         axes[j].set_xscale("log"); axes[j].set_title(READOUT_LABEL[ro], color=READOUT_COLOR[ro]); axes[j].set_xlabel("age m")
     axes[0].set_ylabel("S(m)"); axes[1].legend(fontsize=7)
     fig.suptitle(f"η-halving at fixed λ={lam}, δ₀={d0}, N={N}", fontsize=9)
@@ -78,23 +78,23 @@ def eta_halving(args, fig_dir, log):
 def kaczmarz(args, fig_dir, log):
     """Frozen readout: S(m)/S(0) vs κ²m/N across N should collapse."""
     Ns = [n for n in (10, 20, 40, 80) if n <= args.N_max]
-    res = pooled(Config(N=Ns, readout=["frozen"], delta0=[0.0], lam=[1.0], seeds=args.seeds, solver="pop"), log)
+    res = pooled(Config(N=Ns, readout=["gated_frozen"], delta0=[0.0], lam=[1.0], seeds=args.seeds, solver="pop"), log)
     fig, ax = plt.subplots(figsize=(4, 3))
-    print("\n[Kaczmarz]  frozen readout, S/S0 at κ²m/N ≈ 0.5 for each N (collapse ⇒ equal):")
+    print("\n[Kaczmarz]  gated frozen readout, S/S0 at κ²m/N ≈ 0.5 for each N (collapse ⇒ equal):")
     for i, N in enumerate(Ns):
-        ages, S, _, _, _ = res[(N, "frozen", 1.0)]
+        ages, S, _, _, _ = res[(N, "gated_frozen", 1.0)]
         x = ages / N
         ax.plot(x[1:], (S / S[0])[1:], color=n_shade(i, len(Ns)), label=f"N={N}")
         print(f"  N={N:3d}  S/S0 = {np.interp(0.5, x, S / S[0]):.3f}")
     ax.set_xscale("log"); ax.set_xlabel("κ² m / N"); ax.set_ylabel("S(m)/S(0)"); ax.legend(fontsize=7)
-    ax.set_title("frozen readout (κ=1, λ=1, δ₀=0)")
+    ax.set_title("gated frozen readout (κ=1, λ=1, δ₀=0)")
     fig.tight_layout(); fig.savefig(os.path.join(fig_dir, "kaczmarz_collapse.png")); plt.close(fig)
 
 
 def cv_scaling(args, fig_dir, log):
-    """CV of s_k at a fixed age vs N; fit the exponent (frozen prediction: −1/2)."""
+    """CV of s_k at a fixed age vs N; fit the exponent (gated-frozen prediction: −1/2)."""
     Ns = [n for n in (10, 20, 40, 80) if n <= args.N_max]
-    readouts = ["learned", "frozen", "heads"]
+    readouts = ["gated_shared", "gated_frozen", "task_heads"]
     res = pooled(Config(N=Ns, readout=readouts, delta0=[0.0], lam=[1.0], seeds=args.seeds, solver="pop"), log)
     fig, ax = plt.subplots(figsize=(4, 3))
     print("\n[self-averaging]  CV(s_k) at age m=1 ∝ N^γ:")
@@ -102,7 +102,7 @@ def cv_scaling(args, fig_dir, log):
         cvs = [res[(N, ro, 1.0)][3][1] for N in Ns]
         g, c = cv_exponent(Ns, cvs)
         ax.plot(Ns, cvs, "o-", ms=4, color=READOUT_COLOR[ro], label=f"{READOUT_LABEL[ro]} (γ={g:+.2f})")
-        print(f"  {ro:8s} γ = {g:+.3f}   CV = {['%.3f' % v for v in cvs]}")
+        print(f"  {ro:14s} γ = {g:+.3f}   CV = {['%.3f' % v for v in cvs]}")
     ax.set_xscale("log"); ax.set_yscale("log"); ax.set_xlabel("N"); ax.set_ylabel("CV of s at m=1"); ax.legend(fontsize=7)
     fig.tight_layout(); fig.savefig(os.path.join(fig_dir, "cv_exponent.png")); plt.close(fig)
 

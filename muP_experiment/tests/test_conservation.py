@@ -7,7 +7,7 @@ from mup import model
 
 
 def _drift_pop(h, n_alpha=0.5):
-    st, p = state_with_task(seed=11, N=10, D=40, readout="learned", delta0=1.0, eta=1.0, h=h)
+    st, p = state_with_task(seed=11, N=10, D=40, readout="gated_shared", delta0=1.0, eta=1.0, h=h)
     p = p._replace(do_proj=p.do_proj * 0)
     d0 = np.asarray(model.imbalance(st, p))
     for _ in range(int(round(n_alpha / h))):
@@ -25,7 +25,7 @@ def test_pop_drift_scales_as_h2_per_step():
 
 
 def _drift_sgd(eta, n_steps=400):
-    st, p = state_with_task(seed=12, N=10, D=40, readout="learned", delta0=1.0, eta=eta)
+    st, p = state_with_task(seed=12, N=10, D=40, readout="gated_shared", delta0=1.0, eta=eta)
     p = p._replace(do_proj=p.do_proj * 0)
     d0 = np.asarray(st.a) ** 2 - np.asarray(model.Q_diag(st.W))      # η Δ_i = a² − Q
     for i in range(n_steps):

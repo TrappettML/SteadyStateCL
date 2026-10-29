@@ -18,7 +18,8 @@ import _path  # noqa: F401
 
 from mup import io
 from mup.observe import Moments, check_bounded, check_gauge, curves, cv_exponent, half_life
-from mup.plotting import READOUT_COLOR, READOUT_LABEL, n_shade, plt
+from mup.config import is_gated
+from mup.plotting import READOUT_COLOR, READOUT_LABEL, READOUT_STYLE, n_shade, plt
 
 COND_KEYS = ("N", "kappa_label", "readout", "delta0", "lam", "solver", "eta")
 
@@ -101,95 +102,114 @@ def group(conds, by):
     return g
 
 
+def by_kappa(conds):
+    """{κ_label: members} for the gated conditions, with the ungated ones (no κ) repeated in every group."""
+    ungated = {k: d for k, d in conds.items() if not is_gated(k[2])}
+    out = defaultdict(dict)
+    for k, d in conds.items():
+        if is_gated(k[2]):
+            out[k[1]][k] = d
+    if not out:
+        out["sqrtN"] = {}
+    for members in out.values():
+        members.update(ungated)
+    return out
+
+
+def _plot(ax, x, y, ro, **kw):
+    ax.plot(x, y, READOUT_STYLE[ro], color=READOUT_COLOR[ro], label=READOUT_LABEL[ro], **kw)
+
+
 def fig_curves(conds, fig_dir):
-    """S(m) and E(m): one figure per (κ, δ₀, λ, solver, η); panels per readout; lines per N."""
-    for gk, members in group(conds, ("kappa_label", "delta0", "lam", "solver", "eta")).items():
-        kappa, d0, lam, solver, eta = gk
-        readouts = [r for r in READOUT_COLOR if any(k[2] == r for k in members)]
-        Ns = sorted({k[0] for k in members})
-        fig, axes = plt.subplots(2, len(readouts), figsize=(3.2 * len(readouts), 5.2), squeeze=False, sharex=True)
-        for j, ro in enumerate(readouts):
-            for i, N in enumerate(Ns):
-                key = next((k for k in members if k[0] == N and k[2] == ro), None)
-                if key is None:
-                    continue
-                d = members[key]
-                a = d["ages"]
-                axes[0, j].plot(a[1:], d["S"][1:], color=n_shade(i, len(Ns)), label=f"N={N}")
-                axes[1, j].plot(a[1:], d["E"][1:], color=n_shade(i, len(Ns)), label=f"N={N}")
-            axes[0, j].set_title(READOUT_LABEL[ro], color=READOUT_COLOR[ro])
-            axes[0, j].set_xscale("log"); axes[1, j].set_xscale("log")
-            axes[1, j].set_xlabel("age m (tasks)")
-        axes[0, 0].set_ylabel("S(m)"); axes[1, 0].set_ylabel("E(m)")
-        axes[0, -1].legend(fontsize=7)
-        fig.suptitle(f"κ={kappa}  δ₀={d0}  λ={lam}  {solver} η={eta}", fontsize=9)
-        fig.tight_layout()
-        fig.savefig(os.path.join(fig_dir, f"curves_k{kappa}_d{d0}_lam{lam}_{solver}_eta{eta}.png"))
-        plt.close(fig)
+    """S(m), E(m): one figure per (κ, δ₀, λ, solver, η); columns = N; traces = readouts (PLAN.md §5)."""
+    for kappa, kmembers in by_kappa(conds).items():
+        for gk, members in group(kmembers, ("delta0", "lam", "solver", "eta")).items():
+            d0, lam, solver, eta = gk
+            Ns = sorted({k[0] for k in members})
+            fig, axes = plt.subplots(2, len(Ns), figsize=(3.0 * len(Ns), 5.2), squeeze=False, sharex="col")
+            for j, N in enumerate(Ns):
+                for ro in READOUT_COLOR:
+                    key = next((k for k in members if k[0] == N and k[2] == ro), None)
+                    if key is None:
+                        continue
+                    d = members[key]
+                    a = d["ages"]
+                    _plot(axes[0, j], a[1:], d["S"][1:], ro)
+                    _plot(axes[1, j], a[1:], d["E"][1:], ro)
+                axes[0, j].set_title(f"N={N}"); axes[0, j].set_xscale("log"); axes[1, j].set_xscale("log")
+                axes[1, j].set_xlabel("age m (tasks)")
+            axes[0, 0].set_ylabel("S(m)"); axes[1, 0].set_ylabel("E(m)")
+            axes[0, -1].legend(fontsize=7)
+            fig.suptitle(f"κ={kappa}  δ₀={d0}  λ={lam}  {solver} η={eta}   (dashed = ungated)", fontsize=9)
+            fig.tight_layout()
+            fig.savefig(os.path.join(fig_dir, f"curves_k{kappa}_d{d0}_lam{lam}_{solver}_eta{eta}.png"))
+            plt.close(fig)
 
 
 def fig_mhalf_vs_N(conds, fig_dir):
-    """m_half vs N (log–log), one figure per (κ, δ₀, solver, η); panels per readout; lines per λ."""
-    for gk, members in group(conds, ("kappa_label", "delta0", "solver", "eta")).items():
-        kappa, d0, solver, eta = gk
-        readouts = [r for r in READOUT_COLOR if any(k[2] == r for k in members)]
-        lams = sorted({k[4] for k in members})
-        fig, axes = plt.subplots(1, len(readouts), figsize=(3.2 * len(readouts), 3.0), squeeze=False, sharey=True)
-        for j, ro in enumerate(readouts):
-            ax = axes[0, j]
-            for i, lam in enumerate(lams):
-                pts = sorted((k[0], d["m_half"], d["censored"]) for k, d in members.items() if k[2] == ro and k[4] == lam)
-                if not pts:
-                    continue
-                N, m, c = zip(*pts)
-                ax.plot(N, m, "o-", ms=4, color=n_shade(i, len(lams)), label=f"λ={lam}")
-                cens = [n for n, mm, cc in pts if cc]
-                if cens:
-                    ax.plot(cens, [ax.get_ylim()[1]] * len(cens), "v", color=n_shade(i, len(lams)), ms=5)
-            ax.set_xscale("log"); ax.set_yscale("log")
-            ax.set_title(READOUT_LABEL[ro], color=READOUT_COLOR[ro]); ax.set_xlabel("N")
-        axes[0, 0].set_ylabel("m½ (tasks)"); axes[0, -1].legend(fontsize=7)
-        fig.suptitle(f"κ={kappa}  δ₀={d0}  {solver} η={eta}   (▼ censored)", fontsize=9)
-        fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f"mhalf_vs_N_k{kappa}_d{d0}_{solver}_eta{eta}.png")); plt.close(fig)
+    """m_half vs N (log–log): one figure per (κ, δ₀, solver, η); panels per λ; traces = readouts."""
+    for kappa, kmembers in by_kappa(conds).items():
+        for gk, members in group(kmembers, ("delta0", "solver", "eta")).items():
+            d0, solver, eta = gk
+            lams = sorted({k[4] for k in members})
+            fig, axes = plt.subplots(1, len(lams), figsize=(3.2 * len(lams), 3.0), squeeze=False, sharey=True)
+            for j, lam in enumerate(lams):
+                ax = axes[0, j]
+                for ro in READOUT_COLOR:
+                    pts = sorted((k[0], d["m_half"], d["censored"]) for k, d in members.items() if k[2] == ro and k[4] == lam)
+                    if not pts:
+                        continue
+                    N, m, c = zip(*pts)
+                    _plot(ax, N, m, ro, marker="o", ms=4)
+                    cens = [n for n, mm, cc in pts if cc]
+                    if cens:
+                        ax.plot(cens, [np.nanmax([mm for _, mm, _ in pts if np.isfinite(mm)] or [1.0])] * len(cens), "v",
+                                color=READOUT_COLOR[ro], ms=5)
+                ax.set_xscale("log"); ax.set_yscale("log"); ax.set_title(f"λ={lam}"); ax.set_xlabel("N")
+            axes[0, 0].set_ylabel("m½ (tasks)"); axes[0, -1].legend(fontsize=7)
+            fig.suptitle(f"κ={kappa}  δ₀={d0}  {solver} η={eta}   (▼ censored, dashed = ungated)", fontsize=9)
+            fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f"mhalf_vs_N_k{kappa}_d{d0}_{solver}_eta{eta}.png")); plt.close(fig)
 
 
 def fig_mhalf_vs_E0(conds, fig_dir):
     """m_half against E(0): readouts compared at matched learning per task; one figure per (κ, solver, η), panels per N."""
-    for gk, members in group(conds, ("kappa_label", "solver", "eta")).items():
-        kappa, solver, eta = gk
-        Ns = sorted({k[0] for k in members})
-        fig, axes = plt.subplots(1, len(Ns), figsize=(3.0 * len(Ns), 3.0), squeeze=False, sharey=True)
-        for j, N in enumerate(Ns):
-            ax = axes[0, j]
-            for ro in READOUT_COLOR:
-                pts = [(d["E0"], d["m_half"]) for k, d in members.items() if k[0] == N and k[2] == ro and not d["censored"]]
-                if pts:
-                    x, y = zip(*pts)
-                    ax.plot(x, y, "o", ms=4, color=READOUT_COLOR[ro], label=READOUT_LABEL[ro], alpha=0.85)
-            ax.set_title(f"N={N}"); ax.set_xlabel("E(0)"); ax.set_yscale("log")
-        axes[0, 0].set_ylabel("m½ (tasks)"); axes[0, -1].legend(fontsize=7)
-        fig.suptitle(f"κ={kappa}  {solver} η={eta}  (all δ₀, λ)", fontsize=9)
-        fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f"mhalf_vs_E0_k{kappa}_{solver}_eta{eta}.png")); plt.close(fig)
+    for kappa, kmembers in by_kappa(conds).items():
+        for gk, members in group(kmembers, ("solver", "eta")).items():
+            solver, eta = gk
+            Ns = sorted({k[0] for k in members})
+            fig, axes = plt.subplots(1, len(Ns), figsize=(3.0 * len(Ns), 3.0), squeeze=False, sharey=True)
+            for j, N in enumerate(Ns):
+                ax = axes[0, j]
+                for ro in READOUT_COLOR:
+                    pts = [(d["E0"], d["m_half"]) for k, d in members.items() if k[0] == N and k[2] == ro and not d["censored"]]
+                    if pts:
+                        x, y = zip(*pts)
+                        ax.plot(x, y, "o" if is_gated(ro) else "s", ms=4, color=READOUT_COLOR[ro], label=READOUT_LABEL[ro], alpha=0.85)
+                ax.set_title(f"N={N}"); ax.set_xlabel("E(0)"); ax.set_yscale("log")
+            axes[0, 0].set_ylabel("m½ (tasks)"); axes[0, -1].legend(fontsize=7)
+            fig.suptitle(f"κ={kappa}  {solver} η={eta}  (all δ₀, λ; squares = ungated)", fontsize=9)
+            fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f"mhalf_vs_E0_k{kappa}_{solver}_eta{eta}.png")); plt.close(fig)
 
 
 def fig_kaczmarz(conds, fig_dir):
-    """Check 4: frozen readout, S(m)/S(0) vs κ²m/N should collapse across N."""
-    members = {k: d for k, d in conds.items() if k[2] == "frozen"}
-    if not members:
-        return
-    for gk, sub in group(members, ("kappa_label", "lam", "solver", "eta")).items():
-        kappa, lam, solver, eta = gk
-        Ns = sorted({k[0] for k in sub})
-        fig, ax = plt.subplots(figsize=(4.0, 3.0))
-        for i, N in enumerate(Ns):
-            for k, d in sub.items():
-                if k[0] != N:
-                    continue
-                x = d["run"].kappa ** 2 * d["ages"] / N
-                ax.plot(x, d["S"] / d["S"][0], color=n_shade(i, len(Ns)), alpha=0.8, label=f"N={N}" if k[3] == sorted({kk[3] for kk in sub if kk[0] == N})[0] else None)
-        ax.set_xlabel("κ² m / N"); ax.set_ylabel("S(m) / S(0)"); ax.set_xscale("log")
-        ax.set_title(f"frozen readout, κ={kappa}, λ={lam} (all δ₀)"); ax.legend(fontsize=7)
-        fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f"kaczmarz_k{kappa}_lam{lam}_{solver}_eta{eta}.png")); plt.close(fig)
+    """Check 4: frozen readouts, S(m)/S(0) vs κ²m/N should collapse across N (m/N for ungated frozen)."""
+    for ro in ("gated_frozen", "frozen"):
+        members = {k: d for k, d in conds.items() if k[2] == ro}
+        for gk, sub in group(members, ("kappa_label", "lam", "solver", "eta")).items():
+            kappa, lam, solver, eta = gk
+            Ns = sorted({k[0] for k in sub})
+            fig, ax = plt.subplots(figsize=(4.0, 3.0))
+            for i, N in enumerate(Ns):
+                first = True
+                for k, d in sub.items():
+                    if k[0] != N:
+                        continue
+                    x = d["run"].kappa ** 2 * d["ages"] / N
+                    ax.plot(x, d["S"] / d["S"][0], color=n_shade(i, len(Ns)), alpha=0.8, label=f"N={N}" if first else None)
+                    first = False
+            ax.set_xlabel("κ² m / N" if is_gated(ro) else "m / N"); ax.set_ylabel("S(m) / S(0)"); ax.set_xscale("log")
+            ax.set_title(f"{READOUT_LABEL[ro]}, κ={kappa}, λ={lam} (all δ₀)", color=READOUT_COLOR[ro]); ax.legend(fontsize=7)
+            fig.tight_layout(); fig.savefig(os.path.join(fig_dir, f"kaczmarz_{ro}_k{kappa}_lam{lam}_{solver}_eta{eta}.png")); plt.close(fig)
 
 
 def report_cv(conds, age_index=1):
@@ -215,15 +235,17 @@ def main(argv=None):
         print("no batch files found"); return 1
     rows = write_summary(conds, args.out_dir)
     print(f"{len(rows)} conditions from {sum(d['n_seeds'] for d in conds.values())} runs")
-    print(f"check 1  max gauge residuals (projected readouts): Δ {max(r['gauge_delta_max'] for r in rows if r['readout'] != 'frozen'):.2e}, "
-          f"u_c {max(r['gauge_uc_max'] for r in rows if r['readout'] != 'frozen'):.2e}")
+    proj = [r for r in rows if "frozen" not in r["readout"]]
+    if proj:
+        print(f"check 1  max gauge residuals (projected readouts): Δ {max(r['gauge_delta_max'] for r in proj):.2e}, "
+              f"u_c {max(r['gauge_uc_max'] for r in proj):.2e}")
     flagged = [r for r in rows if any(v for k, v in r.items() if k.startswith('flag_'))]
     print(f"check 2  conditions with a half-window flag in ≥1 seed: {len(flagged)}/{len(rows)}")
     for cvr in report_cv(conds):
-        print(f"check 3  CV(s, m=1) ∝ N^γ  γ={cvr['gamma']:+.2f}  {cvr['readout']:8s} κ={cvr['kappa']} δ₀={cvr['delta0']} λ={cvr['lam']}")
+        print(f"check 3  CV(s, m=1) ∝ N^γ  γ={cvr['gamma']:+.2f}  {cvr['readout']:14s} κ={cvr['kappa']} δ₀={cvr['delta0']} λ={cvr['lam']}")
     print("m_half (tasks), NaN = censored:")
     for r in rows:
-        print(f"  N={r['N']:4d} κ={r['kappa_label']:5s} {r['readout']:8s} δ₀={r['delta0']:6.2f} λ={r['lam']:4.1f}  "
+        print(f"  N={r['N']:4d} κ={r['kappa_label']:5s} {r['readout']:14s} δ₀={r['delta0']:6.2f} λ={r['lam']:4.1f}  "
               f"E0={r['E0']:.3f}  S0={r['S0']:.3f}  m½={r['m_half']:7.2f}  λ_real={r['lam_real']:.2f}")
     if not args.no_figures:
         fig_dir = args.fig_dir or os.path.join(args.out_dir, "figures")

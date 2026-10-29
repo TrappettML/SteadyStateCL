@@ -45,9 +45,15 @@ def main(argv=None):
     n_runs = sum(len(b) for b in batches)
     print(f"{cfg.name}: {n_runs} runs in {len(batches)} batches → {out}")
     if args.dry_run:
+        from mup.protocol import feasible
+        n_skip = 0
         for i, b in enumerate(batches):
             r = b[0]
-            print(f"  batch {i:4d}: {len(b):3d} runs  N={r.N} D={r.D} κ={r.kappa_label} {r.solver} n_steps={r.n_steps} T={r.T_burn + r.T_meas}")
+            bad = int((~feasible(b)).sum())
+            n_skip += bad
+            print(f"  batch {i:4d}: {len(b):3d} runs  N={r.N} D={r.D} κ={r.kappa_label} {r.solver} n_steps={r.n_steps} "
+                  f"T={r.T_burn + r.T_meas}" + (f"  ({bad} infeasible δ₀, will be skipped)" if bad else ""))
+        print(f"{n_skip} of {n_runs} runs are infeasible (δ₀ ≤ −min_i Q0_i) and will be skipped")
         return 0
 
     pending = io.pending_batches(out)

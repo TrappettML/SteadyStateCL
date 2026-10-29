@@ -17,9 +17,10 @@ REF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference_hash.t
 
 
 def _hash():
-    cfg = Config(N=[10], readout=["learned", "frozen", "heads"], delta0=[1.0], lam=[1.0], seeds=1,
-                 T_factor=0.25, T_min=5)
-    runs = make_runs(cfg)
+    cfg = Config(N=[10], readout=["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"],
+                 delta0=[1.0], lam=[1.0], seeds=1, T_factor=0.25, T_min=5)
+    from conftest import one_batch
+    runs = one_batch(make_runs(cfg))
     assert runs[0].T_burn + runs[0].T_meas == 10
     res = run_stream(runs)
     h = hashlib.sha256()

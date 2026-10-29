@@ -2,7 +2,7 @@
 name: sgd_corner
 N: [10, 20, 50]
 kappa: [1.0]
-readout: [learned, frozen, heads]
+readout: [gated_shared, gated_frozen, task_heads]
 delta0: [0.0]
 lam: [0.5, 1.0]
 seeds: 4

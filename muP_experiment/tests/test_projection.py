@@ -16,7 +16,7 @@ def _perturb(st, p):
 
 
 def test_projection_preserves_uc_and_pins_delta():
-    for readout in ("learned", "heads"):
+    for readout in ("gated_shared", "learned_shared", "task_heads"):
         st, p = state_with_task(seed=3, N=16, D=64, readout=readout, delta0=-0.5, eta=0.2)
         st = _perturb(st, p)
         act = np.asarray(st.g) == 1
@@ -33,7 +33,7 @@ def test_projection_preserves_uc_and_pins_delta():
 
 
 def test_projection_is_noop_when_disabled():
-    st, p = state_with_task(seed=5, readout="frozen")
+    st, p = state_with_task(seed=5, readout="gated_frozen")
     st = _perturb(st, p)
     new = model.project(st, p)
     assert np.array_equal(np.asarray(new.W), np.asarray(st.W))
@@ -41,7 +41,7 @@ def test_projection_is_noop_when_disabled():
 
 
 def test_stored_heads_keep_stored_uk():
-    st, p = state_with_task(seed=8, N=16, D=64, readout="heads", delta0=2.0, eta=0.5)
+    st, p = state_with_task(seed=8, N=16, D=64, readout="task_heads", delta0=2.0, eta=0.5)
     st = _perturb(st, p)
     ages = jnp.asarray([0])
     st = st._replace(t=jnp.int32(0))

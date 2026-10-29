@@ -1,9 +1,10 @@
-# Stage 1 (Table 1 of the plan): population solver.
-# 5 N × 2 κ × 3 readouts × 6 δ₀ × 4 λ × 8 seeds = 5760 runs.
+# Stage 1 (Table 1 of the plan): population solver (PLAN.md §8).
+# gated: 5 N × 2 κ × 3 readouts × 6 δ₀ × 4 λ × 8 seeds = 5760 runs
+# ungated (no κ, listed once per N): 5 N × 2 readouts × 6 δ₀ × 4 λ × 8 seeds = 1920 runs
 name: stage1
 N: [5, 10, 20, 50, 100]
 kappa: [1.0, 2.0]
-readout: [learned, frozen, heads]
+readout: [gated_shared, learned_shared, gated_frozen, frozen, task_heads]
 delta0: [-0.75, -0.5, 0.0, 1.0, 4.0, 16.0]
 lam: [0.5, 1.0, 2.0, 4.0]
 seeds: 8

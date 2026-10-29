@@ -10,11 +10,18 @@ from typing import Any, Optional, Sequence
 import yaml
 
 READOUTS = {
-    #            learn_a, do_proj, use_heads
-    "learned": (1.0, 1.0, 0.0),
-    "frozen":  (0.0, 0.0, 0.0),
-    "heads":   (1.0, 1.0, 1.0),
+    #                  gated, learn_a, do_proj, use_heads        (PLAN.md §4)
+    "gated_shared":   (1.0, 1.0, 1.0, 0.0),   # one a, learned every task; κ-sparse gates
+    "learned_shared": (0.0, 1.0, 1.0, 0.0),   # one a, learned every task; no gating
+    "gated_frozen":   (1.0, 0.0, 0.0, 0.0),   # a = a⁽⁰⁾ forever, Q unpinned; κ-sparse gates
+    "frozen":         (0.0, 0.0, 0.0, 0.0),   # a = a⁽⁰⁾ forever, Q unpinned; no gating
+    "task_heads":     (1.0, 1.0, 1.0, 1.0),   # fresh head per task, stored heads rescaled; κ-sparse gates
 }
+READOUT_ORDER = tuple(READOUTS)
+
+
+def is_gated(readout: str) -> bool:
+    return READOUTS[readout][0] == 1.0
 
 
 @dataclass
@@ -22,7 +29,7 @@ class Config:
     name: str = "pilot"
     N: Sequence[int] = (10, 20)
     kappa: Sequence[Any] = (1.0,)          # floats or the string "sqrtN"
-    readout: Sequence[str] = ("learned", "frozen", "heads")
+    readout: Sequence[str] = READOUT_ORDER
     delta0: Sequence[float] = (0.0,)
     lam: Sequence[float] = (1.0,)
     seeds: Any = 2                          # int (→ range) or explicit list
@@ -77,23 +84,28 @@ class Run:
 
     @property
     def pN(self) -> float:
-        return self.kappa * math.sqrt(self.N)
+        """Nominal active count κ√N; exactly N for an ungated run (PLAN.md §2)."""
+        return float(self.N) if not is_gated(self.readout) else self.kappa * math.sqrt(self.N)
 
     @property
     def Delta0(self) -> float:
         return self.delta0 / self.eta
 
     @property
-    def learn_a(self) -> float:
+    def gated(self) -> float:
         return READOUTS[self.readout][0]
 
     @property
-    def do_proj(self) -> float:
+    def learn_a(self) -> float:
         return READOUTS[self.readout][1]
 
     @property
-    def use_heads(self) -> float:
+    def do_proj(self) -> float:
         return READOUTS[self.readout][2]
+
+    @property
+    def use_heads(self) -> float:
+        return READOUTS[self.readout][3]
 
     def batch_key(self) -> tuple:
         return (self.N, self.D, self.kappa, self.solver, self.n_steps, self.T_burn, self.T_meas)
@@ -104,7 +116,8 @@ class Run:
 
     def to_dict(self) -> dict:
         d = dataclasses.asdict(self)
-        d.update(pN=self.pN, Delta0=self.Delta0, learn_a=self.learn_a, do_proj=self.do_proj, use_heads=self.use_heads)
+        d.update(pN=self.pN, Delta0=self.Delta0, gated=self.gated, learn_a=self.learn_a,
+                 do_proj=self.do_proj, use_heads=self.use_heads)
         return d
 
     @classmethod
@@ -138,28 +151,33 @@ def resolve_kappa(k: Any, N: int) -> tuple[float, str]:
 
 
 def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run]:
-    """Expand the grid of a config into a list of runs."""
+    """Expand the grid of a config into a list of runs.
+
+    Gated readouts iterate over ``cfg.kappa``; ungated readouts have no κ
+    (every unit is active, pN = N, i.e. the κ = √N point) and are listed
+    once per (N, δ₀, λ, η, seed) with ``kappa_label = "sqrtN"`` (PLAN.md §4).
+    """
+    for readout in cfg.readout:
+        if readout not in READOUTS:
+            raise ValueError(f"unknown readout {readout!r}; known: {list(READOUTS)}")
     runs = []
     for N in cfg.N:
         if N_filter is not None and N not in N_filter:
             continue
         D = cfg.D_factor * N
-        for kraw in cfg.kappa:
-            kappa, klabel = resolve_kappa(kraw, N)
-            T_half = max(cfg.T_min, int(round(cfg.T_factor * N / kappa**2)))
-            for readout, delta0, lam, eta, seed in itertools.product(
-                cfg.readout, cfg.delta0, cfg.lam, cfg.eta, cfg.seed_list()
-            ):
-                if readout not in READOUTS:
-                    raise ValueError(f"unknown readout {readout!r}")
-                if delta0 <= -1.0:
-                    raise ValueError(f"δ₀ = {delta0} ≤ −1 makes the initial readout imaginary")
-                n_steps, h, alpha = task_duration(cfg.solver, lam, eta, delta0, cfg, D)
-                runs.append(Run(
-                    N=N, D=D, kappa=kappa, readout=readout, delta0=float(delta0), lam=float(lam),
-                    seed=int(seed), solver=cfg.solver, eta=float(eta), h=float(h), n_steps=int(n_steps),
-                    alpha_task=float(alpha), T_burn=T_half, T_meas=T_half, kappa_label=klabel,
-                ))
+        kappas = [resolve_kappa(k, N) for k in cfg.kappa]
+        for readout in cfg.readout:
+            for kappa, klabel in (kappas if is_gated(readout) else [(math.sqrt(N), "sqrtN")]):
+                T_half = max(cfg.T_min, int(round(cfg.T_factor * N / kappa**2)))
+                for delta0, lam, eta, seed in itertools.product(cfg.delta0, cfg.lam, cfg.eta, cfg.seed_list()):
+                    if delta0 <= -1.0:
+                        raise ValueError(f"δ₀ = {delta0} ≤ −1 makes the initial readout imaginary")
+                    n_steps, h, alpha = task_duration(cfg.solver, lam, eta, delta0, cfg, D)
+                    runs.append(Run(
+                        N=N, D=D, kappa=kappa, readout=readout, delta0=float(delta0), lam=float(lam),
+                        seed=int(seed), solver=cfg.solver, eta=float(eta), h=float(h), n_steps=int(n_steps),
+                        alpha_task=float(alpha), T_burn=T_half, T_meas=T_half, kappa_label=klabel,
+                    ))
     return runs
 
 

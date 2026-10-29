@@ -20,6 +20,7 @@ class Params(NamedTuple):
     h: jnp.ndarray         # population step in α (unused for SGD)
     pN: jnp.ndarray        # nominal active count κ√N
     lam: jnp.ndarray       # λ = Λ ā²  (bookkeeping only)
+    gated: jnp.ndarray     # 1: gate ~ Bernoulli(pN/N); 0: all units active (pN = N)
     learn_a: jnp.ndarray   # 1: readout learns, 0: frozen
     do_proj: jnp.ndarray   # 1: project onto Δ_i = Δ₀ after every step
     use_heads: jnp.ndarray  # 1: task-specific heads
@@ -27,10 +28,10 @@ class Params(NamedTuple):
 
 class State(NamedTuple):
     W: jnp.ndarray         # (N, D) hidden rows
-    a: jnp.ndarray         # (N,)   shared readout, or the current head
-    g: jnp.ndarray         # (N,)   current gate, 0/1 floats
+    a: jnp.ndarray         # (N,)   shared readout, or the current task head
+    g: jnp.ndarray         # (N,)   current gate, 0/1 floats (all ones when ungated)
     w: jnp.ndarray         # (D,)   current teacher
-    heads: jnp.ndarray     # (P, N) stored heads (zeros unless use_heads)
+    heads: jnp.ndarray     # (P, N) stored task heads (zeros unless use_heads)
     probes_w: jnp.ndarray  # (P, D)
     probes_g: jnp.ndarray  # (P, N)
     key: jnp.ndarray       # PRNGKey of the run
@@ -143,11 +144,12 @@ def draw_readout(key: jnp.ndarray, Q: jnp.ndarray, p: Params) -> jnp.ndarray:
     return eps * jnp.sqrt(p.eta * (p.Delta0 + Q / p.eta))
 
 
-def draw_task(key: jnp.ndarray, N: int, D: int, pN: jnp.ndarray):
-    """Teacher w ~ N(0, I_D) and gate g_i ~ Bernoulli(pN/N), independent."""
+def draw_task(key: jnp.ndarray, N: int, D: int, pN: jnp.ndarray, gated=1.0):
+    """Teacher w ~ N(0, I_D) and gate g_i ~ Bernoulli(pN/N), independent; g = 1 when ungated."""
     kw, kg = jax.random.split(key)
     w = jax.random.normal(kw, (D,), dtype=jnp.float64)
     g = (jax.random.uniform(kg, (N,), dtype=jnp.float64) < pN / N).astype(jnp.float64)
+    g = jnp.where(gated == 1.0, g, jnp.ones_like(g))
     return w, g
 
 

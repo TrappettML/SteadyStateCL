@@ -1,8 +1,8 @@
-# Laptop pilot: small widths, population solver, all three readouts.
+# Laptop pilot: small widths, population solver, all five readouts (PLAN.md §9.1 L2).
 name: pilot
 N: [10, 20]
 kappa: [1.0]
-readout: [learned, frozen, heads]
+readout: [gated_shared, learned_shared, gated_frozen, frozen, task_heads]
 delta0: [0.0, 4.0]
 lam: [1.0, 4.0]
 seeds: 2

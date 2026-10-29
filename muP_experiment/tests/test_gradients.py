@@ -8,7 +8,7 @@ from mup import model
 
 
 def test_sgd_step_matches_autograd():
-    st, p = state_with_task(seed=1, N=12, D=48, readout="learned", eta=0.3)
+    st, p = state_with_task(seed=1, N=12, D=48, readout="gated_shared", eta=0.3)
     k = jax.random.PRNGKey(99)
     x = jax.random.normal(k, (48,), dtype=jnp.float64)
     gW, ga = jax.grad(lambda W, a: model.sample_loss(st._replace(W=W, a=a), p, x), argnums=(0, 1))(st.W, st.a)
@@ -19,7 +19,7 @@ def test_sgd_step_matches_autograd():
 
 
 def test_frozen_readout_does_not_move():
-    st, p = state_with_task(seed=2, readout="frozen")
+    st, p = state_with_task(seed=2, readout="gated_frozen")
     new = model.sgd_step(st, p, jax.random.PRNGKey(3))
     assert np.array_equal(np.asarray(new.a), np.asarray(st.a))
     new = model.pop_step(st, p)
@@ -35,6 +35,14 @@ def test_inactive_units_receive_zero():
     assert np.array_equal(np.asarray(new.a)[off], np.asarray(st.a)[off])
     new = model.pop_step(st, p)
     assert np.array_equal(np.asarray(new.W)[off], np.asarray(st.W)[off])
+
+
+def test_ungated_gate_is_all_ones():
+    for ro in ("learned_shared", "frozen"):
+        st, p = state_with_task(seed=4, N=20, D=80, readout=ro)
+        assert np.all(np.asarray(st.g) == 1.0)
+    st, p = state_with_task(seed=4, N=20, D=80, readout="gated_shared")
+    assert 0 < np.asarray(st.g).sum() < 20
 
 
 def test_pop_step_is_expected_sgd_step():

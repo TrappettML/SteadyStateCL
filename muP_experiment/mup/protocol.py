@@ -31,7 +31,7 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, *, n_steps: int, solver
     kt = jax.random.fold_in(state.key, state.t)
     k_teach, k_head, k_stream = jax.random.split(kt, 3)
 
-    w_t, g_t = model.draw_task(k_teach, N, D, p.pN)
+    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated)
     head = model.draw_readout(k_head, model.Q_diag(state.W), p)
     a = jnp.where(p.use_heads == 1.0, head, state.a)
     state = state._replace(w=w_t, g=g_t, a=a)
@@ -100,7 +100,7 @@ def make_params(runs: Sequence) -> Params:
         return jnp.asarray([float(getattr(r, name)) for r in runs], dtype=jnp.float64)
     return Params(
         Delta0=col("Delta0"), eta=col("eta"), h=col("h"), pN=col("pN"), lam=col("lam"),
-        learn_a=col("learn_a"), do_proj=col("do_proj"), use_heads=col("use_heads"),
+        gated=col("gated"), learn_a=col("learn_a"), do_proj=col("do_proj"), use_heads=col("use_heads"),
     )
 
 
