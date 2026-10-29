@@ -218,3 +218,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- SteadyStateCL project ---
+# local virtual env (lives beside the repo as code/sscl_env, but just in case)
+sscl_env/
+# macOS
+.DS_Store
+# experiment outputs and figures
+results/
+figures/
+*.npz
+*.h5
+*.zarr/
+# LaTeX build products if any writing is added here
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.out
+*.toc
