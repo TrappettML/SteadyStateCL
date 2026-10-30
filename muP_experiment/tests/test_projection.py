@@ -59,3 +59,15 @@ def test_init_pins_delta_and_a_nonzero():
     d = np.asarray(model.imbalance(st, p))
     np.testing.assert_allclose(d, float(p.Delta0), atol=1e-12, rtol=0)
     assert (np.asarray(st.a) != 0).all()
+
+
+def test_projection_pins_delta_for_negative_delta0_with_tiny_a():
+    """Δ₀ < 0 with a_i → 0 (learned shared at δ₀ < 0, Stage 1): the pin must hold to rounding, not to ε Δ₀²/a²."""
+    st, p = state_with_task(seed=1, N=16, D=64, readout="learned_shared", delta0=-0.5, eta=1.0)
+    for a_scale in (1e-3, 1e-5, 1e-8):
+        tiny = st._replace(a=st.a * a_scale)
+        before = np.asarray(model.u_c(tiny, p))
+        new = model.project(tiny, p)
+        np.testing.assert_allclose(np.asarray(model.u_c(new, p)), before, atol=1e-13, rtol=0)
+        d = np.asarray(model.imbalance(new, p))
+        assert np.abs(d - float(p.Delta0)).max() < 1e-12, (a_scale, np.abs(d - float(p.Delta0)).max())

@@ -4,7 +4,7 @@ Implementation of `PLAN.md` (JAX, float64, CPU).  Run everything from this
 directory with the project venv active (`code/sscl_env`).
 
 ```bash
-pytest tests                                              # 32 tests, 40 s to 2 min: the two plotting tests render every figure family
+pytest tests                                              # 33 tests, 40 s to 2 min: the two plotting tests render every figure family
 python scripts/run_sweep.py --config configs/pilot.yaml   # laptop pilot, ~10 s
 python scripts/analyze.py results/pilot                   # summary.csv, curves.json, figures/{slices,summary,checks}/ (--cells for per-cell figures, --all for diagnostics)
 python scripts/validate.py                                # η-halving, Kaczmarz collapse, CV exponent
@@ -159,6 +159,12 @@ pools seeds into `summary.csv` (one row per condition: `S0`, `E0`, `m_half`,
   `heads`, no `gated` key) load with the names mapped to today's
   (`config.LEGACY_READOUTS`; a legacy `frozen` at κ = √N is today's
   ungated `frozen`).
+- The projection (`model.project_rows`) computes the larger of a′², Q′ from
+  the closed form and the other by division, so Δᵢ is pinned to rounding for
+  either sign of Δ₀.  Before 2026-10-30 it always took a′² from the formula,
+  which for Δ₀ < 0 and aᵢ → 0 (learned shared at δ₀ < 0) left check-1
+  residuals up to 0.06 at N = 100; Stage-1 ungated batches from before that
+  date are stale for this reason too.
 - Test 9 (`tests/test_trace.py`) checks that a traced run (`lax.scan`)
   reproduces the untraced one (`fori_loop`) bit-for-bit.
 - Test 5 compares floats to 1e-10, not bit-for-bit (XLA reduction order,

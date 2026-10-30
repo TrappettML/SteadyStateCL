@@ -260,9 +260,14 @@ def project_rows(state: State, p: Params) -> tuple[State, jnp.ndarray]:
     """
     Rescale every active unit onto Δ_i = Δ₀, eq. (proj), without touching the stored heads.
 
-    Uses the cancellation-free product form A′ = ½(Δ₀ + √(Δ₀² + 4AB)),
-    B′ = AB/A′, which preserves u_c exactly (A′B′ = AB).  A no-op when
-    ``do_proj == 0``.
+    Uses the cancellation-free product form: the larger root directly,
+    A′ = ½(Δ₀ + √(Δ₀² + 4AB)) when Δ₀ ≥ 0 or B′ = ½(−Δ₀ + √(Δ₀² + 4AB))
+    when Δ₀ < 0, and the other as AB divided by it, which preserves u_c
+    exactly (A′B′ = AB) and pins Δ′ = A′ − B′ to Δ₀ to rounding of the
+    larger root.  Taking A′ from the formula for Δ₀ < 0 would subtract two
+    nearly equal numbers, with an error in Δ′ of order ε Δ₀²/A′: with
+    the learned shared readout at δ₀ < 0, where a_i → 0, that reached
+    0.05 at N = 100 (Stage 1, 2026-10-30).  A no-op when ``do_proj == 0``.
 
     Parameters
     ----------
@@ -281,8 +286,11 @@ def project_rows(state: State, p: Params) -> tuple[State, jnp.ndarray]:
     Q = Q_diag(W)
     A = a * a / p.eta
     B = Q / p.eta
-    Ap = 0.5 * (p.Delta0 + jnp.hypot(p.Delta0, 2.0 * jnp.sqrt(A * B)))
-    Bp = A * B / Ap
+    AB = A * B
+    big = 0.5 * (jnp.abs(p.Delta0) + jnp.hypot(p.Delta0, 2.0 * jnp.sqrt(AB)))   # the larger of A′, B′
+    small = AB / big
+    Ap = jnp.where(p.Delta0 >= 0.0, big, small)
+    Bp = jnp.where(p.Delta0 >= 0.0, small, big)
     a_p = jnp.sign(a) * jnp.sqrt(p.eta * Ap)
     f = jnp.sqrt(p.eta * Bp / Q)
     act = (g == 1.0) & (p.do_proj == 1.0)

@@ -236,9 +236,12 @@ def half_stats(x: np.ndarray, T_burn: int, T_meas: int) -> dict:
         independent, so conservative), ``z``, ``ratio`` (half1/half0 − 1).
     """
     mid = T_burn + T_meas // 2
-    segs = (x[T_burn:mid], x[mid:T_burn + T_meas])
-    m = [float(np.nanmean(s)) if len(s) else np.nan for s in segs]
-    se = [float(np.nanstd(s, ddof=1) / np.sqrt(len(s))) if len(s) > 1 else np.nan for s in segs]
+    # finite values only: an active-unit mean is NaN for a task whose gate drew no unit (small N, κ), and a
+    # half-window may hold none, which must give NaN quietly rather than numpy's empty-slice warnings
+    segs = [np.asarray(s, float) for s in (x[T_burn:mid], x[mid:T_burn + T_meas])]
+    segs = [s[np.isfinite(s)] for s in segs]
+    m = [float(s.mean()) if len(s) else np.nan for s in segs]
+    se = [float(s.std(ddof=1) / np.sqrt(len(s))) if len(s) > 1 else np.nan for s in segs]
     se_tot = np.float64(np.sqrt(se[0] ** 2 + se[1] ** 2))
     with np.errstate(invalid="ignore", divide="ignore"):
         z = np.abs(np.float64(m[1] - m[0])) / se_tot              # inf when the halves are constant and differ
