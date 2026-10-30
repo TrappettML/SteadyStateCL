@@ -154,6 +154,27 @@ def load_traces(out_dir: str) -> list[tuple[np.ndarray, np.ndarray, Run, dict]]:
     return out
 
 
+def clear_sweep(out_dir: str) -> list[str]:
+    """Delete a sweep's batch files, traces, logs and derived outputs (``--fresh``); the manifest is rewritten by the caller.
+
+    Returns
+    -------
+    list of str
+        The paths removed.
+    """
+    import shutil
+    removed = []
+    if not os.path.isdir(out_dir):
+        return removed
+    for f in sorted(os.listdir(out_dir)):
+        path = os.path.join(out_dir, f)
+        if re.fullmatch(r"batch_\d+\.npz", f) or f in ("summary.csv", "curves.json", "validate.log"):
+            os.remove(path); removed.append(path)
+        elif f in ("traces", "logs", "figures") and os.path.isdir(path):
+            shutil.rmtree(path); removed.append(path)
+    return removed
+
+
 def load_sweep(out_dir: str) -> list[tuple[dict, list[Run], dict]]:
     """
     Load every finished batch file of a sweep, in batch order.

@@ -5,7 +5,10 @@
     python scripts/run_sweep.py --config configs/stage1.yaml --workers 90     # subprocess pool (Xeon)
     python scripts/run_sweep.py --config configs/stage1.yaml --batch-id 7     # one batch (used by the driver)
 
-Results go to results/<name>/ (or --out); the manifest makes the sweep resumable.
+Results go to results/<name>/ (or --out); the manifest makes the sweep resumable:
+a rerun does only the missing and stale (older-schema) batches.  ``--fresh``
+deletes the existing batch files, traces, logs and figures first and reruns
+every batch.
 """
 import argparse
 import os
@@ -39,6 +42,8 @@ def main(argv=None):
     ap.add_argument("--threads", type=int, default=1, help="XLA threads per worker")
     ap.add_argument("--batch-id", type=int, default=None, help="run exactly this batch in-process")
     ap.add_argument("--dry-run", action="store_true", help="only write the manifest and print the batches")
+    ap.add_argument("--fresh", action="store_true",
+                    help="delete the existing batch files, traces, logs and figures, then rerun every batch (default: resume, rerunning only missing or stale batches)")
     ap.add_argument("--log-every", type=int, default=0)
     args = ap.parse_args(argv)
 
@@ -52,6 +57,9 @@ def main(argv=None):
         run_batch(out, args.batch_id, batches[args.batch_id], args.log_every, update_manifest=False)
         return 0
 
+    if args.fresh and not args.dry_run:
+        removed = io.clear_sweep(out)
+        print(f"--fresh: removed {len(removed)} existing files/directories in {out}")
     batches = io.plan_sweep(cfg, out, args.N, config_path)
     n_runs = sum(len(b) for b in batches)
     print(f"{cfg.name}: {n_runs} runs in {len(batches)} batches → {out}")
@@ -67,7 +75,7 @@ def main(argv=None):
         print(f"{n_skip} of {n_runs} runs are infeasible (δ₀ ≤ −min_i Q0_i) and will be skipped")
         return 0
 
-    pending = io.pending_batches(out)
+    pending = io.pending_batches(out)          # after --fresh every batch is pending
     if args.workers > 0:
         from mup import driver
         res = driver.launch(config_path, out, args.workers, args.numa_nodes, args.threads, pending)

@@ -25,7 +25,7 @@ batch file written under an older result schema (`io.SCHEMA_VERSION`, stored
 in each file's `meta_json`) counts as stale and is rerun: it lacks the newer
 scalars, and `load_runs` warns about such files, the checks table prints
 "not recorded" and the norms figures hatch the panel instead of leaving it
-blank.
+blank.  `--fresh` deletes the sweep's batch files, traces, logs and figures and reruns every batch.
 `--batch-id i` runs a single batch in-process (what the driver calls).
 
 ## Layout
