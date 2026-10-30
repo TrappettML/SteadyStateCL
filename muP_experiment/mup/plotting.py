@@ -531,7 +531,11 @@ def caption(fig, text: str) -> None:
     text : str
     """
     w = fig.get_size_inches()[0]
-    lines = textwrap.wrap(text, width=max(20, int((w - 0.4) / _CHAR_IN)))
+    # a mathtext span must not be split across lines (unbalanced $ renders literally): protect its spaces while wrapping
+    NBSP = "\u00a0"
+    parts = text.split("$")
+    protected = "$".join(p.replace(" ", NBSP) if i % 2 else p for i, p in enumerate(parts))
+    lines = [l.replace(NBSP, " ") for l in textwrap.wrap(protected, width=max(20, int((w - 0.4) / _CHAR_IN)))]
     if fig._mup.get("caption") is not None:
         fig._mup["caption"].remove()
     fig._mup["caption_lines"] = max(1, len(lines))

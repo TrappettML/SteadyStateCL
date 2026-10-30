@@ -6,9 +6,9 @@
 
 Default figures (PLAN.md §12.3, §12.6; one set per λ):
 
-- ``slices/``: per readout and κ, columns = δ₀, traces = N, x in
-  lifetimes; S1 norms vs task (via ``plot_norms.py``), S2 S(m)/S(0) and
-  E(m) vs age.
+- ``slices/``: per readout and κ, columns = δ₀, traces = N; S1 norms vs
+  task in lifetimes (via ``plot_norms.py``), S2 S(m)/S(0) and E(m) vs
+  age m in tasks.
 - ``summary/``: M1 maps over δ₀ × N, one panel per readout, of the
   lifetime m½κ_s²/N, the drift of mean |a|√Q per lifetime and E(0);
   M2 m½ vs N; M3 m½ vs E(0).
@@ -208,60 +208,44 @@ def fig_curves(conds, fig_dir, index, figdata):
 
 
 def fig_curvesN(conds, fig_dir, index, figdata):
-    """F4: S(m), E(m) vs age; rows S, E; columns = readouts; traces = N.  ``curvesN_lt_`` plots S/S(0) and E against m κ_s²/N."""
-    kmin = kappa_min([d["records"][0] for d in conds.values()])
+    """F4: S(m), E(m) vs age m (tasks); rows S, E; columns = readouts; traces = N."""
     for (kappa, cell), members in _cells(conds, ("delta0", "lam", "solver", "eta")).items():
         d0, lam, solver, eta = cell
         Ns = sorted({k[0] for k in members})
         ros = [ro for ro in P.READOUT_COLOR if any(k[2] == ro for k in members)]
-        for lt in (False, True):
-            fig, axes = P.grid(2, len(ros), sharex="all", sharey="row")
-            data, max_x, min_pos, notes = {}, 1.0, np.inf, []
-            for j, ro in enumerate(ros):
-                edges = {0: ([], []), 1: ([], [])}
-                for i_N, N in enumerate(Ns):
-                    key = next((k for k in members if k[0] == N and k[2] == ro), None)
-                    if key is None:
-                        continue
-                    d = members[key]
-                    rec = d["records"][0]
-                    scale = rec.kappa_sched(kmin) ** 2 / N if lt else 1.0
-                    x = d["ages"].astype(float) * scale
-                    max_x = max(max_x, float(x.max()))
-                    if lt and len(x) > 1:
-                        min_pos = min(min_pos, float(x[1]))
-                    col = P.n_shade(i_N, len(Ns))
-                    with np.errstate(invalid="ignore", divide="ignore"):
-                        S = d["S"] / d["S"][0] if lt else d["S"]
-                        S_se = d["S_se"] / abs(d["S"][0]) if lt else d["S_se"]
-                    for i, (y, se) in enumerate(((S, S_se), (d["E"], d["E_se"]))):
-                        tx, ty = _draw_curve(axes[i, j], x, y, se, d["n_pooled"], col, P.READOUT_STYLE[ro])
-                        edges[i][0].extend(tx); edges[i][1].extend(ty)
-                    if _thin_mask(d["n_pooled"]).any():
-                        notes.append(f"{P.READOUT_LABEL[ro]} N = {P.fmt(N)}: {int(d['n_pooled'][-1])}")
-                    data[f"{ro}_N{N}_S"], data[f"{ro}_N{N}_E"], data[f"{ro}_N{N}_x"] = S, d["E"], x
-                axes[0, j].set_title(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro])
-                axes[1, j].set_xlabel(r"$m\kappa_s^2/N$ (lifetimes)" if lt else "age m (tasks)")
-                for i in range(2):
-                    P.edge_markers(axes[i, j], *edges[i])
-            for ax in axes.ravel():
-                if lt:
-                    P.lifetime_axis(ax, max_x, min_pos if np.isfinite(min_pos) else 1e-3)
-                else:
-                    P.age_axis(ax, max_x)
-            if lt:
-                P.ref_line(axes[0, 0], 1.0)
-            axes[0, 0].set_ylabel("S(m) / S(0)" if lt else "S(m)"); axes[1, 0].set_ylabel("E(m)")
-            P.fig_legend(fig, None, handles=P.n_handles(Ns))
-            P.cell_title(fig, kappa, d0, lam, solver, eta, "traces = N" + (", x in lifetimes" if lt else ""))
-            cap = "band: ±1 s.e.m. over seeds; dashed columns: ungated; thin: ages with < 25 % of the trace's maximum count"
-            if lt:
-                cap += "; collapse across N = the lifetime scales as N/κ_s² (check 4)"
-            if notes:
-                cap += " (count at the last age: " + "; ".join(notes[:2]) + (", …" if len(notes) > 2 else "") + ")"
-            P.caption(fig, cap)
-            stem = P.cell_stem(kappa, d0, lam, solver, eta)
-            P.save(fig, os.path.join(fig_dir, "cells", "curves", ("curvesN_lt_" if lt else "curvesN_") + stem), data if figdata else None, index, "cells/curves", stem)
+        fig, axes = P.grid(2, len(ros), sharex="all", sharey="row")
+        data, max_x, notes = {}, 1.0, []
+        for j, ro in enumerate(ros):
+            edges = {0: ([], []), 1: ([], [])}
+            for i_N, N in enumerate(Ns):
+                key = next((k for k in members if k[0] == N and k[2] == ro), None)
+                if key is None:
+                    continue
+                d = members[key]
+                x = d["ages"].astype(float)
+                max_x = max(max_x, float(x.max()))
+                col = P.n_shade(i_N, len(Ns))
+                for i, (y, se) in enumerate(((d["S"], d["S_se"]), (d["E"], d["E_se"]))):
+                    tx, ty = _draw_curve(axes[i, j], x, y, se, d["n_pooled"], col, P.READOUT_STYLE[ro])
+                    edges[i][0].extend(tx); edges[i][1].extend(ty)
+                if _thin_mask(d["n_pooled"]).any():
+                    notes.append(f"{P.READOUT_LABEL[ro]} N = {P.fmt(N)}: {int(d['n_pooled'][-1])}")
+                data[f"{ro}_N{N}_S"], data[f"{ro}_N{N}_E"], data[f"{ro}_N{N}_x"] = d["S"], d["E"], x
+            axes[0, j].set_title(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro])
+            axes[1, j].set_xlabel("age m (tasks)")
+            for i in range(2):
+                P.edge_markers(axes[i, j], *edges[i])
+        for ax in axes.ravel():
+            P.age_axis(ax, max_x)
+        axes[0, 0].set_ylabel("S(m)"); axes[1, 0].set_ylabel("E(m)")
+        P.fig_legend(fig, None, handles=P.n_handles(Ns))
+        P.cell_title(fig, kappa, d0, lam, solver, eta, "traces = N")
+        cap = "band: ±1 s.e.m. over seeds; dashed columns: ungated; thin: ages with < 25 % of the trace's maximum count"
+        if notes:
+            cap += " (count at the last age: " + "; ".join(notes[:2]) + (", …" if len(notes) > 2 else "") + ")"
+        P.caption(fig, cap)
+        stem = P.cell_stem(kappa, d0, lam, solver, eta)
+        P.save(fig, os.path.join(fig_dir, "cells", "curves", "curvesN_" + stem), data if figdata else None, index, "cells/curves", stem)
 
 
 def _slice_conds(conds):
@@ -273,14 +257,13 @@ def _slice_conds(conds):
 
 
 def fig_S2(conds, fig_dir, index, figdata):
-    """S2: curves slice, one file per (readout, κ, λ, solver, η); rows S/S(0), E; columns = δ₀; traces = N; x = m κ_s²/N (PLAN.md §12.3)."""
-    kmin = kappa_min([d["records"][0] for d in conds.values()])
+    """S2: curves slice, one file per (readout, κ, λ, solver, η); rows S/S(0), E; columns = δ₀; traces = N; x = age m in tasks (PLAN.md §12.3)."""
     for (ro, kappa, lam, solver, eta), members in _slice_conds(conds).items():
         Ns = sorted({k[0] for k in members})
         d0s_all = sorted({k[3] for k in members})
         for part, d0s in enumerate(P.col_chunks(d0s_all)):
             fig, axes = P.grid(2, len(d0s), sharex="all", sharey="row")
-            data, max_x, min_pos, notes = {}, 1.0, np.inf, []
+            data, max_x, notes = {}, 1.0, []
             for j, d0 in enumerate(d0s):
                 edges = {0: ([], []), 1: ([], [])}
                 for i_N, N in enumerate(Ns):
@@ -288,10 +271,8 @@ def fig_S2(conds, fig_dir, index, figdata):
                     if key is None:
                         continue
                     d = members[key]
-                    x = d["ages"].astype(float) * d["records"][0].kappa_sched(kmin) ** 2 / N
+                    x = d["ages"].astype(float)
                     max_x = max(max_x, float(x.max()))
-                    if len(x) > 1:
-                        min_pos = min(min_pos, float(x[1]))
                     col = P.n_shade(i_N, len(Ns))
                     with np.errstate(invalid="ignore", divide="ignore"):
                         S, S_se = d["S"] / d["S"][0], d["S_se"] / abs(d["S"][0])
@@ -302,17 +283,16 @@ def fig_S2(conds, fig_dir, index, figdata):
                         notes.append(f"δ₀ = {P.fmt(d0)}, N = {P.fmt(N)}: {int(d['n_pooled'][-1])}")
                     data[f"d{d0}_N{N}_S"], data[f"d{d0}_N{N}_E"], data[f"d{d0}_N{N}_x"] = S, d["E"], x
                 axes[0, j].set_title(rf"$\delta_0$ = {P.fmt(d0)}")
-                axes[1, j].set_xlabel(r"$m\kappa_s^2/N$ (lifetimes)")
+                axes[1, j].set_xlabel("age m (tasks)")
                 for i in range(2):
                     P.edge_markers(axes[i, j], *edges[i])
             for ax in axes.ravel():
-                P.lifetime_axis(ax, max_x, min_pos if np.isfinite(min_pos) else 1e-3)
+                P.age_axis(ax, max_x)
             P.ref_line(axes[0, 0], 0.5)
             axes[0, 0].set_ylabel("S(m) / S(0)"); axes[1, 0].set_ylabel("E(m)")
             P.fig_legend(fig, None, handles=P.n_handles(Ns))
             P.cell_title(fig, kappa, None, lam, solver, eta, P.READOUT_LABEL[ro] + ", traces = N")
-            cap = ("band: ±1 s.e.m. over seeds; grey: S/S(0) = 1/2 (the half-life); thin: ages with < 25 % of the trace's maximum count; "
-                   "collapse across N = the lifetime scales as N/κ_s²" + (" (check 4)" if "frozen" in ro else ""))
+            cap = ("band: ±1 s.e.m. over seeds; grey: S/S(0) = 1/2 (the half-life); thin: ages with < 25 % of the trace's maximum count")
             if not is_gated(ro):
                 cap += "; dashed: ungated"
             if notes:

@@ -62,7 +62,10 @@ class RunRecord:
         return tuple(getattr(self.run, k) for k in COND_KEYS)
 
     def kappa_sched(self, kappa_min: float = 1.0) -> float:
-        """Schedule κ of PLAN.md §5: the run's κ when gated, ``kappa_min`` (the sweep's smallest gated κ) when ungated."""
+        """Schedule κ of PLAN.md §5: ``run.kappa_sched`` when the batch file recorded it; else the run's κ when
+        gated and ``kappa_min`` (the sweep's smallest gated κ) when ungated (older batch files)."""
+        if self.run.kappa_sched:
+            return float(self.run.kappa_sched)
         return float(self.run.kappa) if is_gated(self.run.readout) else float(kappa_min)
 
     def lifetimes(self, kappa_min: float = 1.0) -> np.ndarray:

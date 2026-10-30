@@ -4,7 +4,7 @@ Implementation of `PLAN.md` (JAX, float64, CPU).  Run everything from this
 directory with the project venv active (`code/sscl_env`).
 
 ```bash
-pytest tests                                              # 31 tests, 40 s to 2 min: the two plotting tests render every figure family
+pytest tests                                              # 32 tests, 40 s to 2 min: the two plotting tests render every figure family
 python scripts/run_sweep.py --config configs/pilot.yaml   # laptop pilot, ~10 s
 python scripts/analyze.py results/pilot                   # summary.csv, curves.json, figures/{slices,summary,checks}/ (--cells for per-cell figures, --all for diagnostics)
 python scripts/validate.py                                # η-halving, Kaczmarz collapse, CV exponent
@@ -39,7 +39,8 @@ python scripts/analyze.py results/stage1
 Without `--fresh` a rerun resumes: a batch is skipped when its file exists
 with the current result schema.  A batch file written under an older schema
 (`io.SCHEMA_VERSION`, stored in each file's `meta_json`) counts as stale and
-is rerun, since it lacks the newer scalars; `load_runs` warns about such
+is rerun, since it lacks the newer scalars, and so is one whose stream length
+differs from the manifest's; `load_runs` warns about older-schema
 files, the checks table prints "not recorded" and the norms figures hatch the
 panel instead of leaving it blank.
 
@@ -106,14 +107,15 @@ for a task whose gate drew no unit.  Trace runs (`trace: true`) also write
 
 Figures go to `figures/` as `.png` with `INDEX.md` (PLAN.md §12.3–§12.4).
 By default: `slices/` holds one norms slice (S1) and one curves slice (S2)
-per readout and κ, with columns = δ₀, traces = N and x in lifetimes;
+per readout and κ, with columns = δ₀ and traces = N (x in lifetimes for
+the norms, age m in tasks for the curves);
 `summary/` holds the maps M1 (lifetime m½κ_s²/N, drift of mean |a|√Q and
 E(0) over δ₀ × N, one panel per readout), M2 (m½ vs N) and M3 (m½ vs E(0));
 `checks/` holds one `checks_{solver}_eta{η}` table per solver with
 `checks_….csv` behind it.  A sweep with several λ gets one set per λ.
 Stage 1 (λ = 4 only) is 23 files.  `--cells d0=0,lam=1` (or `--cells all`)
 adds the per-cell families F1 `norms_…`, F2 `normsN_…`/`normsN_lt_…`, F3
-`curves_…`, F4 `curvesN_…`/`curvesN_lt_…` under `figures/cells/`; `--all`
+`curves_…`, F4 `curvesN_…` under `figures/cells/`; `--all`
 or `--diag kaczmarz by_step check2` adds the diagnostic families under
 `figures/diag/`; `--save-figdata` writes the plotted arrays next to each
 figure.  The slice/summary layout is specified in PLAN.md §12.3 and its
@@ -123,10 +125,15 @@ pools seeds into `summary.csv` (one row per condition: `S0`, `E0`, `m_half`,
 
 ## Notes
 
-- Ungated runs get their own `vmap` batches (κ = √N sets a shorter stream,
-  T = 2·max(T_min, 10) tasks).  Test fixtures that want all five readouts in
-  one batch use `conftest.one_batch`, which gives the ungated runs the gated
-  runs' κ and T (κ does not enter an ungated run's dynamics).
+- Ungated runs get their own `vmap` batches (their κ = √N never enters the
+  dynamics) but take their stream length and age schedule from the schedule κ
+  κ_s = the sweep's smallest gated κ (PLAN.md §5; `Run.kappa_sched`), so at
+  every N they run as long as the κ_min gated runs, T = 20N/κ_min².  A batch
+  file whose T disagrees with the manifest counts as stale and is rerun on
+  resume (`run_sweep.py` without `--fresh`), which is how a Stage-1 sweep run
+  before this change picks up only its 480 ungated runs.  Test fixtures that
+  want all five readouts in one batch use `conftest.one_batch`, which gives
+  the ungated runs the gated runs' κ and T.
 - The stored-head rescaling by 1/f (eq. proj) is accumulated over the steps
   of a task and applied to the (P, N) head buffer once per task
   (`run_task`); `model.project` still does it per step for tests and

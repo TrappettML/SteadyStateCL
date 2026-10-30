@@ -61,13 +61,26 @@ def batch_schema(path: str) -> int:
         return int(json.loads(str(z["meta_json"])).get("schema", 1))
 
 
-def is_stale(path: str) -> bool:
-    """Whether a batch file was written under an older result schema than ``SCHEMA_VERSION``.
+def batch_T(path: str) -> int:
+    """Number of tasks (T_burn + T_meas) recorded in a batch file."""
+    with np.load(path, allow_pickle=False) as z:
+        return int(z["T_burn"]) + int(z["T_meas"])
+
+
+def is_stale(path: str, T: Optional[int] = None) -> bool:
+    """Whether a batch file was written under an older result schema than ``SCHEMA_VERSION``,
+    or (when ``T`` is given) with a stream length other than the ``T`` tasks the manifest now plans.
 
     Such a batch lacks scalars the figure scripts expect (e.g. the §12.1
-    norms), so a resumed sweep must rerun it rather than keep it.
+    norms), or was run under an older schedule (the ungated runs before
+    PLAN.md §5's schedule κ), so a resumed sweep must rerun it rather than
+    keep it.
     """
-    return os.path.exists(path) and batch_schema(path) < SCHEMA_VERSION
+    if not os.path.exists(path):
+        return False
+    if batch_schema(path) < SCHEMA_VERSION:
+        return True
+    return T is not None and batch_T(path) != int(T)
 
 
 def load_batch(path: str) -> tuple[dict, list[Run], dict]:
@@ -237,7 +250,7 @@ def write_manifest(out_dir: str, cfg: Config, batches: list[list[Run]], config_p
                 "n_runs": len(b),
                 "N": b[0].N, "kappa": b[0].kappa, "solver": b[0].solver,
                 "n_steps": b[0].n_steps, "T": b[0].T_burn + b[0].T_meas,
-                "status": _file_status(batch_path(out_dir, i)),
+                "status": _file_status(batch_path(out_dir, i), b[0].T_burn + b[0].T_meas),
             }
             for i, b in enumerate(batches)
         ],
@@ -246,11 +259,11 @@ def write_manifest(out_dir: str, cfg: Config, batches: list[list[Run]], config_p
     return man
 
 
-def _file_status(path: str) -> str:
-    """``done`` / ``stale`` / ``pending`` from a batch file's presence and schema."""
+def _file_status(path: str, T: Optional[int] = None) -> str:
+    """``done`` / ``stale`` / ``pending`` from a batch file's presence, schema and (with ``T``) stream length."""
     if not os.path.exists(path):
         return "pending"
-    return "stale" if batch_schema(path) < SCHEMA_VERSION else "done"
+    return "stale" if is_stale(path, T) else "done"
 
 
 def _write_json(path: str, obj: dict) -> None:
@@ -335,6 +348,6 @@ def pending_batches(out_dir: str) -> list[int]:
     out = []
     for b in man["batches"]:
         path = batch_path(out_dir, b["id"])
-        if is_stale(path) or (b["status"] != "done" and not os.path.exists(path)):
+        if is_stale(path, b.get("T")) or (b["status"] != "done" and not os.path.exists(path)):
             out.append(b["id"])
     return out

@@ -146,6 +146,9 @@ class Run:
     T_burn: int
     T_meas: int
     kappa_label: str = ""
+    #: schedule κ of PLAN.md §5: the run's κ when gated, the sweep's smallest gated κ when ungated (sets T and the ages);
+    #: 0.0 in batch files of older versions, which ``kappa_s`` then reads as ``kappa``
+    kappa_sched: float = 0.0
     n_ages_geom: int = 24
     m_max_factor: float = 4.0
     trace: bool = False
@@ -155,6 +158,11 @@ class Run:
     def pN(self) -> float:
         """Nominal active count κ√N; exactly N for an ungated run (PLAN.md §2)."""
         return float(self.N) if not is_gated(self.readout) else self.kappa * math.sqrt(self.N)
+
+    @property
+    def kappa_s(self) -> float:
+        """Schedule κ (PLAN.md §5): ``kappa_sched`` when recorded, else ``kappa`` (older batch files)."""
+        return float(self.kappa_sched) if self.kappa_sched else float(self.kappa)
 
     @property
     def Delta0(self) -> float:
@@ -194,7 +202,12 @@ class Run:
         return int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "little")
 
     def batch_key(self) -> tuple:
-        """Fields a vmap batch must share: (N, D, κ, solver, n_steps, T_burn, T_meas, trace)."""
+        """Fields a vmap batch must share: (N, D, κ, solver, n_steps, T_burn, T_meas, trace).
+
+        κ, not the schedule κ_s: ungated runs (κ = √N) keep their own batches, so
+        their batch ids in a manifest do not move when their length changes
+        (PLAN.md §5; the Stage-1 gated batch files stay valid across that change).
+        """
         return (self.N, self.D, self.kappa, self.solver, self.n_steps, self.T_burn, self.T_meas, self.trace)
 
     def label(self) -> str:
@@ -301,6 +314,10 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
     Gated readouts iterate over ``cfg.kappa``; ungated readouts have no κ
     (every unit is active, pN = N, i.e. the κ = √N point) and are listed once
     per (N, δ₀, λ, η, seed) with ``kappa_label = "sqrtN"`` (PLAN.md §4).
+    Their stream length and age schedule come from the schedule κ_s = the
+    sweep's smallest gated κ (PLAN.md §5), so they run as long as the κ_min
+    gated runs (20N/κ_min² tasks); ``kappa_sched``
+    records κ_s on every run.
 
     Parameters
     ----------
@@ -326,9 +343,11 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
             continue
         D = cfg.D_factor * N
         kappas = [resolve_kappa(k, N) for k in cfg.kappa]
+        kappa_min = min(k for k, _ in kappas) if kappas else math.sqrt(N)
         for readout in cfg.readout:
             for kappa, klabel in (kappas if is_gated(readout) else [(math.sqrt(N), "sqrtN")]):
-                T_half = max(cfg.T_min, int(round(cfg.T_factor * N / kappa**2)))
+                kappa_s = kappa if is_gated(readout) else kappa_min
+                T_half = max(cfg.T_min, int(round(cfg.T_factor * N / kappa_s**2)))
                 for delta0, lam, eta, seed in itertools.product(cfg.delta0, cfg.lam, cfg.eta, cfg.seed_list()):
                     if delta0 <= -1.0:
                         raise ValueError(f"δ₀ = {delta0} ≤ −1 makes the initial readout imaginary")
@@ -336,7 +355,7 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
                     runs.append(Run(
                         N=N, D=D, kappa=kappa, readout=readout, delta0=float(delta0), lam=float(lam),
                         seed=int(seed), solver=cfg.solver, eta=float(eta), h=float(h), n_steps=int(n_steps),
-                        alpha_task=float(alpha), T_burn=T_half, T_meas=T_half, kappa_label=klabel,
+                        alpha_task=float(alpha), T_burn=T_half, T_meas=T_half, kappa_label=klabel, kappa_sched=float(kappa_s),
                         n_ages_geom=int(cfg.n_ages_geom), m_max_factor=float(cfg.m_max_factor),
                         trace=bool(cfg.trace), trace_points=int(cfg.trace_points),
                     ))

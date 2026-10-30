@@ -284,7 +284,7 @@ and can be added later if wanted. Probe evaluation uses `heads[k]` when
   bracketing ages; `NaN` with `censored=True` if not reached.
 - Figures for `S(m)` and `E(m)` (`analyze.py`, §12.3): by default the
   curves slice S2, one figure per (readout, κ, λ, solver, η) with rows
-  `S/S(0)` and `E`, **columns = δ₀**, **traces = N** and x = m κ_s²/N;
+  `S/S(0)` and `E`, **columns = δ₀**, **traces = N** and x = age m in tasks;
   per cell, with `--cells`, F3 (**columns indexed by N**, **traces = the
   readout types** in the fixed colours of `plotting.py`) and F4 (columns
   = readouts, traces = N). The ungated conditions have no κ and are repeated in every
@@ -707,12 +707,13 @@ trend.
 
 `plotting.grid(2, n_δ₀, sharex="all", sharey="row")`. Rows `S(m)/S(0)`
 and `E(m)`; columns = δ₀; traces = N in `N_SHADES` with a ±1 s.e.m.
-band over seeds. **x = m κ_s²/N** with age 0 plotted
-(`lifetime_axis`), the few-sample thinning of §12.7 G14, and a grey
-reference at S/S(0) = 1/2 (where the half-life is read). Collapse
-across N within a column = the lifetime scales as N/κ_s²; a fan = it
-does not, and its direction says which way. For the two frozen readouts
-this is check 4.
+band over seeds. **x = age m in tasks** with age 0 plotted
+(`age_axis`, §12.7 G13), the few-sample thinning of §12.7 G14, and a grey
+reference at S/S(0) = 1/2 (where the half-life is read). The x-axis was
+m κ_s²/N; it is plain m because the rescaled axis was confusing to read.
+If the lifetime scales as N/κ_s², the N traces in a column are copies
+shifted right in proportion to N; the collapse itself is check 4 in the
+table.
 
 #### M1. Maps (`summary/maps_k{κ}_lam{λ}_{solver}_eta{η}`)
 
@@ -832,13 +833,9 @@ number is in `summary.csv` and the checks table).
 
 **F4. S(m), E(m) vs age, traces = N**
 (`curves/curvesN_k{κ}_d{δ₀}_lam{λ}_{solver}_eta{η}`): rows S, E;
-columns = readouts; traces = N in `N_SHADES`. A second file,
-`curvesN_lt_…`, plots `S(m)/S(0)` and `E(m)` against **`m κ_s²/N`**:
-this is the collapse variable of check 4, so the old `kaczmarz/` figure
-is this file's S row restricted to the frozen readouts and is no longer
-made separately. Collapse across N in the `_lt` file = the lifetime
-scales as N/κ²; a fan = it does not, and the direction of the fan says
-which way.
+columns = readouts; traces = N in `N_SHADES`; x = age m in tasks. (The
+second file `curvesN_lt_…`, against m κ_s²/N, is no longer made: every
+curves figure uses x = m. The collapse across N is check 4 in the table.)
 
 ### 12.4 Figure and data organisation
 
@@ -857,7 +854,7 @@ results/<sweep>/figures/
   checks/    checks_{solver}_eta{η}            the ✓/✗ table (§12.6)
              checks_{solver}_eta{η}.csv        every number behind a mark
   INDEX.md   written by analyze.py: one line per figure (family, cell, file)
-  cells/     only with --cells: norms/ (F1, F2 + normsN_lt_…), curves/ (F3, F4 + curvesN_lt_…)
+  cells/     only with --cells: norms/ (F1, F2 + normsN_lt_…), curves/ (F3, F4)
   diag/      only with --all / --diag: kaczmarz/, by_step/, check2/ (the
              C2-A … C2-E and cv_exponent figures of the previous revision, kept
              in plot_check2.py / plot_norms.py for locating a failed check)
@@ -999,10 +996,11 @@ the table are kept here; the changes to the figure standard are in
 §12.0.
 
 Not a plotting issue, but visible in these figures: §5's schedule κ
-(`kappa_sched`) is not in the code yet (nothing in `mup/` defines it,
-and the pilot's ungated runs have T = 20). That is why the ungated S(m)
-traces stop at age ≈ 20 while the gated ones run to ≈ 300, and why the
-ungated norm traces have one point per lifetime. Implement §5 and rerun
+(`Run.kappa_sched`) was not in the code until 2026-10-30 (the pilot's
+and the first Stage-1 ungated runs have T = 20). That is why the ungated
+S(m) traces stop at age ≈ 20 while the gated ones run to ≈ 300, and why
+the ungated norm traces have one point per lifetime. §5 is now in
+`make_runs`; rerun
 the pilot (§9.1 L2–L3) before judging those traces.
 
 - **G1. Legend outside the panels.** The legend covered data in every
@@ -1102,8 +1100,8 @@ files of item 5). Item 6 is the Xeon run. The order was:
    in the caption. `run()` draws S1 by default, and F1/F2 only for the
    records `analyze.py` passes from `--cells`, into `cells/norms/`.
 3. `analyze.py`:
-   - `fig_S2`, from the `_lt` branch of `fig_curvesN` with columns = δ₀
-     and one readout per file;
+   - `fig_S2`, from `fig_curvesN` with columns = δ₀, S/S(0) in the top
+     row and one readout per file;
    - `fig_maps` (M1), from `collect` (m½, censored, E(0)) and the drift
      β, se(β) of `aQ_act_post` from `plot_check2._grid_stats` (compute
      the statistics once and pass them to both the table and M1);

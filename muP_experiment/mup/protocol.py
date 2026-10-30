@@ -345,7 +345,7 @@ def run_stream(
     B = len(runs)
     T_burn, T_meas = r0.T_burn, r0.T_meas
     T = T_burn + T_meas
-    ages = age_schedule(r0.N, r0.kappa, T, r0.n_ages_geom, r0.m_max_factor)
+    ages = age_schedule(r0.N, r0.kappa_s, T, r0.n_ages_geom, r0.m_max_factor)   # schedule κ (PLAN.md §5)
     ages_j = jnp.asarray(ages)
     state, p = init_batch(runs)
     traced = bool(r0.trace)

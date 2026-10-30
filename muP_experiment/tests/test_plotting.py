@@ -129,7 +129,7 @@ def test_default_families_render_without_warnings(records, tmp_path):
 
 
 def test_cell_families_render_without_warnings(records, tmp_path):
-    """F1, F2 (+ _lt), F3, F4 (+ _lt) for every cell (``--cells all``), under ``cells/``."""
+    """F1, F2 (+ _lt), F3, F4 for every cell (``--cells all``), under ``cells/``."""
     import analyze
     import plot_norms
     fig_dir = str(tmp_path / "figures")
@@ -148,8 +148,9 @@ def test_cell_families_render_without_warnings(records, tmp_path):
     assert sorted(os.listdir(os.path.join(fig_dir, "cells"))) == ["curves", "norms"]
     stems = {os.path.basename(p) for _, _, p in index}
     for s in ("norms_k1.0_d0.0_lam1.0_pop_eta1.0.png", "normsN_k1.0_d0.0_lam1.0_pop_eta1.0.png", "normsN_lt_k1.0_d0.0_lam1.0_pop_eta1.0.png",
-              "curves_k1.0_d0.0_lam1.0_pop_eta1.0.png", "curvesN_k1.0_d0.0_lam1.0_pop_eta1.0.png", "curvesN_lt_k1.0_d0.0_lam1.0_pop_eta1.0.png"):
+              "curves_k1.0_d0.0_lam1.0_pop_eta1.0.png", "curvesN_k1.0_d0.0_lam1.0_pop_eta1.0.png"):
         assert s in stems, s
+    assert not any(s.startswith("curvesN_lt_") for s in stems)
 
 
 def test_diag_families_render_without_warnings(records, tmp_path):

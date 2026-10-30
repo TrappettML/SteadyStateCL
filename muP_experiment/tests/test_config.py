@@ -42,7 +42,12 @@ def test_ungated_listed_once_per_N():
     ungated = [r for r in runs if r.gated == 0.0]
     assert len(gated) == 2 * 2 * 3 * 3 and len(ungated) == 2 * 2 * 3
     for r in ungated:
-        assert r.kappa_label == "sqrtN" and r.pN == r.N and r.T_burn == max(cfg.T_min, round(cfg.T_factor))
+        # PLAN.md §5: an ungated run takes its length, ages and batch from the κ_min = 1 gated run at the same N
+        ref = next(g for g in gated if g.N == r.N and g.kappa == 1.0 and g.delta0 == r.delta0 and g.lam == r.lam)
+        assert r.kappa_label == "sqrtN" and r.pN == r.N and r.kappa_sched == 1.0
+        assert (r.T_burn, r.T_meas) == (ref.T_burn, ref.T_meas) == (round(cfg.T_factor * r.N), round(cfg.T_factor * r.N))
+        assert r.batch_key() != ref.batch_key()                   # but keeps its own batch (manifest ids stay put)
+    assert all(g.kappa_sched == g.kappa for g in gated)
     with pytest.raises(ValueError):
         make_runs(Config(readout=["learned"]))
 
@@ -89,9 +94,10 @@ def test_stale_schema_batch_is_rerun(tmp_path):
     out = str(tmp_path)
     cfg = Config(name="t", N=[10], kappa=[1.0], readout=["gated_shared"], delta0=[0.0], lam=[1.0], seeds=1, batch_size=64)
     batches = io.plan_sweep(cfg, out)
-    res = {"ages": np.arange(3), "alpha_task": np.ones(len(batches[0])), "T_burn": np.array(4), "T_meas": np.array(4),
+    b0 = batches[0][0]
+    res = {"ages": np.arange(3), "alpha_task": np.ones(len(batches[0])), "T_burn": np.array(b0.T_burn), "T_meas": np.array(b0.T_meas),
            **{f: np.zeros((len(batches[0]), 3, 2)) for f in ("sum_s", "sum_s2", "sum_e", "sum_e2", "count")},
-           "S0": np.zeros((8, len(batches[0])))}
+           "S0": np.zeros((b0.T_burn + b0.T_meas, len(batches[0])))}
     io.save_batch(out, 0, res, batches[0])
     assert io.pending_batches(out) == []
     # rewrite the file as the older schema
@@ -106,3 +112,21 @@ def test_stale_schema_batch_is_rerun(tmp_path):
         recs, _ = load_runs(out)
     assert recs and recs[0].schema == 1
     del r
+
+
+def test_wrong_length_batch_is_rerun(tmp_path):
+    """A batch file run under another stream length than the manifest plans (the pre-§5 ungated runs) is pending on resume."""
+    import numpy as np
+    from mup import io
+    out = str(tmp_path)
+    cfg = Config(name="t", N=[10], kappa=[1.0], readout=["frozen"], delta0=[0.0], lam=[1.0], seeds=1, batch_size=64)
+    batches = io.plan_sweep(cfg, out)
+    T_plan = batches[0][0].T_burn + batches[0][0].T_meas
+    assert T_plan == 2 * round(cfg.T_factor * 10)                   # 20N/κ_min², not 20
+    res = {"ages": np.arange(3), "alpha_task": np.ones(1), "T_burn": np.array(10), "T_meas": np.array(10),
+           **{f: np.zeros((1, 3, 2)) for f in ("sum_s", "sum_s2", "sum_e", "sum_e2", "count")}, "S0": np.zeros((20, 1))}
+    io.save_batch(out, 0, res, batches[0])                          # the old 20-task file
+    assert io.batch_T(io.batch_path(out, 0)) == 20
+    assert io.is_stale(io.batch_path(out, 0), T_plan) and not io.is_stale(io.batch_path(out, 0))
+    assert io.pending_batches(out) == [0]
+    assert io.plan_sweep(cfg, out) and io.read_manifest(out)["batches"][0]["status"] == "stale"
