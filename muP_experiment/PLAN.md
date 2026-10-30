@@ -652,7 +652,11 @@ F1–F4 stay, drawn only for the cells named with `--cells`.
 
 The questions, in order: (1) are the weight norms bounded, where do they
 stop trending, and is there a steady state at every (readout, δ₀, N);
-(2) how does the memory lifetime scale with N. Stage 1 fixes λ = 4
+(2) how does the memory lifetime scale with N; (3) how does it scale
+with κ (added 2026-10-30: the Stage-1 M2 figures show m½ ∝ N at κ = 1
+but almost no κ dependence at N = 100, against the N/κ² assumed in the
+burn-in and the lifetimes axis; M4–M8 below put each claim on an axis
+where passing is flat). Stage 1 fixes λ = 4
 (decision 7), so the grid is (readout, κ, δ₀, N). The learning-per-task
 question (the λ axis at one δ₀) is a later stage; its figures (a λ
 slice, maps over (δ₀, λ)) are specified when that stage is planned.
@@ -671,6 +675,11 @@ not settle it.
 | **M1** maps `summary/maps_…` | κ, λ, solver, η | rows = 3 statistics, columns = readouts; each panel δ₀ × N | — | 2 |
 | **M2** lifetime vs N `summary/mhalf_vs_N_…` | κ, λ, solver, η | columns = δ₀ | readouts | 2 |
 | **M3** lifetime vs E(0) `summary/mhalf_vs_E0_…` | κ, solver, η | columns = N | readouts (one point per δ₀, λ) | 2 |
+| **M4** half-life per width `summary/mhalf_per_N_…` | λ, solver, η | rows = δ₀, columns = gated readouts; y = m½/N | κ | 1 |
+| **M5** κ exponent `summary/kappa_exponent_…` | λ, solver, η | columns = δ₀; y = β(N) | readouts | 1 |
+| **M6** decay collapse `summary/collapse_…` | κ, λ, solver, η | rows = δ₀, columns = gated readouts; x = m/N | N | 2 |
+| **M7** level vs width `summary/level_vs_N_…`, `level_vs_pN_…` | readout, λ, solver, η | columns = δ₀; y = second-half level | κ | 6 |
+| **M8** stationarity in half-lives `slices/norms_lt2_…` | readout, κ, λ, solver, η | as S1; x = t/m½, y relative to level | N | 8 |
 | checks table `checks/checks_…` (§12.6) | solver, η | — | — | 1 |
 
 Stage 1 (3 gated readouts × 2 κ + 2 ungated readouts for the slices;
@@ -760,6 +769,117 @@ The existing `fig_mhalf_vs_E0`, moved from `diag/mhalf/` to the
 default: columns = N, one point per (readout, δ₀, λ) with s.e.m. bars
 in both directions, hollow squares for ungated readouts. This is where
 readouts are compared at matched E(0) (plan, Deliverable).
+
+#### M4–M8. Scaling and stationarity on axes where passing is flat (added 2026-10-30)
+
+*Why.* The Stage-1 M2 figures at κ = 1 and κ = 2 show m½ growing with
+N for every gated readout, but not as N/κ². At κ = 1 the log–log slope
+is 1 from N = 5 to 100 at every δ₀. At κ = 2 it is 1.2–1.7 and still
+falling at N = 100 (the gate density κ/√N is 0.89 at N = 5 and 0.63
+at N = 10, so those runs sit near the ungated floor of ≈ 0.5 tasks).
+At N = 100 the two κ agree to within 20 % (gated shared ≈ 57 vs 48
+tasks, gated frozen ≈ 64 vs 58, task heads ≈ 66 vs 67), where N/κ²
+predicts a factor of 4; m½ κ²/N at N = 100 is ≈ 0.55 at κ = 1 and ≈ 2
+at κ = 2. The pilots that suggested N/κ² ran at N ≤ 20, where κ = 2
+still looks like it. A log–log plot of m½ against N hides a factor of
+2 across a decade, and S1's x-axis assumes N/κ², so M4–M8 put each
+claim on an axis where passing is a flat line or a collapse. All are
+drawn from what the sweep already records (m½ per run, `curves.json`,
+the half-window norm statistics) by `analyze.py`, by default.
+
+A rough estimate for task heads sets the reference lines. Two tasks
+share κ² active units on average; with independent random-sign heads
+those add with random signs to a sum of size ≈ κ, which divided by the
+κ√N active units and squared erases ≈ 1/N of an old task's signal per
+task, for any κ. So S(m)/S(0) ≈ e^{−m/N} and m½ ≈ N ln 2 ≈ 0.69 N (35
+and 69 tasks at N = 50 and 100; measured ≈ 34 and 67). A shared
+readout adds the shared units in phase, which is where a κ² dependence
+would come from; at N = 100 the shared readouts come out close to the
+heads at both κ, so the data do not show it.
+
+**M4. Half-life per width** (`summary/mhalf_per_N_lam{λ}_{solver}_eta{η}`).
+`grid(n_δ₀, n_gated_readouts, sharex="all", sharey="all")`, one figure
+per (λ, solver, η); rows = δ₀, columns = gated readouts (column title
+in the readout's colour). x = N, log axis, ticks at the sweep's N. y =
+m½/N, linear, from 0. Traces = κ, drawn in shades of the readout's
+colour (lightest = smallest κ, as `N_SHADES` does for N), ±1 s.e.m.
+bars over seeds, ▼ at the top for censored conditions. Grey reference
+at ln 2 ≈ 0.69 (the heads estimate). Pass: each trace flat at large N,
+i.e. m½ ∝ N. The vertical gap between the κ traces is the κ
+dependence: N/κ² puts κ = 2 at a quarter of κ = 1; no gap means no κ
+dependence.
+
+**M5. κ exponent** (`summary/kappa_exponent_lam{λ}_{solver}_eta{η}`).
+One row, columns = δ₀, `sharey="all"`. x = N, log. y = β(N) =
+log[m½(κ_min) / m½(κ)] / log(κ/κ_min) for each κ > κ_min; traces =
+gated readouts in their colours, one line per (readout, κ) when the
+sweep has three or more κ, labelled `gated shared, κ = 2`. Error bars
+from the s.e.m. of log m½ at both κ, added in quadrature. Grey
+references at 2 (the N/κ² claim) and 0 (the heads estimate). With two
+κ this is a two-point estimate; with ≥ 3 κ at one N, add a panel with
+x = κ (log), y = m½ (log), traces = N, and print the fitted slope.
+Current data: gated shared β ≈ 1.9 at N = 5 falling to ≈ 0.25 at
+N = 100.
+
+**M6. Decay-curve collapse** (`summary/collapse_k{κ}_lam{λ}_{solver}_eta{η}`).
+`grid(n_δ₀, n_gated_readouts, sharex="all", sharey="all")`, one figure
+per (κ, λ, solver, η). x = m/N, linear, from 0 (age 0 plotted,
+`age_axis` of §12.7 G13 is not used here since the axis is linear). y =
+S(m)/S(0), log axis, floor 10⁻². Traces = N in `N_SHADES`, ±1 s.e.m.
+band over seeds, few-sample thinning of §12.7 G14. Grey references:
+the horizontal line at ½, and in the task-heads column the line
+e^{−m/N} (slope −1, crossing ½ at m/N = ln 2). Pass: the N traces fall
+on one curve; a straight line is exponential decay. M6 tests the whole
+curve where M2 tests one point of it. Check 4's collapse on κ²m/N for
+the frozen readout stays in `diag/kaczmarz/`; if M6 collapses on m/N
+at both κ for that readout too, check 4's axis is wrong and is changed
+to m/N.
+
+**M7. Steady-state level vs width** (`summary/level_vs_N_{readout}_lam{λ}_{solver}_eta{η}`
+and the twin `level_vs_pN_…`). One figure per readout, `grid(1, n_δ₀,
+sharey="all")`, columns = δ₀. x = N, log. y = the mean over seeds and
+over the tasks of the second half of the measurement window of mean
+|aᵢ|√Qᵢᵢ (`aQ_act_post`), thick; the 95 % quantile (`aQ_q95`) and the
+max (`aQ_max_post`) as thinner lines in the same colour; ±1 s.e.m.
+over seeds. Traces = κ, shades as in M4. For the frozen readouts add
+`Q_act_pre` as a second row. Pass: the level flattens at large N. A
+straight line on this axis is growth ∝ log N: the Stage-1 κ = 2 S1 at
+δ₀ = 0 gives mean |aᵢ|√Qᵢᵢ ≈ 1.7, 2.4, 2.9, 3.4, 4.0 for N = 5, 10,
+20, 50, 100, i.e. ≈ +0.5 per doubling with no flattening between 50
+and 100. The twin has x = pN = κ√N, the number of active units per
+task (log): if the κ traces line up against pN but not against N, the
+growth is a small-active-set effect, not a width effect. M7 answers
+how large the norms are; M8 answers whether they have stopped moving.
+
+**M8. Stationarity on the measured time scale**
+(`slices/norms_lt2_{readout}_k{κ}_lam{λ}_{solver}_eta{η}`). S1 with
+two changes. x = t/m½, where m½ is the condition's own measured
+half-life (seed mean), in place of t κ_s²/N. y = each quantity divided
+by its own second-half mean, so 1 is the steady level (the level
+itself is M7's job, which is why it is divided out). Rows as S1, block
+means and bands as S1 (block width = half a measured half-life). Grey
+reference at 1. The end of burn-in is marked per N in its shade at
+T_burn/m½, which differs by N whenever burn-in is set in tasks. Pass:
+every trace reaches 1 and stays flat by the same number of half-lives,
+before burn-in ends. Keep S1 for reading absolute levels.
+
+**Burn-in.** For M8 to be a fair test, burn-in must be a fixed number
+of *measured* half-lives, not 10N/κ²: at κ = 2, N = 100 that is 250
+tasks ≈ 5 half-lives, against ≈ 17 at κ = 1, N = 100 and ≥ 20 at
+κ = 2, N = 5. New Stage-1 default: `T_burn = T_meas = c·N` with c = 7
+(≈ 10 half-lives at m½ ≈ 0.69 N), independent of κ; `T_factor` keeps
+the N/κ² form available for the frozen-readout check 4. Re-check with
+M8 after the rerun.
+
+**Checks table (§12.6).** Two rows are added. *Check 4′, width
+scaling:* ✓ when the M4 trace of the readout changes by less than 20 %
+between the two largest N, with m½/N at N_max and β(N_max) printed.
+*Level:* the M7 slope of mean |aᵢ|√Qᵢᵢ per doubling of N between the
+two largest N, printed, with ✓ when it is within 2 s.e. of 0.
+
+**Next runs.** N = 200 at both κ (does κ = 2 reach slope 1, and does
+it meet or pass κ = 1?), and a third κ at N = 100 for M5's fitted
+exponent.
 
 #### Per-cell families F1–F4 (`cells/`, only with `--cells`)
 
@@ -851,6 +971,11 @@ results/<sweep>/figures/
   summary/   maps_k{κ}_lam{λ}_{solver}_eta{η}                        (M1)
              mhalf_vs_N_k{κ}_lam{λ}_{solver}_eta{η}                  (M2)
              mhalf_vs_E0_k{κ}_{solver}_eta{η}                        (M3)
+             mhalf_per_N_lam{λ}_{solver}_eta{η}                       (M4)
+             kappa_exponent_lam{λ}_{solver}_eta{η}                    (M5)
+             collapse_k{κ}_lam{λ}_{solver}_eta{η}                     (M6)
+             level_vs_N_{readout}_lam{λ}_{solver}_eta{η}              (M7; level_vs_pN_… twin)
+  slices/    norms_lt2_{readout}_k{κ}_lam{λ}_{solver}_eta{η}          (M8)
   checks/    checks_{solver}_eta{η}            the ✓/✗ table (§12.6)
              checks_{solver}_eta{η}.csv        every number behind a mark
   INDEX.md   written by analyze.py: one line per figure (family, cell, file)
@@ -963,6 +1088,8 @@ G4). Nothing else is coloured.
 | 2 drift: β | cells with `|β/se_β| > 3` for mean |a|√Q (and Q_act pre for the frozen readouts) | 0 | 1 | ≥ 2 |
 | 3 self-averaging | slope γ of log CV(s, m = 1) vs log N over the sweep's N (one value per readout, so the same mark in every N column) | γ ≤ −0.4 | −0.4 < γ ≤ −0.2 | else |
 | 4 collapse | max over m of the spread across N of `S(m)/S(0)` at matched `m κ_s²/N` (frozen readouts; — for the others) | < 0.05 | < 0.10 | else |
+| 4′ width scaling | relative change of `m½/N` between the two largest N, worst over (κ, δ₀, λ) cells (one value per readout; text: change, `m½/N` and the κ exponent β at N_max; cells censored at either width are left out and counted) | < 20 % | < 40 % | else |
+| level | slope of the second-half mean of mean |a|√Q per doubling of N between the two largest N, worst |z| = |slope|/s.e. over cells (one value per readout; text: slope and z) | |z| ≤ 2 | |z| ≤ 3 | else |
 | feasibility | runs skipped for infeasible δ₀ (§3.5), printed as `k/n` | 0 | ≤ 10 % | else |
 
 Row 2's `z` treats consecutive tasks as independent, so it is
@@ -1123,3 +1250,30 @@ files of item 5). Item 6 is the Xeon run. The order was:
    the N traces lie on top of each other in lifetimes.
 6. Stage 1 on the Xeon at λ = 4 (§9.2 X2–X6): 1920 runs, 23 default
    figures.
+
+### 12.9 Order of work for M4–M8 (2026-10-30)
+
+Implemented 2026-10-30 (items 1–6; 35 tests pass, the pilot gives 52
+files: M5 needs two κ and the pilot has one, so its figure is skipped
+there and is covered by a three-κ synthetic test).  Item 6's config
+change is `T_per_N: 7.0` and `extra: [{N: 100, kappa: 4.0}]` in
+`configs/stage1.yaml` (2448 runs); the Xeon rerun is pending.
+
+1. `results.py`: `level_stats(records, key)` → second-half mean and
+   s.e.m. over seeds per condition; `mhalf_by_condition(records)` →
+   seed mean, s.e.m., censored flag (reuse `collect`).
+2. `analyze.py`: `fig_M4`, `fig_M5` from `mhalf_by_condition`;
+   `fig_M6` from `curves.json` with x = m/N; `fig_M7` from
+   `level_stats` for `aQ_act_post`, `aQ_q95`, `aQ_max_post`
+   (`Q_act_pre` row for frozen readouts) with the pN twin. All into
+   `summary/` by default. Add check 4′ and the level row to the table.
+3. `plot_norms.py`: `fig_M8` from `fig_S1` with x = t/m½ and y
+   relative to the second-half mean; into `slices/`.
+4. `plotting.py`: `kappa_shades(i, n, readout)` (shades of a readout
+   colour), reference lines at ln 2, 2, 0, 1 and the e^{−m/N} curve.
+5. Test 10: render M4–M8 from synthetic records with two κ; fail on
+   any `plotting.save` warning.
+6. `configs/stage1.yaml`: burn-in `c·N`, c = 7, κ-independent; add
+   N = 200 at both κ and κ = 4 at N = 100. Rerun on the Xeon; read in
+   the order table → M4 → M5 → M6 → M7 → M8 → S1/S2.
+

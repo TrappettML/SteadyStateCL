@@ -22,7 +22,7 @@ import _path  # noqa: F401
 from mup import plotting as P
 from mup.config import is_gated
 from mup.observe import half_life
-from mup.results import by_kappa, drift_rate, group_by, half_stats, kappa_min, load_runs, seed_stack
+from mup.results import by_kappa, drift_rate, group_by, half_stats, kappa_min, level_stats, load_runs, mhalf_by_condition, seed_stack
 
 #: C2-A rows: (scalar key, quantile keys or None); labels come from plotting.QUANTITY_LABEL (§12.7 G2)
 ROWS = (("Q_act_pre", ("Q_q05", "Q_q95")), ("a2_act_post", None), ("aQ_act_post", ("aQ_q05", "aQ_q95")),
@@ -529,6 +529,8 @@ CRITERIA = {
     "drift": ("2 drift: β", 0, 1),
     "cv": ("3 self-averaging γ", -0.4, -0.2),
     "collapse": ("4 collapse spread", 0.05, 0.10),
+    "width": ("4′ width scaling: Δ(m½/N)", 0.20, 0.40),
+    "level": ("level: Δ mean |a|√Q per ×2 N", 2.0, 3.0),
     "feasible": ("feasibility (skipped)", 0.0, 0.10),
 }
 CHECK_ROWS = [(k, v[0]) for k, v in CRITERIA.items()]
@@ -632,6 +634,95 @@ def _collapse_spread(records):
     return out
 
 
+def _two_largest(records):
+    """The sweep's two largest widths ``(N_2, N_max)``; ``None`` with one width."""
+    Ns = sorted({r.run.N for r in records})
+    return (Ns[-2], Ns[-1]) if len(Ns) >= 2 else None
+
+
+def _width_scaling(records):
+    """Check 4′ per readout (PLAN.md §12.3 M4): the relative change of m½/N between the two largest N, worst over (κ, δ₀, λ) cells.
+
+    Returns
+    -------
+    dict
+        ``{readout: (change, m_half_per_N_at_Nmax, beta_at_Nmax, cell, n_censored)}``:
+        ``change`` the worst |Δ(m½/N)|/(m½/N at N_2) (NaN with one width or
+        when no cell has both widths uncensored), ``beta_at_Nmax`` the κ
+        exponent log[m½(κ_min)/m½(κ_max)]/log(κ_max/κ_min) at N_max for that
+        cell's (δ₀, λ) (NaN for ungated readouts or a single κ), ``cell``
+        the worst cell's text, ``n_censored`` the cells left out as censored
+        at either width.
+    """
+    pair = _two_largest(records)
+    mh = mhalf_by_condition(records)
+    out = {}
+    for (ro,), recs in group_by(records, ("readout",)).items():
+        if pair is None:
+            out[ro] = (np.nan, np.nan, np.nan, "", 0)
+            continue
+        N2, Nmax = pair
+        worst, n_cens = None, 0
+        for (kl, d0, lam, solver, eta), cell_recs in group_by(recs, ("kappa_label", "delta0", "lam", "solver", "eta")).items():
+            a = mh.get((N2, kl, ro, d0, lam, solver, eta))
+            b = mh.get((Nmax, kl, ro, d0, lam, solver, eta))
+            if a is None or b is None:
+                continue
+            if a["censored"] or b["censored"] or not (np.isfinite(a["m_half"]) and np.isfinite(b["m_half"]) and a["m_half"] > 0):
+                n_cens += 1
+                continue
+            ya, yb = a["m_half"] / N2, b["m_half"] / Nmax
+            ch = abs(yb - ya) / ya
+            if worst is None or ch > worst[0]:
+                worst = (ch, yb, (kl, d0, lam, solver, eta))
+        if worst is None:
+            out[ro] = (np.nan, np.nan, np.nan, "", n_cens)
+            continue
+        ch, yb, (kl, d0, lam, solver, eta) = worst
+        beta = np.nan
+        if is_gated(ro):
+            ks = sorted({r.run.kappa_label for r in recs if r.run.N == Nmax and r.run.delta0 == d0 and r.run.lam == lam}, key=float)
+            if len(ks) >= 2:
+                lo, hi = mh.get((Nmax, ks[0], ro, d0, lam, solver, eta)), mh.get((Nmax, ks[-1], ro, d0, lam, solver, eta))
+                if lo and hi and not (lo["censored"] or hi["censored"]) and lo["m_half"] > 0 and hi["m_half"] > 0:
+                    beta = float(np.log(lo["m_half"] / hi["m_half"]) / np.log(float(ks[-1]) / float(ks[0])))
+        out[ro] = (float(ch), float(yb), beta, f"κ={P.fmt(kl)} δ₀={P.fmt(d0)} λ={P.fmt(lam)}", n_cens)
+    return out
+
+
+def _level_slope(records, key="aQ_act_post"):
+    """The level row (PLAN.md §12.3 M7): slope of the second-half level of ``key`` per doubling of N between the two largest N.
+
+    Returns
+    -------
+    dict
+        ``{readout: (slope, se, z, cell)}`` of the worst (largest |z|) (κ, δ₀, λ)
+        cell; NaN with one width or without the scalar.
+    """
+    pair = _two_largest(records)
+    lv = level_stats(records, key)
+    out = {}
+    for (ro,), recs in group_by(records, ("readout",)).items():
+        if pair is None:
+            out[ro] = (np.nan, np.nan, np.nan, "")
+            continue
+        N2, Nmax = pair
+        worst = None
+        for (kl, d0, lam, solver, eta), _ in group_by(recs, ("kappa_label", "delta0", "lam", "solver", "eta")).items():
+            a, b = lv.get((N2, kl, ro, d0, lam, solver, eta)), lv.get((Nmax, kl, ro, d0, lam, solver, eta))
+            if a is None or b is None or not (np.isfinite(a[0]) and np.isfinite(b[0])):
+                continue
+            per_dbl = np.log2(Nmax / N2)
+            slope = (b[0] - a[0]) / per_dbl
+            se = float(np.hypot(a[1], b[1]) / per_dbl)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                z = abs(slope) / se
+            if worst is None or (np.isfinite(z) and (not np.isfinite(worst[2]) or z > worst[2])):
+                worst = (float(slope), se, float(z), f"κ={P.fmt(kl)} δ₀={P.fmt(d0)} λ={P.fmt(lam)}")
+        out[ro] = worst if worst is not None else (np.nan, np.nan, np.nan, "")
+    return out
+
+
 def table_marks(records, rows, skipped=None):
     """Compute every mark of the checks table.
 
@@ -666,6 +757,8 @@ def table_marks(records, rows, skipped=None):
 
     gamma = _cv_gamma(records)
     spread = _collapse_spread(records)
+    width = _width_scaling(records)
+    level = _level_slope(records)
     for col in cols:
         ro, N = col
         recs = [r for r in records if r.run.readout == ro and r.run.N == N]
@@ -727,6 +820,20 @@ def table_marks(records, rows, skipped=None):
                 P.fmt2(v) if np.isfinite(v) else "1 width")
         else:
             put("collapse", col, "na", np.nan, "")
+        # check 4′: m½/N between the two largest N (one value per readout, as check 3)
+        ch, ypn, beta, wcell, n_cens = width.get(ro, (np.nan, np.nan, np.nan, "", 0))
+        if np.isfinite(ch):
+            txt = f"{100 * ch:.0f}%, {ypn:.2f}" + (f"\nβ={beta:+.2f}" if np.isfinite(beta) else "")
+            put("width", col, _mark_value(ch, *CRITERIA["width"][1:]), ch, txt, wcell + f" m½/N(N_max)={ypn:.2f}")
+        else:
+            put("width", col, None, np.nan, "1 width" if _two_largest(records) is None else (f"{n_cens} cens." if n_cens else "n/a"))
+        # level: slope of the second-half mean |a|√Q per doubling of N between the two largest N
+        sl, se, z, lcell = level.get(ro, (np.nan, np.nan, np.nan, ""))
+        if np.isfinite(sl):
+            put("level", col, _mark_value(z, *CRITERIA["level"][1:], lower_is_better=False) if np.isfinite(z) else None, z,
+                f"{sl:+.2f}/×2" + (f"\nz={z:.1f}" if np.isfinite(z) else ""), lcell + f" slope={sl:+.3f} se={se:.3f}")
+        else:
+            put("level", col, None, np.nan, "1 width" if _two_largest(records) is None else "not\nrecorded")
         # feasibility
         k_skip = sum(1 for lab in skipped if _parse_skipped(lab) == (N, ro))
         n_tot = k_skip + len(recs)
@@ -740,12 +847,14 @@ def fig_table(records, rows, fig_dir, index, skipped=None, figdata=False):
     for (solver, eta), recs in group_by(records, ("solver", "eta")).items():
         sub = [r for r in rows if r["solver"] == solver and r["eta"] == eta]
         marks, cols, details = table_marks(recs, sub, skipped)
-        fig, axes = P.grid(1, 1, panel=(0.62 * len(cols) + 0.4, 0.48 * (len(CHECK_ROWS) + 2)))
+        fig, axes = P.grid(1, 1, panel=(0.8 * len(cols) + 0.4, 0.48 * (len(CHECK_ROWS) + 2)))
         P.check_table(axes[0, 0], marks, CHECK_ROWS, cols)
         P.cell_title(fig, None, None, None, solver, eta, "checks")
         c = CRITERIA
         P.caption(fig, f"✓ / ~ / ✗ thresholds — gauge: {c['gauge_delta'][1]:g}, {c['gauge_delta'][2]:g}; flagged cells (|z| > 3, |Δm½| > 2 s.e., |β/se| > 3): 0, 1, ≥ 2 "
                        f"(any censored m½ = ✗); γ: ≤ {c['cv'][1]}, ≤ {c['cv'][2]}; collapse spread: < {c['collapse'][1]}, < {c['collapse'][2]}; "
+                       f"width (4′): |Δ(m½/N)| between the two largest N < {100 * c['width'][1]:g} %, < {100 * c['width'][2]:g} % (text: change, m½/N at N_max, "
+                       f"κ exponent β at N_max); level: slope of mean |a|√Q per doubling of N within {c['level'][1]:g}, {c['level'][2]:g} s.e. of 0; "
                        f"skipped: 0, ≤ {100 * c['feasible'][2]:g} %; —: not applicable by construction; 'not recorded': batch file of an older "
                        f"schema (rerun the sweep); number under a mark: what it was judged on")
         stem = P.cell_stem(None, None, None, solver, eta)

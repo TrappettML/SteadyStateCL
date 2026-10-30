@@ -2,11 +2,13 @@
 # The scaling and weight-norm questions at one learning per task, λ = 4 (the hidden-layer
 # channel alone leaves a residual of e^-4 ≈ 2 %, so every task is learned well).  The λ axis
 # (learning per task vs error) is a later stage at fixed δ₀ (PLAN.md §0 decision 7).
-# gated: 5 N × 2 κ × 3 readouts × 6 δ₀ × 1 λ × 8 seeds = 1440 runs
-# ungated (no κ, listed once per N): 5 N × 2 readouts × 6 δ₀ × 1 λ × 8 seeds = 480 runs
+# gated: 6 N × 2 κ × 3 readouts × 6 δ₀ × 1 λ × 8 seeds = 1728 runs, plus the extra cell
+#        κ = 4 at N = 100 (3 readouts × 6 δ₀ × 8 seeds = 144 runs) for M5's fitted κ exponent
+# ungated (no κ, listed once per N): 6 N × 2 readouts × 6 δ₀ × 1 λ × 8 seeds = 576 runs
 name: stage1
-N: [5, 10, 20, 50, 100]
+N: [5, 10, 20, 50, 100, 200]
 kappa: [1.0, 2.0]
+extra: [{N: 100, kappa: 4.0}]
 readout: [gated_shared, learned_shared, gated_frozen, frozen, task_heads]
 delta0: [-0.75, -0.5, 0.0, 1.0, 4.0, 16.0]
 lam: [4.0]                 # Stage 1: fixed; the λ sweep is a later stage
@@ -19,5 +21,8 @@ h_max: 1.0
 # 0.01 costs 10× the steps (n_steps = 100λ per task) and reduces it 10×.
 pop_contraction: 0.1
 D_factor: 4
+# burn-in and measurement window: T_burn = T_meas = 7·N tasks for every κ (≈ 10 measured
+# half-lives at m½ ≈ 0.69 N, PLAN.md §12.3 M4–M8); T_factor is the N/κ² form, unused here
+T_per_N: 7.0
 T_factor: 10.0
 batch_size: 64

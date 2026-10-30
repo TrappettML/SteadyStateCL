@@ -4,7 +4,7 @@ Implementation of `PLAN.md` (JAX, float64, CPU).  Run everything from this
 directory with the project venv active (`code/sscl_env`).
 
 ```bash
-pytest tests                                              # 33 tests, 40 s to 2 min: the two plotting tests render every figure family
+pytest tests                                              # 35 tests, 1 to 2 min: the plotting tests render every figure family
 python scripts/run_sweep.py --config configs/pilot.yaml   # laptop pilot, ~10 s
 python scripts/analyze.py results/pilot                   # summary.csv, curves.json, figures/{slices,summary,checks}/ (--cells for per-cell figures, --all for diagnostics)
 python scripts/validate.py                                # η-halving, Kaczmarz collapse, CV exponent
@@ -14,7 +14,7 @@ python scripts/bench.py --N 20 100 --B 1 32 128           # run-steps/s vs batch
 On the Xeon:
 
 ```bash
-python scripts/run_sweep.py --config configs/stage1.yaml --dry-run      # writes results/stage1/manifest.json (1920 runs, λ = 4 only)
+python scripts/run_sweep.py --config configs/stage1.yaml --dry-run      # writes results/stage1/manifest.json (2448 runs, λ = 4 only)
 python scripts/run_sweep.py --config configs/stage1.yaml --workers 90 --numa-nodes 4
 python scripts/analyze.py results/stage1
 ```
@@ -75,9 +75,9 @@ three checks to run).  `scripts/bench.py`: `--N`, `--B` (batch sizes),
 | `mup/config.py` | `Config` (YAML), `Run`, task duration (§3.6), grid → runs → batches |
 | `mup/io.py` | `.npz` per batch + JSON manifest, resume |
 | `mup/driver.py` | subprocess pool with thread pinning and optional `numactl` |
-| `mup/plotting.py` | the only style file (PLAN.md §12.0, §12.7): panel-sized PNG grids, fixed readout colours, `QUANTITY_LABEL`, the figure legend row, `block_mean`/`dist_by_readout`/`flag_table`/`heat_map` helpers and figure-level checks |
-| `mup/results.py` | per-run records from batch files (`load_runs`), grouping, half-window and drift statistics for the figure scripts |
-| `scripts/plot_norms.py` | norms vs task from batch files: the norms slice S1 by default, per-cell F1/F2 for `--cells` (PLAN.md §12.3); the per-step family from `traces/` only with `--diag` |
+| `mup/plotting.py` | the only style file (PLAN.md §12.0, §12.7): panel-sized PNG grids, fixed readout colours, `QUANTITY_LABEL`, the figure legend row, `block_mean`/`dist_by_readout`/`flag_table`/`heat_map`/`kappa_shades` helpers and figure-level checks |
+| `mup/results.py` | per-run records from batch files (`load_runs`), grouping, half-window, drift, half-life (`mhalf_by_condition`) and level (`level_stats`) statistics for the figure scripts |
+| `scripts/plot_norms.py` | norms vs task from batch files: the slices S1 and M8 by default, per-cell F1/F2 for `--cells` (PLAN.md §12.3); the per-step family from `traces/` only with `--diag` |
 | `scripts/plot_check2.py` | check statistics → the ✓/✗ checks table, its CSV and `check2_cells.csv` (§12.6); the C2-A … C2-E figures only with `--diag` |
 | `configs/` | `pilot.yaml`, `stage1.yaml`, `sgd_corner.yaml`, `trace.yaml`, `trace_sgd.yaml` (per-step traces, §12.2) |
 
@@ -110,10 +110,23 @@ By default: `slices/` holds one norms slice (S1) and one curves slice (S2)
 per readout and κ, with columns = δ₀ and traces = N (x in lifetimes for
 the norms, age m in tasks for the curves);
 `summary/` holds the maps M1 (lifetime m½κ_s²/N, drift of mean |a|√Q and
-E(0) over δ₀ × N, one panel per readout), M2 (m½ vs N) and M3 (m½ vs E(0));
-`checks/` holds one `checks_{solver}_eta{η}` table per solver with
-`checks_….csv` behind it.  A sweep with several λ gets one set per λ.
-Stage 1 (λ = 4 only) is 23 files.  `--cells d0=0,lam=1` (or `--cells all`)
+E(0) over δ₀ × N, one panel per readout), M2 (m½ vs N), M3 (m½ vs E(0))
+and the scaling figures of PLAN.md §12.3 M4–M8, each on an axis where
+passing is flat: M4 `mhalf_per_N_…` (m½/N vs N, traces = κ, grey ln 2),
+M5 `kappa_exponent_…` (β(N) = log[m½(κ_min)/m½(κ)]/log(κ/κ_min), grey 2
+and 0; a second row of m½ vs κ with the fitted slope when the sweep has
+≥ 3 κ), M6 `collapse_…` (S(m)/S(0) on m/N, traces = N, e^(−m/N) in the
+task-heads column), M7 `level_vs_N_{readout}_…` and `level_vs_pN_…`
+(second-half level of mean |a|√Q, its 95 % quantile and max vs N and vs
+pN = κ√N, traces = κ; a Q_act row for the frozen readouts).  M8
+`slices/norms_lt2_{readout}_…` is S1 with x = t/m½ (the condition's own
+half-life) and y divided by the second-half level.  `checks/` holds one
+`checks_{solver}_eta{η}` table per solver with `checks_….csv` behind it;
+its last rows are check 4′ (change of m½/N between the two largest N,
+with m½/N and the κ exponent at N_max printed) and the level row (slope of
+mean |a|√Q per doubling of N, ✓ within 2 s.e. of 0).  A sweep with several
+λ gets one set per λ.  Stage 1 (λ = 4, κ ∈ {1, 2} plus κ = 4 at N = 100)
+is 54 files.  `--cells d0=0,lam=1` (or `--cells all`)
 adds the per-cell families F1 `norms_…`, F2 `normsN_…`/`normsN_lt_…`, F3
 `curves_…`, F4 `curvesN_…` under `figures/cells/`; `--all`
 or `--diag kaczmarz by_step check2` adds the diagnostic families under
@@ -125,10 +138,18 @@ pools seeds into `summary.csv` (one row per condition: `S0`, `E0`, `m_half`,
 
 ## Notes
 
+- Stream length: `T_per_N: c` in a config sets `T_burn = T_meas = c·N` for
+  every κ (Stage 1: c = 7, ≈ 10 measured half-lives at m½ ≈ 0.69 N, PLAN.md
+  §12.3 M4–M8), so M8 compares conditions at the same number of half-lives;
+  without it `T_factor` gives the older `T_factor·N/κ_s²` form.  `extra:
+  [{N: 100, kappa: 4.0}]` adds gated cells off the N × κ product (an N not
+  in `N` gets no ungated runs).  Changing either makes every batch of the
+  sweep stale by length, so Stage 1 reruns in full after this change.
 - Ungated runs get their own `vmap` batches (their κ = √N never enters the
   dynamics) but take their stream length and age schedule from the schedule κ
   κ_s = the sweep's smallest gated κ (PLAN.md §5; `Run.kappa_sched`), so at
-  every N they run as long as the κ_min gated runs, T = 20N/κ_min².  A batch
+  every N they run as long as the κ_min gated runs (T = 20N/κ_min² without
+  `T_per_N`).  A batch
   file whose T disagrees with the manifest counts as stale and is rerun on
   resume (`run_sweep.py` without `--fresh`), which is how a Stage-1 sweep run
   before this change picks up only its 480 ungated runs.  Test fixtures that

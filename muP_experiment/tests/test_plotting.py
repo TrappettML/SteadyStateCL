@@ -1,4 +1,4 @@
-"""Test 10 (PLAN.md §7, §12.8): S1, S2, M1–M3 and the checks table render from a small synthetic record set without a ``plotting.save`` warning; F1–F4 through ``--cells all``.
+"""Test 10 (PLAN.md §7, §12.8, §12.9): S1, S2, M1–M8 and the checks table render from a small synthetic record set (two κ) without a ``plotting.save`` warning; F1–F4 through ``--cells all``.
 
 The diagnostic families (``--diag``) are rendered too, so they stay usable
 for locating a failed check.
@@ -22,14 +22,15 @@ from mup.protocol import SCALARS, TRACE_QUANT  # noqa: E402
 from mup.results import RunRecord  # noqa: E402
 
 
-def _record(rng, N, readout, d0, lam, seed, T_factor=2.0):
-    """One synthetic run: gated and ungated readouts, plausible S(m), E(m) and norm scalars."""
+def _record(rng, N, readout, d0, lam, seed, T_factor=2.0, kappa=1.0):
+    """One synthetic run: gated (at ``kappa``) and ungated readouts, plausible S(m), E(m) and norm scalars."""
     gated = is_gated(readout)
-    kappa = 1.0 if gated else float(np.sqrt(N))
-    T_half = int(T_factor * N / kappa ** 2) if gated else 10
+    kappa = float(kappa) if gated else float(np.sqrt(N))
+    T_half = max(4, int(T_factor * N / kappa ** 2)) if gated else 2 * int(T_factor * N)
     T = 2 * T_half
     run = Run(N=N, D=4 * N, kappa=kappa, readout=readout, delta0=d0, lam=lam, seed=seed, solver="pop", eta=1.0,
-              h=0.1, n_steps=10, alpha_task=lam, T_burn=T_half, T_meas=T_half, kappa_label="1.0" if gated else "sqrtN")
+              h=0.1, n_steps=10, alpha_task=lam, T_burn=T_half, T_meas=T_half, kappa_label=f"{kappa}" if gated else "sqrtN",
+              kappa_sched=kappa if gated else 1.0)
     ages = age_schedule(N, kappa, T)
     t = np.arange(T)
     sc = {k: 1.0 + 0.05 * rng.standard_normal(T) for k in SCALARS}
@@ -66,9 +67,10 @@ def records():
     recs = []
     for N in (10, 20):
         for ro in READOUT_ORDER:
-            for d0 in (0.0, 4.0):
-                for seed in (0, 1):
-                    recs.append(_record(rng, N, ro, d0, 1.0, seed))
+            for kappa in ((1.0, 2.0) if is_gated(ro) else (None,)):
+                for d0 in (0.0, 4.0):
+                    for seed in (0, 1):
+                        recs.append(_record(rng, N, ro, d0, 1.0, seed, kappa=kappa or 1.0))
     return recs
 
 
@@ -76,7 +78,7 @@ def _trace_dir(tmp_path, records):
     """Write synthetic trace files for the by-step diagnostics (one run per readout)."""
     out = str(tmp_path / "sweep")
     rng = np.random.default_rng(1)
-    for i, rec in enumerate(r for r in records if r.run.N == 10 and r.run.seed == 0 and r.run.delta0 == 0.0):
+    for i, rec in enumerate(r for r in records if r.run.N == 10 and r.run.seed == 0 and r.run.delta0 == 0.0 and r.run.kappa_label != "2.0"):
         n_steps, T = 10, rec.T
         tr = np.cumsum(0.01 * rng.standard_normal((T, n_steps, len(TRACE_QUANT))), axis=1).astype(np.float32)
         res = {"trace": tr[None], "trace_idx": np.arange(n_steps, dtype=np.int32), "T_burn": rec.T_burn, "T_meas": rec.T_meas, "n_steps": n_steps}
@@ -85,7 +87,7 @@ def _trace_dir(tmp_path, records):
 
 
 def test_default_families_render_without_warnings(records, tmp_path):
-    """S1, S2, M1, M2, M3 and the checks table; nothing else is written by default."""
+    """S1, S2, M1–M8 and the checks table; nothing else is written by default."""
     import analyze
     import plot_check2
     import plot_norms
@@ -104,18 +106,26 @@ def test_default_families_render_without_warnings(records, tmp_path):
         analyze.fig_maps(conds, stats, fig_dir, index, True)
         analyze.fig_mhalf_vs_N(conds, fig_dir, index, True)
         analyze.fig_mhalf_vs_E0(conds, fig_dir, index, True)
+        analyze.fig_M4(conds, fig_dir, index, True)
+        analyze.fig_M5(conds, fig_dir, index, True)
+        analyze.fig_M6(conds, fig_dir, index, True)
+        analyze.fig_M7(records, fig_dir, index, True)
         P.write_index(fig_dir, index)
     assert {f for f, _, _ in index} == {"slices", "summary", "checks"}
     assert sorted(os.listdir(fig_dir)) == ["INDEX.md", "checks", "slices", "summary"]
     stems = {os.path.basename(p) for _, _, p in index}
     for s in ("norms_gated_shared_k1.0_lam1.0_pop_eta1.0.png", "norms_frozen_lam1.0_pop_eta1.0.png",
-              "curves_gated_frozen_k1.0_lam1.0_pop_eta1.0.png", "curves_task_heads_k1.0_lam1.0_pop_eta1.0.png",
-              "maps_k1.0_lam1.0_pop_eta1.0.png", "mhalf_vs_N_k1.0_lam1.0_pop_eta1.0.png", "mhalf_vs_E0_k1.0_pop_eta1.0.png",
+              "norms_lt2_task_heads_k2.0_lam1.0_pop_eta1.0.png", "norms_lt2_learned_shared_lam1.0_pop_eta1.0.png",
+              "curves_gated_frozen_k1.0_lam1.0_pop_eta1.0.png", "curves_task_heads_k2.0_lam1.0_pop_eta1.0.png",
+              "maps_k1.0_lam1.0_pop_eta1.0.png", "mhalf_vs_N_k2.0_lam1.0_pop_eta1.0.png", "mhalf_vs_E0_k1.0_pop_eta1.0.png",
+              "mhalf_per_N_lam1.0_pop_eta1.0.png", "kappa_exponent_lam1.0_pop_eta1.0.png", "collapse_k2.0_lam1.0_pop_eta1.0.png",
+              "level_vs_N_gated_shared_lam1.0_pop_eta1.0.png", "level_vs_pN_gated_frozen_lam1.0_pop_eta1.0.png",
               "checks_pop_eta1.0.png"):
         assert s in stems, s
-    # one slice per readout (ungated: no k), 2 files each; 3 summaries; 1 table
-    assert len([f for f, _, _ in index if f == "slices"]) == 10
-    assert len([f for f, _, _ in index if f == "summary"]) == 3
+    # slices: 3 gated readouts × 2 κ + 2 ungated = 8 per family, S1 + S2 + M8; summaries: M1–M3 and M6 per κ, M4, M5, M7 (3 readouts × 2 twins)
+    assert len([f for f, _, _ in index if f == "slices"]) == 24
+    assert len([f for f, _, _ in index if f == "summary"]) == 2 * 4 + 1 + 1 + 6
+    assert not any(s.startswith("level_vs_") and ("frozen_lam" in s and "gated" not in s or "learned" in s) for s in stems)
     for f in ("checks_pop_eta1.0.csv", "check2_cells.csv", "checks_pop_eta1.0.npz"):
         assert os.path.exists(os.path.join(fig_dir, "checks", f)), f
     # every table row has a mark or text for every column
@@ -126,6 +136,28 @@ def test_default_families_render_without_warnings(records, tmp_path):
     assert feas and feas[0]["mark"] == "fail"           # one skipped run of five = 20 % > 10 %
     gauge_na = [r for r in rows if r["row"].startswith("1 gauge") and "frozen" in r["readout"]]
     assert gauge_na and all(r["mark"] == "na" for r in gauge_na)
+    # check 4′ and the level row: one value per readout, judged on two widths
+    width = [r for r in rows if r["row"].startswith("4′") and r["readout"] == "gated_shared"]
+    assert len(width) == 2 and width[0]["mark"] in ("ok", "warn", "fail") and width[0]["value"] == width[1]["value"]
+    level = [r for r in rows if r["row"].startswith("level") and r["readout"] == "frozen"]
+    assert len(level) == 2 and level[0]["mark"] in ("ok", "warn", "fail")
+
+
+def test_kappa_exponent_with_three_kappas(tmp_path):
+    """M5's second row (m½ vs κ, fitted slope) with κ ∈ {1, 2, 4}; M4 and M7 with three shades."""
+    import analyze
+    rng = np.random.default_rng(2)
+    recs = [_record(rng, N, ro, d0, 1.0, seed, kappa=k)
+            for N in (10, 20) for ro in ("gated_shared", "task_heads") for k in (1.0, 2.0, 4.0) for d0 in (0.0,) for seed in (0, 1)]
+    fig_dir = str(tmp_path / "figures")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        conds = analyze.collect(recs)
+        index = []
+        analyze.fig_M5(conds, fig_dir, index, False)
+        analyze.fig_M4(conds, fig_dir, index, False)
+        analyze.fig_M7(recs, fig_dir, index, False)
+    assert len(index) == 1 + 1 + 4
 
 
 def test_cell_families_render_without_warnings(records, tmp_path):

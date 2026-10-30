@@ -6,6 +6,9 @@
 S1, the default (``slices/norms_{readout}_…``): one file per readout and
 κ; rows = quantity (rows constant by construction for that readout
 dropped), columns = δ₀, traces = N, x = t κ_s²/N (lifetimes).
+M8 (``slices/norms_lt2_{readout}_…``, PLAN.md §12.3): S1 on the measured
+time scale, x = t/m½ with the condition's own half-life and y divided by
+its second-half mean, so 1 is the steady level; burn-in end marked per N.
 Per-cell, only for the records ``analyze.py`` selects with ``--cells``:
 F1 (``cells/norms/norms_…``): rows = quantity, columns = N, traces = readouts.
 F2 (``cells/norms/normsN_…`` and ``normsN_lt_…``): rows = quantity, columns =
@@ -26,7 +29,7 @@ import _path  # noqa: F401
 from mup import io
 from mup import plotting as P
 from mup.config import is_gated
-from mup.results import by_kappa, group_by, kappa_min, load_runs, seed_stack, slice_groups
+from mup.results import by_kappa, group_by, kappa_min, load_runs, mhalf_by_condition, seed_stack, slice_groups
 
 #: F1/F2 rows: (scalar key, quantile keys or None); heads_fro2_post is appended when task heads are present
 ROWS = (("Q_act_pre", ("Q_q05", "Q_q95")), ("a2_act_post", None), ("aQ_act_post", ("aQ_q05", "aQ_q95")),
@@ -142,6 +145,80 @@ def fig_S1(records, fig_dir, index, figdata):
                       + ("; dashed: ungated" if not is_gated(ro) else "") + _omitted(members, _rows(members)) + _missing_text(missing))
             stem = P.cell_stem(kappa, None, lam, solver, eta, readout=ro) + (f"_part{part + 1}" if part else "")
             P.save(fig, os.path.join(fig_dir, "slices", "norms_" + stem), data if figdata else None, index, "slices", stem)
+
+
+def fig_M8(records, fig_dir, index, figdata):
+    """M8: S1 on the measured time scale: x = t/m½ (the condition's own seed-pooled half-life), y relative to the second-half mean (PLAN.md §12.3).
+
+    Block width = half a measured half-life; the end of burn-in is marked per N
+    in its shade (dashed) and the half boundary dotted; grey reference at 1.
+    Conditions whose half-life is censored have no time scale and are left out
+    (named in the caption).
+    """
+    na, mh = _na(), mhalf_by_condition(records)
+    for (ro, kappa, lam, solver, eta), members in slice_groups(records).items():
+        rows = [(k, qk) for k, qk in _rows(members) if (k, ro) not in na]
+        d0s_all = sorted({r.run.delta0 for r in members})
+        Ns = sorted({r.run.N for r in members})
+        for part, d0s in enumerate(P.col_chunks(d0s_all)):
+            fig, axes = P.grid(len(rows), len(d0s), sharex="all", sharey="row")
+            data, missing, left_out = {}, set(), []
+            for j, d0 in enumerate(d0s):
+                drawn = set()
+                for i_N, N in enumerate(Ns):
+                    recs = [r for r in members if r.run.N == N and r.run.delta0 == d0]
+                    if not recs:
+                        continue
+                    r0 = recs[0]
+                    m = mh[r0.key()]["m_half"]
+                    if not (np.isfinite(m) and m > 0):
+                        left_out.append(f"δ₀ = {P.fmt(d0)}, N = {P.fmt(N)}")
+                        continue
+                    x = np.arange(r0.T, dtype=float) / m
+                    w = max(1, int(round(m / 2)))
+                    mid = r0.T_burn + r0.T_meas // 2
+                    cuts = (r0.T_burn, mid)
+                    col = P.n_shade(i_N, len(Ns))
+                    for i, (key, qk) in enumerate(rows):
+                        if key not in r0.scalars:
+                            missing.add((key, ro, N))
+                            continue
+                        Y = seed_stack(recs, key)
+                        with np.errstate(invalid="ignore"):
+                            level = np.nanmean(Y[:, mid:r0.T])
+                        if not np.isfinite(level) or level == 0:
+                            continue
+                        xb, mb, sb = _block_trace(axes[i, j], x, Y / level, w, cuts, col, P.READOUT_STYLE[ro],
+                                                  [seed_stack(recs, k) / level for k in qk] if qk else None)
+                        drawn.add(key)
+                        data[f"d{d0}_N{N}_{key}"] = np.stack([xb, mb, sb])
+                        data[f"d{d0}_N{N}_{key}_level"] = np.array([level, m])
+                    for i in range(len(rows)):
+                        axes[i, j].axvline(r0.T_burn / m, color=col, ls="--", lw=P.LW_EVENT, zorder=1)
+                        axes[i, j].axvline((r0.T_burn + r0.T_meas / 2) / m, color=col, ls=":", lw=P.LW_EVENT, zorder=1)
+                for i, (key, _) in enumerate(rows):
+                    if key not in drawn and all((key, ro, N) in missing for N in Ns if any(r.run.N == N and r.run.delta0 == d0 for r in members)):
+                        P.na_slot(axes[i, j], "not recorded\n(older batch file)")
+                    elif key not in drawn:
+                        P.na_slot(axes[i, j], "no time scale\n(censored m½)")
+                axes[0, j].set_title(rf"$\delta_0$ = {P.fmt(d0)}")
+                axes[-1, j].set_xlabel(r"$t / m_{1/2}$ (half-lives)")
+            for i, (key, _) in enumerate(rows):
+                axes[i, 0].set_ylabel(P.qlabel(key) + "\n/ level")
+                for j in range(len(d0s)):
+                    P.ref_line(axes[i, j], 1.0)
+            P.fig_legend(fig, None, handles=P.n_handles(Ns))
+            P.cell_title(fig, kappa, None, lam, solver, eta, P.READOUT_LABEL[ro] + ", in measured half-lives")
+            cap = ("x: task / the condition's own m½; y: quantity / its mean over the second half of the measurement window (grey: 1); "
+                   "thick: mean over seeds and blocks of half a half-life, band ±1 s.e.; faint: per-task seed mean; thin: 5 % and 95 % over active units; "
+                   "dashed: end of burn-in of each N; dotted: its half boundary; pass: every trace at 1 before burn-in ends")
+            if not is_gated(ro):
+                cap += "; dashed traces: ungated"
+            if left_out:
+                cap += "; left out (censored m½): " + ", ".join(left_out[:4]) + (", …" if len(left_out) > 4 else "")
+            P.caption(fig, cap + _omitted(members, _rows(members)) + _missing_text(missing))
+            stem = P.cell_stem(kappa, None, lam, solver, eta, readout=ro) + (f"_part{part + 1}" if part else "")
+            P.save(fig, os.path.join(fig_dir, "slices", "norms_lt2_" + stem), data if figdata else None, index, "slices", stem)
 
 
 def fig_F1(records, fig_dir, index, figdata):
@@ -299,7 +376,7 @@ def family_B(out_dir, fig_dir, index, figdata):
 
 
 def run(out_dir, fig_dir, records=None, figdata=False, diag=False, cells=None):
-    """Make the norms slice S1 (and, for ``cells``, F1/F2; with ``diag``, the by-step family).
+    """Make the norms slices S1 and M8 (and, for ``cells``, F1/F2; with ``diag``, the by-step family).
 
     Parameters
     ----------
@@ -327,6 +404,7 @@ def run(out_dir, fig_dir, records=None, figdata=False, diag=False, cells=None):
     index = []
     if records:
         fig_S1(records, fig_dir, index, figdata)
+        fig_M8(records, fig_dir, index, figdata)
     if cells:
         fig_F1(cells, fig_dir, index, figdata)
         fig_F2(cells, fig_dir, index, figdata)

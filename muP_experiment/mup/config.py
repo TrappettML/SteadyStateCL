@@ -60,7 +60,9 @@ class Config:
     solver : "pop" or "sgd"
     eta : per-run η (pop: 1; sgd: values with η ā² ≤ sgd_contraction)
     h_max, pop_contraction, sgd_contraction : step-size rules of §3.6
-    D_factor, T_factor, T_min : D = D_factor·N; T_burn = T_meas = max(T_min, round(T_factor·N/κ²))
+    D_factor, T_factor, T_per_N, T_min : D = D_factor·N; T_burn = T_meas = max(T_min, round(T_per_N·N)) when
+        T_per_N > 0 (a fixed number of measured half-lives, PLAN.md §12.3), else max(T_min, round(T_factor·N/κ_s²))
+    extra : extra gated (N, κ) cells, each ``{N: …, kappa: …}``
     batch_size : max runs per vmap batch
     n_ages_geom, m_max_factor : probe-age schedule (§5)
     trace, trace_points : per-step traces (§12.2), separate configs only
@@ -78,13 +80,16 @@ class Config:
     pop_contraction: float = 0.1            # h η ā² ≤ this
     sgd_contraction: float = 0.05           # η ā² ≤ this
     D_factor: int = 4                       # D = D_factor · N
-    T_factor: float = 10.0                  # T_burn = T_meas = T_factor · N / κ²
+    T_factor: float = 10.0                  # T_burn = T_meas = T_factor · N / κ_s² (when T_per_N is 0)
+    T_per_N: float = 0.0                    # > 0: T_burn = T_meas = T_per_N · N, independent of κ (PLAN.md §12.3 M4–M8, burn-in)
     T_min: int = 4                          # floor on T_burn and T_meas
     batch_size: int = 64
     n_ages_geom: int = 24
     m_max_factor: float = 4.0
     trace: bool = False                     # per-step norm traces (PLAN.md §12.2); separate configs only
     trace_points: int = 200                 # stored steps per task in a trace run
+    #: extra gated (N, κ) cells off the N × κ product, e.g. ``[{N: 100, kappa: 4.0}]``; an N not in ``N`` gets no ungated runs
+    extra: Sequence[dict] = ()
 
     @classmethod
     def from_yaml(cls, path: str) -> "Config":
@@ -316,8 +321,9 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
     per (N, δ₀, λ, η, seed) with ``kappa_label = "sqrtN"`` (PLAN.md §4).
     Their stream length and age schedule come from the schedule κ_s = the
     sweep's smallest gated κ (PLAN.md §5), so they run as long as the κ_min
-    gated runs (20N/κ_min² tasks); ``kappa_sched``
-    records κ_s on every run.
+    gated runs (20N/κ_min² tasks, or 2·T_per_N·N for every run when
+    ``T_per_N`` is set); ``kappa_sched`` records κ_s on every run.  The
+    gated cells of ``cfg.extra`` are added to the N × κ product.
 
     Parameters
     ----------
@@ -338,16 +344,23 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
         if readout not in READOUTS:
             raise ValueError(f"unknown readout {readout!r}; known: {list(READOUTS)}")
     runs = []
-    for N in cfg.N:
+    extra_N = [int(e["N"]) for e in cfg.extra if int(e["N"]) not in cfg.N]
+    for N in list(cfg.N) + sorted(set(extra_N)):
         if N_filter is not None and N not in N_filter:
             continue
         D = cfg.D_factor * N
-        kappas = [resolve_kappa(k, N) for k in cfg.kappa]
+        kappas = [resolve_kappa(k, N) for k in cfg.kappa] if N in cfg.N else []
+        kappas += [resolve_kappa(e["kappa"], N) for e in cfg.extra if int(e["N"]) == N]
         kappa_min = min(k for k, _ in kappas) if kappas else math.sqrt(N)
         for readout in cfg.readout:
+            if not is_gated(readout) and N not in cfg.N:
+                continue                                    # an extra cell is gated only
             for kappa, klabel in (kappas if is_gated(readout) else [(math.sqrt(N), "sqrtN")]):
                 kappa_s = kappa if is_gated(readout) else kappa_min
-                T_half = max(cfg.T_min, int(round(cfg.T_factor * N / kappa_s**2)))
+                if cfg.T_per_N > 0:
+                    T_half = max(cfg.T_min, int(round(cfg.T_per_N * N)))
+                else:
+                    T_half = max(cfg.T_min, int(round(cfg.T_factor * N / kappa_s**2)))
                 for delta0, lam, eta, seed in itertools.product(cfg.delta0, cfg.lam, cfg.eta, cfg.seed_list()):
                     if delta0 <= -1.0:
                         raise ValueError(f"δ₀ = {delta0} ≤ −1 makes the initial readout imaginary")

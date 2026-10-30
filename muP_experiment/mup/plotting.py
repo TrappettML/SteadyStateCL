@@ -510,13 +510,16 @@ def cell_title(fig, kappa=None, d0=None, lam=None, solver=None, eta=None, extra:
         parts.append({"pop": "population", "sgd": "SGD"}.get(solver, solver) + (rf", $\eta$ = {fmt(eta)}" if eta is not None else ""))
     if extra:
         parts.append(mathify(extra))
-    text = ", ".join(parts) if parts else mathify(extra) or " "
     w, h = fig.get_size_inches()
-    # wrap at a comma when the bold 11-pt title would overrun the figure (≈ 0.095 in per character)
-    plain = text.replace("$", "").replace("\\", "")
-    if len(plain) * 0.095 > w - 0.3 and len(parts) > 1:
-        cut = max(1, len(parts) // 2)
-        text = ", ".join(parts[:cut]) + "\n" + ", ".join(parts[cut:])
+    # wrap at commas, greedily, when the bold 11-pt title would overrun the figure (≈ 0.095 in per character)
+    width = lambda t: len(t.replace("$", "").replace("\\", "")) * 0.095
+    lines = []
+    for part in parts:
+        if lines and width(lines[-1] + ", " + part) <= w - 0.3:
+            lines[-1] += ", " + part
+        else:
+            lines.append(part)
+    text = "\n".join(lines) if lines else mathify(extra) or " "
     fig._mup["title_lines"] = text.count("\n") + 1
     fig.suptitle(text, y=1 - 0.06 / h, va="top", linespacing=1.1)
     _relayout(fig)
@@ -1162,3 +1165,37 @@ def drift_map(ax, z, beta, d0s, lams, beta_fmt=None, zmax: float = 5.0):
     with np.errstate(invalid="ignore"):
         outline = np.abs(z) > 3
     return heat_map(ax, z, beta, d0s, lams, "RdBu_r", -zmax, zmax, beta_fmt or fmt2, outline)
+
+
+# ---------------------------------------------------------------------------
+# κ as a trace (M4, M5, M7 of PLAN.md §12.3): shades of the readout colour
+# ---------------------------------------------------------------------------
+def kappa_shades(i: int, n: int, readout: str | None = None) -> tuple:
+    """Colour of the i-th of n κ traces: the readout's colour blended towards white, lightest for the smallest κ.
+
+    Parameters
+    ----------
+    i, n : int
+        Index (0 = smallest κ) and number of κ values; a single κ gets the full colour.
+    readout : str, optional
+        Readout key; ``None`` gives grey shades (the legend handles).
+
+    Returns
+    -------
+    (r, g, b) tuple
+    """
+    from matplotlib.colors import to_rgb
+    base = to_rgb(READOUT_COLOR[readout]) if readout is not None else (0.15, 0.15, 0.15)
+    f = 1.0 if n <= 1 else 0.4 + 0.6 * i / (n - 1)
+    return tuple(1.0 - f * (1.0 - c) for c in base)
+
+
+def kappa_handles(kappas) -> list:
+    """Legend handles for κ traces (grey shades, ``κ = …`` labels), in the order given (smallest first)."""
+    return [Line2D([], [], color=kappa_shades(i, len(kappas)), lw=LW_TRACE, label=rf"$\kappa$ = {'√N' if k == 'sqrtN' else fmt(k)}")
+            for i, k in enumerate(kappas)]
+
+
+def ref_curve(ax, x, y) -> None:
+    """A grey reference curve (e.g. e^{−m/N}) drawn below the data, outside the autoscale."""
+    ax.plot(np.asarray(x, float), np.asarray(y, float), color=GREY_REF, lw=LW_REF, zorder=1, scalex=False, scaley=False)

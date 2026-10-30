@@ -52,6 +52,18 @@ def test_ungated_listed_once_per_N():
         make_runs(Config(readout=["learned"]))
 
 
+def test_T_per_N_and_extra_cells():
+    """PLAN.md §12.3 (M4–M8 burn-in): T_burn = T_meas = c·N for every κ; ``extra`` adds gated cells off the N × κ product."""
+    cfg = Config(N=[10, 20], kappa=[1.0, 2.0], delta0=[0.0], lam=[1.0], seeds=1, T_per_N=7.0, extra=[{"N": 20, "kappa": 4.0}, {"N": 40, "kappa": 1.0}])
+    runs = make_runs(cfg)
+    assert all(r.T_burn == r.T_meas == 7 * r.N for r in runs)
+    assert sorted({(r.N, r.kappa_label) for r in runs if r.gated}) == [(10, "1.0"), (10, "2.0"), (20, "1.0"), (20, "2.0"), (20, "4.0"), (40, "1.0")]
+    assert sorted({r.N for r in runs if not r.gated}) == [10, 20]       # an extra N gets no ungated runs
+    assert all(r.kappa_sched == 1.0 for r in runs if not r.gated)      # κ_min from the product grid, not the extra cell
+    stage1 = Config.from_yaml("configs/stage1.yaml")
+    assert len(make_runs(stage1)) == 2448
+
+
 def test_age_schedule_and_half_life():
     ages = age_schedule(100, 1.0, 2000)
     assert ages[0] == 0 and ages[-1] == 1999 and np.all(np.diff(ages) > 0)

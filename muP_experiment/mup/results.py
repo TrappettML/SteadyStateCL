@@ -301,3 +301,62 @@ def condition_mhalf(records: Iterable[RunRecord], halves=(0, 1)) -> tuple[float,
     with np.errstate(invalid="ignore", divide="ignore"):
         S = tot / n
     return half_life(records[0].ages, S)
+
+
+def mhalf_by_condition(records: Iterable[RunRecord]) -> dict:
+    """Half-life of every condition with its seed scatter (M4, M5, M8 and check 4′ of PLAN.md §12.3, §12.6).
+
+    Parameters
+    ----------
+    records : iterable of RunRecord
+
+    Returns
+    -------
+    dict
+        ``{condition key: {"m_half", "m_half_se", "censored", "n_seeds"}}``:
+        ``m_half`` the half-life of the seed-pooled S(m) (what M1/M2 show),
+        ``m_half_se`` the s.e.m. over seeds of the per-seed half-lives (NaN
+        with fewer than two finite ones), ``censored`` when the pooled curve
+        never reaches S(0)/2.
+    """
+    out = {}
+    for key, recs in group_by(records, COND_KEYS).items():
+        m, cens = condition_mhalf(recs)
+        per = np.array([half_life(r.ages, r.curve()["S"])[0] for r in recs], float)
+        per = per[np.isfinite(per)]
+        out[key] = {"m_half": float(m), "m_half_se": float(sem(per)) if len(per) > 1 else np.nan,
+                    "censored": bool(cens), "n_seeds": len(recs)}
+    return out
+
+
+def level_stats(records: Iterable[RunRecord], key: str) -> dict:
+    """Steady-state level of a per-task scalar: its mean over the second half of the measurement window (M7, PLAN.md §12.3).
+
+    Parameters
+    ----------
+    records : iterable of RunRecord
+    key : str
+        Scalar name (``aQ_act_post``, ``aQ_q95``, ``aQ_max_post``, ``Q_act_pre``, …).
+
+    Returns
+    -------
+    dict
+        ``{condition key: (mean, se, n_seeds)}``: the per-seed means over the
+        finite values of the second half, averaged over seeds, with the
+        s.e.m. over seeds (NaN with one seed).  Conditions whose batch files
+        lack the scalar map to ``(nan, nan, 0)``.
+    """
+    out = {}
+    for ck, recs in group_by(records, COND_KEYS).items():
+        vals = []
+        for r in recs:
+            if key not in r.scalars:
+                continue
+            mid = r.T_burn + r.T_meas // 2
+            x = np.asarray(r.scalars[key][mid:r.T_burn + r.T_meas], float)
+            x = x[np.isfinite(x)]
+            vals.append(x.mean() if len(x) else np.nan)
+        v = np.asarray(vals, float)
+        v = v[np.isfinite(v)]
+        out[ck] = (float(v.mean()) if len(v) else np.nan, float(sem(v)) if len(v) > 1 else np.nan, len(vals))
+    return out

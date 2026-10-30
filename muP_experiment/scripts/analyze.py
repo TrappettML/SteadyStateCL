@@ -11,7 +11,12 @@ Default figures (PLAN.md §12.3, §12.6; one set per λ):
   age m in tasks.
 - ``summary/``: M1 maps over δ₀ × N, one panel per readout, of the
   lifetime m½κ_s²/N, the drift of mean |a|√Q per lifetime and E(0);
-  M2 m½ vs N; M3 m½ vs E(0).
+  M2 m½ vs N; M3 m½ vs E(0); and the scaling figures on axes where
+  passing is flat (§12.3 M4–M8): M4 m½/N vs N with traces = κ, M5 the κ
+  exponent β(N), M6 the collapse of S(m)/S(0) on m/N, M7 the second-half
+  level of |a|√Q vs N (and vs pN = κ√N).
+- ``slices/norms_lt2_…``: M8, the norms slice on the measured time
+  scale (x = t/m½, y relative to the second-half level; ``plot_norms.py``).
 - ``checks/``: the ✓/✗ table via ``plot_check2.py``.
 
 The per-cell families F1–F4 (one file per (κ, δ₀, λ, solver, η)) are
@@ -34,7 +39,8 @@ import _path  # noqa: F401
 from mup import plotting as P
 from mup.config import is_gated
 from mup.observe import cv_exponent, half_life
-from mup.results import COND_KEYS, by_kappa, condition_mhalf, group_by, half_stats, kappa_min, load_runs, sem, slice_groups
+from mup.results import (COND_KEYS, by_kappa, condition_mhalf, group_by, half_stats, kappa_min, level_stats, load_runs,
+                         mhalf_by_condition, sem, slice_groups)
 
 #: per-task scalars compared between halves for check 2 (PLAN.md §6)
 CHECK2_KEYS = ("Q_all_post", "a2_all_post", "aQ_all_post", "aQ_max_post", "E0")
@@ -456,6 +462,278 @@ def fig_mhalf_vs_E0(conds, fig_dir, index, figdata):
         P.save(fig, os.path.join(fig_dir, "summary", "mhalf_vs_E0_" + stem), data if figdata else None, index, "summary", stem)
 
 
+# ---------------------------------------------------------------------------
+# M4–M7: scaling and stationarity on axes where passing is flat (PLAN.md §12.3)
+# ---------------------------------------------------------------------------
+LN2 = float(np.log(2.0))
+
+
+def _klabels(keys):
+    """κ labels of a set of condition keys, smallest first (numeric labels; "sqrtN" last)."""
+    return sorted({k[1] for k in keys}, key=lambda k: (k == "sqrtN", float(k) if k != "sqrtN" else 0.0))
+
+
+def _gated_groups(conds):
+    """``{(λ, solver, η): {condition key: dict}}`` over the gated conditions (every κ together)."""
+    out = {}
+    for k, d in conds.items():
+        if is_gated(k[2]):
+            out.setdefault((k[4], k[5], k[6]), {})[k] = d
+    return out
+
+
+def _censored_marks(ax, x, color):
+    """▼ at the top of the panel (axes-fraction y) for censored conditions at the given x."""
+    if len(x):
+        ax.plot(np.asarray(x, float), [0.96] * len(x), "v", color=color, ms=5, transform=ax.get_xaxis_transform(),
+                zorder=6, clip_on=False, scaley=False)
+
+
+def fig_M4(conds, fig_dir, index, figdata):
+    """M4: half-life per width, m½/N vs N; rows = δ₀, columns = gated readouts, traces = κ; grey reference at ln 2 (PLAN.md §12.3)."""
+    for (lam, solver, eta), members in _gated_groups(conds).items():
+        ros = [ro for ro in P.READOUT_COLOR if any(k[2] == ro for k in members)]
+        d0s, Ns, ks = sorted({k[3] for k in members}), sorted({k[0] for k in members}), _klabels(members)
+        fig, axes = P.grid(len(d0s), len(ros), sharex="all", sharey="all")
+        data = {}
+        for i, d0 in enumerate(d0s):
+            for j, ro in enumerate(ros):
+                ax = axes[i, j]
+                P.ref_line(ax, LN2)
+                for ik, kl in enumerate(ks):
+                    pts = sorted((k[0], d["m_half"] / k[0], d["m_half_se"] / k[0], d["censored"])
+                                 for k, d in members.items() if k[2] == ro and k[3] == d0 and k[1] == kl)
+                    if not pts:
+                        continue
+                    N, y, se, c = (np.array(z, dtype=float) for z in zip(*pts))
+                    col = P.kappa_shades(ik, len(ks), ro)
+                    ax.plot(N, y, color=col, marker="o", lw=P.LW_TRACE, zorder=4)
+                    ax.errorbar(N, y, yerr=np.nan_to_num(se), fmt="none", ecolor=P.GREY_REF, elinewidth=P.LW_REF, capsize=2, zorder=3)
+                    _censored_marks(ax, N[c > 0], col)
+                    data[f"{ro}_d{d0}_k{kl}"] = np.stack([N, y, se, c])
+                P.logaxis(ax, "x"); P.discrete_ticks(ax, Ns, "x")
+                if i == 0:
+                    ax.set_title(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro])
+                if i == len(d0s) - 1:
+                    ax.set_xlabel("N")
+            axes[i, 0].set_ylabel(rf"$\delta_0$ = {P.fmt(d0)}" + "\n" + r"$m_{1/2}/N$")
+        axes[0, 0].set_ylim(bottom=0)
+        P.fig_legend(fig, None, handles=P.kappa_handles(ks))
+        P.cell_title(fig, None, None, lam, solver, eta, "half-life per width, traces = κ")
+        P.caption(fig, "bars: ±1 s.e.m. over seeds; ▼ at the top: censored (m½ > m_max); grey: ln 2 ≈ 0.69, the task-heads estimate "
+                       "m½ ≈ N ln 2; flat at large N = m½ ∝ N; the gap between κ traces is the κ dependence (N/κ² puts κ = 2 at a quarter of κ = 1)")
+        stem = P.cell_stem(None, None, lam, solver, eta)
+        P.save(fig, os.path.join(fig_dir, "summary", "mhalf_per_N_" + stem), data if figdata else None, index, "summary", stem)
+
+
+def _log_mhalf(d):
+    """(log m½, s.e. of log m½) of a condition; NaN when censored or without a value."""
+    m, se = d["m_half"], d["m_half_se"]
+    if d["censored"] or not (np.isfinite(m) and m > 0):
+        return np.nan, np.nan
+    return float(np.log(m)), float(se / m) if np.isfinite(se) else np.nan
+
+
+def fig_M5(conds, fig_dir, index, figdata):
+    """M5: κ exponent β(N) = log[m½(κ_min)/m½(κ)] / log(κ/κ_min) vs N; columns = δ₀, traces = gated readouts; grey at 2 and 0 (PLAN.md §12.3).
+
+    With three or more κ a second row shows m½ against κ (log–log) with
+    traces = N in shades of the readout colour and the fitted slope printed.
+    """
+    for (lam, solver, eta), members in _gated_groups(conds).items():
+        ks = _klabels(members)
+        if len(ks) < 2:
+            continue
+        kmin = ks[0]
+        many = len(ks) >= 3
+        ros = [ro for ro in P.READOUT_COLOR if any(k[2] == ro for k in members)]
+        d0s_all, Ns = sorted({k[3] for k in members}), sorted({k[0] for k in members})
+        for part, d0s in enumerate(P.col_chunks(d0s_all)):
+            fig, axes = P.grid(2 if many else 1, len(d0s), sharex="row", sharey="row")
+            data, handles = {}, []
+            for j, d0 in enumerate(d0s):
+                ax = axes[0, j]
+                P.ref_line(ax, 2.0); P.ref_line(ax, 0.0)
+                for ro in ros:
+                    for ik, kl in enumerate(ks[1:]):
+                        xs, ys, es = [], [], []
+                        for N in Ns:
+                            d_min = members.get((N, kmin, ro, d0, lam, solver, eta))
+                            d_k = members.get((N, kl, ro, d0, lam, solver, eta))
+                            if d_min is None or d_k is None:
+                                continue
+                            (l0, s0), (l1, s1) = _log_mhalf(d_min), _log_mhalf(d_k)
+                            denom = np.log(float(kl) / float(kmin))
+                            xs.append(N); ys.append((l0 - l1) / denom); es.append(np.hypot(s0, s1) / denom)
+                        if not xs:
+                            continue
+                        x, y, e = (np.array(z, dtype=float) for z in (xs, ys, es))
+                        col = P.kappa_shades(ik, len(ks) - 1, ro) if many else P.READOUT_COLOR[ro]
+                        ax.plot(x, y, color=col, marker="o", lw=P.LW_TRACE, zorder=4)
+                        ax.errorbar(x, y, yerr=np.nan_to_num(e), fmt="none", ecolor=P.GREY_REF, elinewidth=P.LW_REF, capsize=2, zorder=3)
+                        data[f"{ro}_d{d0}_k{kl}"] = np.stack([x, y, e])
+                        if j == 0:
+                            handles.append(P.Line2D([], [], color=col, lw=P.LW_TRACE, marker="o",
+                                                    label=P.READOUT_LABEL[ro] + (rf", $\kappa$ = {P.fmt(kl)}" if many else "")))
+                P.logaxis(ax, "x"); P.discrete_ticks(ax, Ns, "x")
+                ax.set_title(rf"$\delta_0$ = {P.fmt(d0)}")
+                ax.set_xlabel("N")
+                if many:
+                    ax2 = axes[1, j]
+                    slopes = {}
+                    for ro in ros:
+                        for iN, N in enumerate(Ns):
+                            pts = [(float(kl), *_log_mhalf(members[(N, kl, ro, d0, lam, solver, eta)]))
+                                   for kl in ks if (N, kl, ro, d0, lam, solver, eta) in members]
+                            pts = [(k, l, s) for k, l, s in pts if np.isfinite(l)]
+                            if len(pts) < 2:
+                                continue
+                            kk, ll, _ = (np.array(z, dtype=float) for z in zip(*pts))
+                            ax2.plot(kk, np.exp(ll), color=P.kappa_shades(iN, len(Ns), ro), marker="o", lw=P.LW_TRACE, zorder=4)
+                            slopes.setdefault(ro, []).append(np.polyfit(np.log(kk), ll, 1)[0])
+                            data[f"{ro}_d{d0}_N{N}_vs_kappa"] = np.stack([kk, np.exp(ll)])
+                    P.logaxis(ax2, "x"); P.logaxis(ax2, "y")
+                    P.discrete_ticks(ax2, [float(k) for k in ks], "x")
+                    ax2.set_xlabel(r"$\kappa$")
+                    txt = "\n".join(f"{P.READOUT_LABEL[ro]}: {np.mean(v):+.2f}" for ro, v in slopes.items())
+                    if txt:
+                        ax2.text(0.03, 0.04, "slope\n" + txt, transform=ax2.transAxes, fontsize=P.FS_MIN, color=P.GREY_CAPTION, zorder=6, va="bottom")
+                    ax2._mup_no_const_check = True
+            axes[0, 0].set_ylabel(r"$\beta(N)$: $m_{1/2} \propto \kappa^{-\beta}$")
+            if many:
+                axes[1, 0].set_ylabel(r"$m_{1/2}$ (tasks)")
+            P.fig_legend(fig, None, handles=handles)
+            P.cell_title(fig, None, None, lam, solver, eta, "κ exponent of the half-life")
+            cap = (rf"β(N) = log[m½(κ = {P.fmt(kmin)}) / m½(κ)] / log(κ / {P.fmt(kmin)}); bars: s.e.m. of log m½ at both κ in quadrature; "
+                   "grey: 2 (the N/κ² claim) and 0 (no κ dependence, the task-heads estimate); censored conditions are left out")
+            if many:
+                cap += "; bottom: m½ vs κ, traces = N (light = small N), text = mean over N of the fitted log–log slope"
+            else:
+                cap += "; two κ: a two-point estimate"
+            P.caption(fig, cap)
+            stem = P.cell_stem(None, None, lam, solver, eta) + (f"_part{part + 1}" if part else "")
+            P.save(fig, os.path.join(fig_dir, "summary", "kappa_exponent_" + stem), data if figdata else None, index, "summary", stem)
+
+
+def fig_M6(conds, fig_dir, index, figdata):
+    """M6: decay-curve collapse, S(m)/S(0) (log) vs m/N (linear); rows = δ₀, columns = gated readouts, traces = N (PLAN.md §12.3)."""
+    for (kappa, cell), allm in _cells(conds, ("lam", "solver", "eta")).items():
+        lam, solver, eta = cell
+        members = {k: d for k, d in allm.items() if is_gated(k[2])}
+        if not members:
+            continue
+        ros = [ro for ro in P.READOUT_COLOR if any(k[2] == ro for k in members)]
+        d0s, Ns = sorted({k[3] for k in members}), sorted({k[0] for k in members})
+        fig, axes = P.grid(len(d0s), len(ros), sharex="all", sharey="all")
+        data, max_x, notes = {}, 1.0, []
+        for i, d0 in enumerate(d0s):
+            for j, ro in enumerate(ros):
+                ax = axes[i, j]
+                P.ref_line(ax, 0.5)
+                for iN, N in enumerate(Ns):
+                    d = members.get((N, kappa, ro, d0, lam, solver, eta))
+                    if d is None:
+                        continue
+                    x = d["ages"].astype(float) / N
+                    max_x = max(max_x, float(x.max()))
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        y, se = d["S"] / d["S"][0], d["S_se"] / abs(d["S"][0])
+                    _draw_curve(ax, x, y, se, d["n_pooled"], P.n_shade(iN, len(Ns)), "-")
+                    if _thin_mask(d["n_pooled"]).any():
+                        notes.append(f"δ₀ = {P.fmt(d0)}, {P.READOUT_LABEL[ro]}, N = {P.fmt(N)}: {int(d['n_pooled'][-1])}")
+                    data[f"{ro}_d{d0}_N{N}"] = np.stack([x, y])
+                if i == 0:
+                    ax.set_title(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro])
+                if i == len(d0s) - 1:
+                    ax.set_xlabel("m / N")
+            axes[i, 0].set_ylabel(rf"$\delta_0$ = {P.fmt(d0)}" + "\nS(m) / S(0)")
+        xr = np.linspace(0.0, max_x, 60)
+        for i in range(len(d0s)):
+            for j, ro in enumerate(ros):
+                if ro == "task_heads":
+                    P.ref_curve(axes[i, j], xr, np.exp(-xr))
+        for ax in axes.ravel():
+            P.logaxis(ax, "y")
+        axes[0, 0].set_ylim(1e-2, 1.5); axes[0, 0].set_xlim(left=0.0)
+        P.fig_legend(fig, None, handles=P.n_handles(Ns))
+        P.cell_title(fig, kappa, None, lam, solver, eta, "decay collapse on m/N, traces = N")
+        cap = ("band: ±1 s.e.m. over seeds; grey line: S/S(0) = 1/2; grey curve (task heads): e^(−m/N), slope −1, through 1/2 at m/N = ln 2; "
+               "floor 10⁻²; thin: ages with < 25 % of the trace's maximum count; traces on one curve = the decay depends on m/N only")
+        if notes:
+            cap += " (count at the last age: " + "; ".join(notes[:2]) + (", …" if len(notes) > 2 else "") + ")"
+        P.caption(fig, cap)
+        stem = P.cell_stem(kappa, None, lam, solver, eta)
+        P.save(fig, os.path.join(fig_dir, "summary", "collapse_" + stem), data if figdata else None, index, "summary", stem)
+
+
+#: M7 traces per row: (scalar key, line style, line width); the thick one carries the s.e.m. bars
+LEVEL_TRACES = (("aQ_act_post", "-", P.LW_MEAN), ("aQ_q95", "--", P.LW_OVERLAY), ("aQ_max_post", ":", P.LW_OVERLAY))
+
+
+def fig_M7(records, fig_dir, index, figdata):
+    """M7: steady-state level vs width; one figure per gated readout, columns = δ₀, traces = κ; x = N and the twin x = pN = κ√N (PLAN.md §12.3).
+
+    y = the second-half mean of mean |aᵢ|√Qᵢᵢ (thick), with the 95 % quantile (dashed) and the max (dotted); a second
+    row with Q_act (pre) for the frozen readouts.
+    """
+    gated = [r for r in records if is_gated(r.run.readout)]
+    if not gated:
+        return
+    keys = [k for k, _, _ in LEVEL_TRACES] + ["Q_act_pre"]
+    levels = {k: level_stats(gated, k) for k in keys}
+    for (ro, lam, solver, eta), recs in group_by(gated, ("readout", "lam", "solver", "eta")).items():
+        ckeys = {r.key() for r in recs}
+        d0s_all, Ns, ks = sorted({k[3] for k in ckeys}), sorted({k[0] for k in ckeys}), _klabels(ckeys)
+        pNs = sorted({round(float(k[1]) * np.sqrt(k[0]), 2) for k in ckeys})       # tick positions of the pN twin (rounded labels)
+        rows = [LEVEL_TRACES] + ([(("Q_act_pre", "-", P.LW_MEAN),)] if "frozen" in ro else [])
+        for twin in ("N", "pN"):
+            for part, d0s in enumerate(P.col_chunks(d0s_all)):
+                fig, axes = P.grid(len(rows), len(d0s), sharex="all", sharey="row")
+                data, missing = {}, False
+                for j, d0 in enumerate(d0s):
+                    for i, traces in enumerate(rows):
+                        ax = axes[i, j]
+                        for ik, kl in enumerate(ks):
+                            cks = sorted(k for k in ckeys if k[3] == d0 and k[1] == kl)
+                            if not cks:
+                                continue
+                            x = np.array([k[0] if twin == "N" else float(kl) * np.sqrt(k[0]) for k in cks], float)
+                            col = P.kappa_shades(ik, len(ks), ro)
+                            for key, ls, lw in traces:
+                                st = [levels[key][k] for k in cks]
+                                y, se = np.array([v[0] for v in st]), np.array([v[1] for v in st])
+                                if not np.isfinite(y).any():
+                                    missing = True
+                                    continue
+                                ax.plot(x, y, color=col, ls=ls, lw=lw, marker="o" if lw == P.LW_MEAN else None, zorder=4 if lw == P.LW_MEAN else 3)
+                                if lw == P.LW_MEAN:
+                                    ax.errorbar(x, y, yerr=np.nan_to_num(se), fmt="none", ecolor=P.GREY_REF, elinewidth=P.LW_REF, capsize=2, zorder=3)
+                                data[f"d{d0}_k{kl}_{key}"] = np.stack([x, y, se])
+                        P.logaxis(ax, "x")
+                        if twin == "N":
+                            P.discrete_ticks(ax, Ns, "x")
+                        elif len(pNs) <= P.MAX_COLS:
+                            P.discrete_ticks(ax, pNs, "x")
+                        ax._mup_no_const_check = True
+                    axes[0, j].set_title(rf"$\delta_0$ = {P.fmt(d0)}")
+                    axes[-1, j].set_xlabel("N" if twin == "N" else r"$pN = \kappa\sqrt{N}$ (active units)")
+                axes[0, 0].set_ylabel(P.qlabel("aQ_act_post") + "\n(2nd-half level)")
+                if len(rows) > 1:
+                    axes[1, 0].set_ylabel(P.qlabel("Q_act_pre") + "\n(2nd-half level)")
+                P.fig_legend(fig, None, styles=[("-", "mean"), ("--", "95 %"), (":", "max")], handles=P.kappa_handles(ks))
+                P.cell_title(fig, None, None, lam, solver, eta, P.READOUT_LABEL[ro] + ", level vs " + ("width" if twin == "N" else "active units"))
+                cap = ("y: mean over seeds and over the tasks of the second half of the measurement window; thick: mean |a|√Q over active units with "
+                       "±1 s.e.m. bars over seeds; thin dashed: its 95 % quantile; dotted: its max; traces = κ (light = small κ); "
+                       "flat at large N = bounded; a straight line on this axis = growth ∝ log N")
+                if twin == "pN":
+                    cap += "; κ traces that line up here but not against N = a small-active-set effect"
+                if missing:
+                    cap += "; some traces not recorded (older batch files)"
+                P.caption(fig, cap)
+                stem = P.cell_stem(None, None, lam, solver, eta, readout=ro) + (f"_part{part + 1}" if part else "")
+                P.save(fig, os.path.join(fig_dir, "summary", f"level_vs_{twin}_" + stem), data if figdata else None, index, "summary", stem)
+
+
 def fig_kaczmarz(conds, fig_dir, index, figdata):
     """Check 4: frozen readouts, S(m)/S(0) vs κ²m/N should collapse across N (m/N for ungated frozen)."""
     for ro in ("gated_frozen", "frozen"):
@@ -682,11 +960,15 @@ def main(argv=None):
         print(f"--cells {args.cells!r} selects no runs"); return 1
     # S1 (and F1/F2 for the selected cells)
     index += plot_norms.run(args.out_dir, fig_dir, records, args.save_figdata, "by_step" in diag, sel or None)
-    # S2, M1–M3
+    # S2, M1–M7 (M8 is drawn by plot_norms.run with S1)
     fig_S2(conds, fig_dir, index, args.save_figdata)
     fig_maps(conds, stats, fig_dir, index, args.save_figdata)
     fig_mhalf_vs_N(conds, fig_dir, index, args.save_figdata)
     fig_mhalf_vs_E0(conds, fig_dir, index, args.save_figdata)
+    fig_M4(conds, fig_dir, index, args.save_figdata)
+    fig_M5(conds, fig_dir, index, args.save_figdata)
+    fig_M6(conds, fig_dir, index, args.save_figdata)
+    fig_M7(records, fig_dir, index, args.save_figdata)
     if sel:
         fconds = collect(sel) if len(sel) < len(records) else conds
         fig_curves(fconds, fig_dir, index, args.save_figdata)
