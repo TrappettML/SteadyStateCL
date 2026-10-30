@@ -74,3 +74,35 @@ def test_legacy_readout_names_load():
     assert Run.from_dict(d).readout == "frozen"
     assert Run.from_dict(r.to_dict()).readout == "gated_shared"
     assert is_gated("frozen") is False and is_gated("learned") is True and is_gated("gated_frozen") is True
+
+
+def test_stale_schema_batch_is_rerun(tmp_path):
+    """A batch file written under an older result schema counts as pending on resume, and load_runs warns about it."""
+    import json
+    import numpy as np
+    import pytest
+    from mup import io
+    from mup.config import Run
+    from mup.results import load_runs
+    r = Run(N=10, D=40, kappa=1.0, readout="gated_shared", delta0=0.0, lam=1.0, seed=0, solver="pop", eta=1.0,
+            h=0.1, n_steps=10, alpha_task=1.0, T_burn=4, T_meas=4)
+    out = str(tmp_path)
+    cfg = Config(name="t", N=[10], kappa=[1.0], readout=["gated_shared"], delta0=[0.0], lam=[1.0], seeds=1, batch_size=64)
+    batches = io.plan_sweep(cfg, out)
+    res = {"ages": np.arange(3), "alpha_task": np.ones(len(batches[0])), "T_burn": np.array(4), "T_meas": np.array(4),
+           **{f: np.zeros((len(batches[0]), 3, 2)) for f in ("sum_s", "sum_s2", "sum_e", "sum_e2", "count")},
+           "S0": np.zeros((8, len(batches[0])))}
+    io.save_batch(out, 0, res, batches[0])
+    assert io.pending_batches(out) == []
+    # rewrite the file as the older schema
+    z = dict(np.load(io.batch_path(out, 0), allow_pickle=False))
+    meta = json.loads(str(z["meta_json"])); meta["schema"] = 1
+    z["meta_json"] = np.array(json.dumps(meta))
+    np.savez(io.batch_path(out, 0), **z)
+    assert io.is_stale(io.batch_path(out, 0))
+    assert io.pending_batches(out) == [0]
+    assert io.plan_sweep(cfg, out) and io.read_manifest(out)["batches"][0]["status"] == "stale"
+    with pytest.warns(UserWarning, match="schema"):
+        recs, _ = load_runs(out)
+    assert recs and recs[0].schema == 1
+    del r

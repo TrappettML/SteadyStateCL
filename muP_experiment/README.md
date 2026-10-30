@@ -20,7 +20,12 @@ python scripts/analyze.py results/stage1
 ```
 
 `--workers` launches one thread-pinned subprocess per batch (`mup/driver.py`);
-finished batches are skipped on rerun, so an interrupted sweep resumes.
+finished batches are skipped on rerun, so an interrupted sweep resumes.  A
+batch file written under an older result schema (`io.SCHEMA_VERSION`, stored
+in each file's `meta_json`) counts as stale and is rerun: it lacks the newer
+scalars, and `load_runs` warns about such files, the checks table prints
+"not recorded" and the norms figures hatch the panel instead of leaving it
+blank.
 `--batch-id i` runs a single batch in-process (what the driver calls).
 
 ## Layout

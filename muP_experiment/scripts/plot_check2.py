@@ -684,6 +684,9 @@ def table_marks(records, rows, skipped=None):
                 put(rk, col, "na", np.nan, "")
                 continue
             cr = [r for r in cell_rows if r["quantity"] == q]
+            if not cr and not any(q in r.scalars for r in recs):      # older batch files: scalar never recorded
+                put(rk, col, None, np.nan, "not\nrecorded")
+                continue
             k, n = sum(bool(r["flag"]) for r in cr), len(cr)
             worst = max(cr, key=lambda r: abs(r["z"]) if np.isfinite(r["z"]) else -1, default=None)
             put(rk, col, _mark_count(k) if n else "na", k, f"{k}/{n}" if n else "",
@@ -706,8 +709,11 @@ def table_marks(records, rows, skipped=None):
                 by_cell[c] = max(by_cell.get(c, 0.0), abs(r["beta"] / r["se_beta"]))
         k, n = sum(v > 3 for v in by_cell.values()), len(by_cell)
         wc = max(by_cell, key=by_cell.get, default=None)
-        put("drift", col, _mark_count(k) if n else "na", k, f"{k}/{n}" if n else "",
-            f"κ={P.fmt(wc[0])} δ₀={P.fmt(wc[1])} λ={P.fmt(wc[2])} |β/se|={by_cell[wc]:.1f}" if wc else "")
+        if not n and not any(keys[0] in r.scalars for r in recs):
+            put("drift", col, None, np.nan, "not\nrecorded")
+        else:
+            put("drift", col, _mark_count(k) if n else "na", k, f"{k}/{n}" if n else "",
+                f"κ={P.fmt(wc[0])} δ₀={P.fmt(wc[1])} λ={P.fmt(wc[2])} |β/se|={by_cell[wc]:.1f}" if wc else "")
         # check 3 (one value per readout; a two-point slope is printed in grey with no mark)
         g, nN = gamma.get(ro, (np.nan, 0))
         if nN < 3:
@@ -740,7 +746,8 @@ def fig_table(records, rows, fig_dir, index, skipped=None, figdata=False):
         c = CRITERIA
         P.caption(fig, f"✓ / ~ / ✗ thresholds — gauge: {c['gauge_delta'][1]:g}, {c['gauge_delta'][2]:g}; flagged cells (|z| > 3, |Δm½| > 2 s.e., |β/se| > 3): 0, 1, ≥ 2 "
                        f"(any censored m½ = ✗); γ: ≤ {c['cv'][1]}, ≤ {c['cv'][2]}; collapse spread: < {c['collapse'][1]}, < {c['collapse'][2]}; "
-                       f"skipped: 0, ≤ {100 * c['feasible'][2]:g} %; —: not applicable by construction; number under a mark: what it was judged on")
+                       f"skipped: 0, ≤ {100 * c['feasible'][2]:g} %; —: not applicable by construction; 'not recorded': batch file of an older "
+                       f"schema (rerun the sweep); number under a mark: what it was judged on")
         stem = P.cell_stem(None, None, None, solver, eta)
         os.makedirs(os.path.join(fig_dir, "checks"), exist_ok=True)
         with open(os.path.join(fig_dir, "checks", f"checks_{stem}.csv"), "w", newline="") as f:

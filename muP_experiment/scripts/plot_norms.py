@@ -72,6 +72,23 @@ def _omitted(members, rows):
     return ("; omitted (constant by construction): " + "; ".join(parts)) if parts else ""
 
 
+def _panel_missing(key, ros, N, na, missing):
+    """Whether every readout of an F1 panel (quantity ``key``, width ``N``) lacks the scalar (older batch files)."""
+    live = [ro for ro in ros if (key, ro) not in na]
+    return bool(live) and all((key, ro, N) in missing for ro in live)
+
+
+def _missing_text(missing):
+    """Caption text naming (quantity, readout, N) traces absent because their batch files predate the scalar."""
+    if not missing:
+        return ""
+    by_N = {}
+    for key, ro, N in missing:
+        by_N.setdefault(N, set()).add(key)
+    parts = [f"N = {P.fmt(N)}: " + ", ".join(P.qlabel(k) for k in sorted(keys)) for N, keys in sorted(by_N.items())]
+    return "; not recorded (older batch files, rerun the sweep): " + "; ".join(parts)
+
+
 def fig_F1(records, fig_dir, index, figdata):
     """F1: norms vs task, columns = N, traces = readouts; one figure per (κ, δ₀, λ, solver, η)."""
     na, kmin = _na(), kappa_min(records)
@@ -81,7 +98,7 @@ def fig_F1(records, fig_dir, index, figdata):
             Ns = sorted({r.run.N for r in members})
             rows = _rows(members)
             fig, axes = P.grid(len(rows), len(Ns), sharex="col", sharey="row")
-            data = {}
+            data, missing = {}, set()
             for j, N in enumerate(Ns):
                 col = [r for r in members if r.run.N == N]
                 gated = [r for r in col if is_gated(r.run.readout)]
@@ -97,11 +114,17 @@ def fig_F1(records, fig_dir, index, figdata):
                     w = max(1, int(round(N / (2 * ks ** 2))))
                     cuts = (r0.T_burn + r0.T_meas // 2,)
                     for i, (key, qk) in enumerate(rows):
-                        if (key, ro) in na or key not in r0.scalars:
+                        if (key, ro) in na:
+                            continue
+                        if key not in r0.scalars:
+                            missing.add((key, ro, N))
                             continue
                         xb, mb, sb = _block_trace(axes[i, j], x, seed_stack(recs, key), w, cuts, P.READOUT_COLOR[ro], P.READOUT_STYLE[ro],
                                                   [seed_stack(recs, k) for k in qk] if qk else None)
                         data[f"{ro}_N{N}_{key}"] = np.stack([xb, mb, sb])
+                for i, (key, _) in enumerate(rows):
+                    if _panel_missing(key, [r.run.readout for r in col], N, na, missing):
+                        P.na_slot(axes[i, j], "not recorded\n(older batch file)")
                 for half in sorted({r.T_burn + r.T_meas / 2 for r in col}):
                     for i in range(len(rows)):
                         P.event_line(axes[i, j], half)
@@ -115,7 +138,7 @@ def fig_F1(records, fig_dir, index, figdata):
             P.fig_legend(fig, {r.run.readout for r in members})
             P.cell_title(fig, kappa, d0, lam, solver, eta)
             P.caption(fig, "thick: mean over seeds and blocks of half a lifetime, band ±1 s.e.; faint: per-task seed mean; "
-                           "thin: 5 % and 95 % over active units; dotted: half boundary" + _omitted(members, rows))
+                           "thin: 5 % and 95 % over active units; dotted: half boundary" + _omitted(members, rows) + _missing_text(missing))
             stem = P.cell_stem(kappa, d0, lam, solver, eta)
             P.save(fig, os.path.join(fig_dir, "norms", "norms_" + stem), data if figdata else None, index, "norms", stem)
 
@@ -131,7 +154,7 @@ def fig_F2(records, fig_dir, index, figdata):
             rows = _rows(members)
             for lt in (False, True):
                 fig, axes = P.grid(len(rows), len(ros), sharex="all", sharey="row")
-                data = {}
+                data, missing = {}, set()
                 for j, ro in enumerate(ros):
                     for i_N, N in enumerate(Ns):
                         recs = [r for r in members if r.run.N == N and r.run.readout == ro]
@@ -145,7 +168,10 @@ def fig_F2(records, fig_dir, index, figdata):
                         cuts = (r0.T_burn + r0.T_meas // 2,)
                         col = P.n_shade(i_N, len(Ns))
                         for i, (key, qk) in enumerate(rows):
-                            if (key, ro) in na or key not in r0.scalars:
+                            if (key, ro) in na:
+                                continue
+                            if key not in r0.scalars:
+                                missing.add((key, ro, N))
                                 continue
                             xb, mb, sb = _block_trace(axes[i, j], x, seed_stack(recs, key), w, cuts, col, P.READOUT_STYLE[ro],
                                                       [seed_stack(recs, k) for k in qk] if qk else None)
@@ -153,6 +179,9 @@ def fig_F2(records, fig_dir, index, figdata):
                         half = (r0.T_burn + r0.T_meas / 2) * scale
                         for i in range(len(rows)):
                             axes[i, j].axvline(half, color=col, ls=":", lw=P.LW_EVENT, zorder=1)
+                    for i, (key, _) in enumerate(rows):
+                        if (key, ro) not in na and all((key, ro, N) in missing for N in Ns if any(r.run.N == N and r.run.readout == ro for r in members)):
+                            P.na_slot(axes[i, j], "not recorded\n(older batch file)")
                     axes[0, j].set_title(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro])
                     axes[-1, j].set_xlabel(r"$t\kappa_s^2/N$ (lifetimes)" if lt else "task t")
                 for i, (key, _) in enumerate(rows):
@@ -162,7 +191,7 @@ def fig_F2(records, fig_dir, index, figdata):
                 P.cell_title(fig, kappa, d0, lam, solver, eta, "traces = N" + (", x in lifetimes" if lt else ""))
                 P.caption(fig, "thick: mean over seeds and blocks of half a lifetime, band ±1 s.e.; faint: per-task seed mean; "
                                "thin: 5 % and 95 % over active units; dotted: half boundary of each N; dashed columns: ungated"
-                          + _omitted(members, rows))
+                          + _omitted(members, rows) + _missing_text(missing))
                 stem = P.cell_stem(kappa, d0, lam, solver, eta)
                 P.save(fig, os.path.join(fig_dir, "norms", ("normsN_lt_" if lt else "normsN_") + stem), data if figdata else None, index, "norms", stem)
 

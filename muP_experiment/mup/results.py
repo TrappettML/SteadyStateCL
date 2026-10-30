@@ -13,6 +13,8 @@ from typing import Iterable, Optional
 
 import numpy as np
 
+import warnings
+
 from mup import io
 from mup.config import Run, is_gated
 from mup.observe import Moments, curves, half_life
@@ -37,6 +39,8 @@ class RunRecord:
     ages : (n_ages,) int array
     T_burn, T_meas : int
     alpha_task : float
+    schema : int
+        Result schema of the batch file (``io.SCHEMA_VERSION`` when current).
     """
 
     run: Run
@@ -46,6 +50,7 @@ class RunRecord:
     T_burn: int
     T_meas: int
     alpha_task: float
+    schema: int = io.SCHEMA_VERSION
 
     @property
     def T(self) -> int:
@@ -83,10 +88,19 @@ def load_runs(out_dir: str) -> tuple[list[RunRecord], list[str]]:
     (records, skipped)
         ``records`` one ``RunRecord`` per run; ``skipped`` the labels of runs
         the sweep refused as infeasible.
+
+    Warns (``UserWarning``) when some batch files were written under an older
+    schema than ``io.SCHEMA_VERSION``: their records lack the newer scalars,
+    which the figures then mark as not recorded.  Rerunning the sweep
+    (``run_sweep.py``) regenerates exactly those batches.
     """
-    records, skipped = [], []
+    records, skipped, stale, n_batches = [], [], [], 0
     for res, runs, meta in io.load_sweep(out_dir):
+        n_batches += 1
         skipped += meta.get("skipped", [])
+        schema = int(meta.get("schema", 1))
+        if schema < io.SCHEMA_VERSION:
+            stale.append(int(meta.get("batch_id", len(stale))))
         if not runs:
             continue
         T_burn, T_meas = int(res["T_burn"]), int(res["T_meas"])
@@ -98,7 +112,13 @@ def load_runs(out_dir: str) -> tuple[list[RunRecord], list[str]]:
                 if new not in sc and old in sc:
                     sc[new] = sc[old]
             mom = {f: np.asarray(res[f][i]) for f in Moments.FIELDS}
-            records.append(RunRecord(r, sc, mom, np.asarray(res["ages"]), T_burn, T_meas, float(res["alpha_task"][i])))
+            records.append(RunRecord(r, sc, mom, np.asarray(res["ages"]), T_burn, T_meas, float(res["alpha_task"][i]), schema))
+    if stale:
+        Ns = sorted({r.run.N for r in records if r.schema < io.SCHEMA_VERSION})
+        warnings.warn(f"{len(stale)} of {n_batches} batch files in {out_dir} "
+                      f"were written under result schema < {io.SCHEMA_VERSION} (batches {stale[:6]}{', …' if len(stale) > 6 else ''}; "
+                      f"N = {Ns}); their §12.1 norm scalars are missing and show as 'not recorded'. "
+                      f"Rerun run_sweep.py on this sweep: stale batches are pending again.", stacklevel=2)
     return records, skipped
 
 
