@@ -1,4 +1,4 @@
-"""Test 10 (PLAN.md §7, §12.7.1): F1–F4 and the checks table render from a small synthetic record set without a ``plotting.save`` warning.
+"""Test 10 (PLAN.md §7, §12.8): S1, S2, M1–M3 and the checks table render from a small synthetic record set without a ``plotting.save`` warning; F1–F4 through ``--cells all``.
 
 The diagnostic families (``--diag``) are rendered too, so they stay usable
 for locating a failed check.
@@ -85,7 +85,7 @@ def _trace_dir(tmp_path, records):
 
 
 def test_default_families_render_without_warnings(records, tmp_path):
-    """F1, F2 (+ _lt), F3, F4 (+ _lt) and the checks table; nothing else is written by default."""
+    """S1, S2, M1, M2, M3 and the checks table; nothing else is written by default."""
     import analyze
     import plot_check2
     import plot_norms
@@ -96,19 +96,26 @@ def test_default_families_render_without_warnings(records, tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
         conds = analyze.collect(records)
+        stats = plot_check2._grid_stats(records)
         index = []
-        index += plot_check2.run(out_dir, fig_dir, records, True, skipped=skipped)
+        index += plot_check2.run(out_dir, fig_dir, records, True, skipped=skipped, rows=stats)
         index += plot_norms.run(out_dir, fig_dir, records, True)
-        analyze.fig_curves(conds, fig_dir, index, True)
-        analyze.fig_curvesN(conds, fig_dir, index, True)
+        analyze.fig_S2(conds, fig_dir, index, True)
+        analyze.fig_maps(conds, stats, fig_dir, index, True)
+        analyze.fig_mhalf_vs_N(conds, fig_dir, index, True)
+        analyze.fig_mhalf_vs_E0(conds, fig_dir, index, True)
         P.write_index(fig_dir, index)
-    assert {f for f, _, _ in index} == {"norms", "curves", "checks"}
-    assert sorted(os.listdir(fig_dir)) == ["INDEX.md", "checks", "curves", "norms"]
+    assert {f for f, _, _ in index} == {"slices", "summary", "checks"}
+    assert sorted(os.listdir(fig_dir)) == ["INDEX.md", "checks", "slices", "summary"]
     stems = {os.path.basename(p) for _, _, p in index}
-    for s in ("norms_k1.0_d0.0_lam1.0_pop_eta1.0.png", "normsN_k1.0_d0.0_lam1.0_pop_eta1.0.png", "normsN_lt_k1.0_d0.0_lam1.0_pop_eta1.0.png",
-              "curves_k1.0_d0.0_lam1.0_pop_eta1.0.png", "curvesN_k1.0_d0.0_lam1.0_pop_eta1.0.png", "curvesN_lt_k1.0_d0.0_lam1.0_pop_eta1.0.png",
+    for s in ("norms_gated_shared_k1.0_lam1.0_pop_eta1.0.png", "norms_frozen_lam1.0_pop_eta1.0.png",
+              "curves_gated_frozen_k1.0_lam1.0_pop_eta1.0.png", "curves_task_heads_k1.0_lam1.0_pop_eta1.0.png",
+              "maps_k1.0_lam1.0_pop_eta1.0.png", "mhalf_vs_N_k1.0_lam1.0_pop_eta1.0.png", "mhalf_vs_E0_k1.0_pop_eta1.0.png",
               "checks_pop_eta1.0.png"):
         assert s in stems, s
+    # one slice per readout (ungated: no k), 2 files each; 3 summaries; 1 table
+    assert len([f for f, _, _ in index if f == "slices"]) == 10
+    assert len([f for f, _, _ in index if f == "summary"]) == 3
     for f in ("checks_pop_eta1.0.csv", "check2_cells.csv", "checks_pop_eta1.0.npz"):
         assert os.path.exists(os.path.join(fig_dir, "checks", f)), f
     # every table row has a mark or text for every column
@@ -119,6 +126,30 @@ def test_default_families_render_without_warnings(records, tmp_path):
     assert feas and feas[0]["mark"] == "fail"           # one skipped run of five = 20 % > 10 %
     gauge_na = [r for r in rows if r["row"].startswith("1 gauge") and "frozen" in r["readout"]]
     assert gauge_na and all(r["mark"] == "na" for r in gauge_na)
+
+
+def test_cell_families_render_without_warnings(records, tmp_path):
+    """F1, F2 (+ _lt), F3, F4 (+ _lt) for every cell (``--cells all``), under ``cells/``."""
+    import analyze
+    import plot_norms
+    fig_dir = str(tmp_path / "figures")
+    out_dir = str(tmp_path / "sweep")
+    sel = analyze.select_cells(records, analyze.parse_cells("all"))
+    assert len(sel) == len(records)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        conds = analyze.collect(sel)
+        index = []
+        index += plot_norms.run(out_dir, fig_dir, [], False, cells=sel)
+        analyze.fig_curves(conds, fig_dir, index, False)
+        analyze.fig_curvesN(conds, fig_dir, index, False)
+    assert {f for f, _, _ in index} == {"cells/norms", "cells/curves"}
+    assert sorted(os.listdir(fig_dir)) == ["cells"]
+    assert sorted(os.listdir(os.path.join(fig_dir, "cells"))) == ["curves", "norms"]
+    stems = {os.path.basename(p) for _, _, p in index}
+    for s in ("norms_k1.0_d0.0_lam1.0_pop_eta1.0.png", "normsN_k1.0_d0.0_lam1.0_pop_eta1.0.png", "normsN_lt_k1.0_d0.0_lam1.0_pop_eta1.0.png",
+              "curves_k1.0_d0.0_lam1.0_pop_eta1.0.png", "curvesN_k1.0_d0.0_lam1.0_pop_eta1.0.png", "curvesN_lt_k1.0_d0.0_lam1.0_pop_eta1.0.png"):
+        assert s in stems, s
 
 
 def test_diag_families_render_without_warnings(records, tmp_path):
@@ -132,14 +163,12 @@ def test_diag_families_render_without_warnings(records, tmp_path):
         conds = analyze.collect(records)
         index = []
         index += plot_check2.run(out_dir, fig_dir, records, False, levels=True, diag=True)
-        index += plot_norms.run(out_dir, fig_dir, records, False, diag=True)
-        analyze.fig_mhalf_vs_N(conds, fig_dir, index, False)
-        analyze.fig_mhalf_vs_E0(conds, fig_dir, index, False)
+        index += plot_norms.run(out_dir, fig_dir, [], False, diag=True)
         analyze.fig_kaczmarz(conds, fig_dir, index, False)
         analyze.fig_cv(analyze.report_cv(conds), fig_dir, index, False)
     fams = {f for f, _, _ in index}
-    assert {"diag/check2", "diag/by_step", "diag/mhalf", "diag/kaczmarz"} <= fams
-    assert sorted(os.listdir(os.path.join(fig_dir, "diag"))) == ["by_step", "check2", "kaczmarz", "mhalf"]
+    assert {"diag/check2", "diag/by_step", "diag/kaczmarz"} <= fams
+    assert sorted(os.listdir(os.path.join(fig_dir, "diag"))) == ["by_step", "check2", "kaczmarz"]
 
 
 def test_na_pairs_have_no_rows(records):
@@ -155,6 +184,8 @@ def test_cells_filter():
     cells = analyze.parse_cells("d0=0/4,lam=1,N=10,k=1.0")
     assert cells == {"delta0": {0.0, 4.0}, "lam": {1.0}, "N": {10}, "kappa_label": {"1.0"}}
     assert analyze.parse_cells(None) is None
+    assert analyze.parse_cells("all") == "all"
+    assert analyze.select_cells([object()], None) == []
 
 
 def test_helpers():
@@ -166,3 +197,10 @@ def test_helpers():
     assert len(xb) == 4 and np.allclose(mb[0], 2.5) and np.isfinite(sb).all()
     xb, _, _ = P.block_mean(x, Y, 7, cuts=(10,))
     assert np.all(np.diff(xb) > 0) and xb[1] < 10 < xb[2]           # a block never straddles a cut
+    # heat_map: NaN colour hatched, string text printed as is, outline optional
+    fig, axes = P.grid(1, 1)
+    im = P.heat_map(axes[0, 0], np.array([[0.0, np.nan], [1.0, -1.0]]), np.array([["a", "> m_max"], [0.5, 0.25]], dtype=object),
+                    [0, 4], [10, 20], "RdBu_r", -1, 1, outline=np.array([[True, False], [False, False]]))
+    assert im is not None and len([t for t in axes[0, 0].texts if t.get_text() == "> m_max"]) == 1
+    import matplotlib.pyplot as plt
+    plt.close(fig)

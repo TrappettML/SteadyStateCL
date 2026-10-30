@@ -1,12 +1,15 @@
 # Stage 1 (Table 1 of the plan): population solver (PLAN.md §8).
-# gated: 5 N × 2 κ × 3 readouts × 6 δ₀ × 4 λ × 8 seeds = 5760 runs
-# ungated (no κ, listed once per N): 5 N × 2 readouts × 6 δ₀ × 4 λ × 8 seeds = 1920 runs
+# The scaling and weight-norm questions at one learning per task, λ = 4 (the hidden-layer
+# channel alone leaves a residual of e^-4 ≈ 2 %, so every task is learned well).  The λ axis
+# (learning per task vs error) is a later stage at fixed δ₀ (PLAN.md §0 decision 7).
+# gated: 5 N × 2 κ × 3 readouts × 6 δ₀ × 1 λ × 8 seeds = 1440 runs
+# ungated (no κ, listed once per N): 5 N × 2 readouts × 6 δ₀ × 1 λ × 8 seeds = 480 runs
 name: stage1
 N: [5, 10, 20, 50, 100]
 kappa: [1.0, 2.0]
 readout: [gated_shared, learned_shared, gated_frozen, frozen, task_heads]
 delta0: [-0.75, -0.5, 0.0, 1.0, 4.0, 16.0]
-lam: [0.5, 1.0, 2.0, 4.0]
+lam: [4.0]                 # Stage 1: fixed; the λ sweep is a later stage
 seeds: 8
 solver: pop
 eta: [1.0]

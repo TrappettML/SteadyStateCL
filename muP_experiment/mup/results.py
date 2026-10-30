@@ -170,6 +170,23 @@ def by_kappa(records: Iterable[RunRecord]) -> dict:
     return dict(out)
 
 
+def slice_groups(records: Iterable[RunRecord]) -> dict:
+    """Group records for the slice figures S1/S2 (PLAN.md §12.3): one group per readout, κ, λ, solver, η.
+
+    Returns
+    -------
+    dict
+        ``{(readout, kappa_label or None, lam, solver, eta): [records]}``; the
+        κ field is ``None`` for ungated readouts, which have no κ and get one
+        group (and one file, with no ``k`` in the stem).
+    """
+    g = defaultdict(list)
+    for r in records:
+        k = r.run.kappa_label if is_gated(r.run.readout) else None
+        g[(r.run.readout, k, r.run.lam, r.run.solver, r.run.eta)].append(r)
+    return dict(g)
+
+
 def seed_stack(records: Iterable[RunRecord], key: str) -> np.ndarray:
     """Stack one per-task scalar across seeds.
 

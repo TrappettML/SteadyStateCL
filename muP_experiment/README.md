@@ -4,9 +4,9 @@ Implementation of `PLAN.md` (JAX, float64, CPU).  Run everything from this
 directory with the project venv active (`code/sscl_env`).
 
 ```bash
-pytest tests                                              # 27 tests, ~30 s
+pytest tests                                              # 31 tests, 40 s to 2 min: the two plotting tests render every figure family
 python scripts/run_sweep.py --config configs/pilot.yaml   # laptop pilot, ~10 s
-python scripts/analyze.py results/pilot                   # summary.csv, curves.json, figures/{norms,curves,checks}/ (--all for diagnostics)
+python scripts/analyze.py results/pilot                   # summary.csv, curves.json, figures/{slices,summary,checks}/ (--cells for per-cell figures, --all for diagnostics)
 python scripts/validate.py                                # η-halving, Kaczmarz collapse, CV exponent
 python scripts/bench.py --N 20 100 --B 1 32 128           # run-steps/s vs batch size
 ```
@@ -14,19 +14,55 @@ python scripts/bench.py --N 20 100 --B 1 32 128           # run-steps/s vs batch
 On the Xeon:
 
 ```bash
-python scripts/run_sweep.py --config configs/stage1.yaml --dry-run      # writes results/stage1/manifest.json
+python scripts/run_sweep.py --config configs/stage1.yaml --dry-run      # writes results/stage1/manifest.json (1920 runs, λ = 4 only)
 python scripts/run_sweep.py --config configs/stage1.yaml --workers 90 --numa-nodes 4
 python scripts/analyze.py results/stage1
 ```
 
-`--workers` launches one thread-pinned subprocess per batch (`mup/driver.py`);
-finished batches are skipped on rerun, so an interrupted sweep resumes.  A
-batch file written under an older result schema (`io.SCHEMA_VERSION`, stored
-in each file's `meta_json`) counts as stale and is rerun: it lacks the newer
-scalars, and `load_runs` warns about such files, the checks table prints
-"not recorded" and the norms figures hatch the panel instead of leaving it
-blank.  `--fresh` deletes the sweep's batch files, traces, logs and figures and reruns every batch.
-`--batch-id i` runs a single batch in-process (what the driver calls).
+## Run flags
+
+`scripts/run_sweep.py` (the sweep):
+
+| flag | meaning |
+|---|---|
+| `--config PATH` | YAML config to run (required). Results go to `results/<name>/`, `name` from the config. |
+| `--out DIR` | Results directory instead of `results/<name>/`. |
+| `--N 5 10 …` | Restrict the sweep to these widths; recorded in the manifest so subprocesses expand the same batches. |
+| `--workers K` | Launch one thread-pinned subprocess per batch, `K` at a time (`mup/driver.py`). `0` (default) runs batches in-process, one after another. |
+| `--numa-nodes M` | With `--workers`, bind workers round-robin to `M` NUMA nodes via `numactl` (`0`: no binding). |
+| `--threads T` | XLA/BLAS threads per worker (default 1, PLAN.md decision 5). |
+| `--batch-id i` | Run exactly batch `i` in-process from the existing manifest without touching it (what the driver's subprocesses call). |
+| `--dry-run` | Only write `manifest.json` and print every batch with its infeasible-run count; nothing runs or is deleted. |
+| `--fresh` | Delete the sweep's `batch_*.npz`, `traces/`, `logs/`, `figures/`, `summary.csv` and `curves.json`, then rerun every batch. Irreversible. |
+| `--log-every n` | Print progress every `n` tasks within a batch (`0`: only the per-batch line). |
+
+Without `--fresh` a rerun resumes: a batch is skipped when its file exists
+with the current result schema.  A batch file written under an older schema
+(`io.SCHEMA_VERSION`, stored in each file's `meta_json`) counts as stale and
+is rerun, since it lacks the newer scalars; `load_runs` warns about such
+files, the checks table prints "not recorded" and the norms figures hatch the
+panel instead of leaving it blank.
+
+`scripts/analyze.py results/<sweep>` (summary, curves and figures):
+
+| flag | meaning |
+|---|---|
+| `--fig-dir DIR` | Write figures there instead of `results/<sweep>/figures/`. |
+| `--no-figures` | Only `summary.csv`, `curves.json` and the printed summary. |
+| `--save-figdata` | Write the plotted arrays next to each figure as `.npz`. |
+| `--cells d0=0,lam=1` | Also draw the per-cell families F1–F4 for these cells, under `figures/cells/`; values may be `a/b` lists; `all` draws every cell. |
+| `--all` | Also draw every diagnostic family under `figures/diag/`. |
+| `--diag kaczmarz by_step check2` | Draw only these diagnostic families. |
+| `--levels` | With the check2 diagnostics, also the absolute half-window levels (`halves_*`). |
+
+`scripts/plot_norms.py` and `scripts/plot_check2.py` take `out_dir`,
+`--fig-dir`, `--save-figdata` and `--diag` with the same meanings (`--levels`
+for `plot_check2.py`); `analyze.py` calls both.
+
+`scripts/validate.py`: `--out DIR` (default `results/validate`), `--seeds n`
+(default 4), `--N-max` (default 40), `--parts eta kaczmarz cv` (which of the
+three checks to run).  `scripts/bench.py`: `--N`, `--B` (batch sizes),
+`--solver`, `--eta`, `--tasks` (tasks per timed run).
 
 ## Layout
 
@@ -38,9 +74,9 @@ blank.  `--fresh` deletes the sweep's batch files, traces, logs and figures and 
 | `mup/config.py` | `Config` (YAML), `Run`, task duration (§3.6), grid → runs → batches |
 | `mup/io.py` | `.npz` per batch + JSON manifest, resume |
 | `mup/driver.py` | subprocess pool with thread pinning and optional `numactl` |
-| `mup/plotting.py` | the only style file (PLAN.md §12.0, §12.7): panel-sized PNG grids, fixed readout colours, `QUANTITY_LABEL`, the figure legend row, `block_mean`/`dist_by_readout`/`flag_table`/`drift_map` helpers and figure-level checks |
+| `mup/plotting.py` | the only style file (PLAN.md §12.0, §12.7): panel-sized PNG grids, fixed readout colours, `QUANTITY_LABEL`, the figure legend row, `block_mean`/`dist_by_readout`/`flag_table`/`heat_map` helpers and figure-level checks |
 | `mup/results.py` | per-run records from batch files (`load_runs`), grouping, half-window and drift statistics for the figure scripts |
-| `scripts/plot_norms.py` | F1/F2 norms vs task (§12.3) from batch files; the per-step family from `traces/` only with `--diag` |
+| `scripts/plot_norms.py` | norms vs task from batch files: the norms slice S1 by default, per-cell F1/F2 for `--cells` (PLAN.md §12.3); the per-step family from `traces/` only with `--diag` |
 | `scripts/plot_check2.py` | check statistics → the ✓/✗ checks table, its CSV and `check2_cells.csv` (§12.6); the C2-A … C2-E figures only with `--diag` |
 | `configs/` | `pilot.yaml`, `stage1.yaml`, `sgd_corner.yaml`, `trace.yaml`, `trace_sgd.yaml` (per-step traces, §12.2) |
 
@@ -68,14 +104,20 @@ for a task whose gate drew no unit.  Trace runs (`trace: true`) also write
 `traces/run_<batch>_<j>.npz` with a `(T, n_trace, 7)` float32 array
 (`protocol.TRACE_QUANT`) and `traces/manifest.json`.
 
-Figures go to `figures/{norms,curves,checks}/` as `.png` with `INDEX.md`
-(PLAN.md §12.3–§12.4): F1 `norms_…` (traces = readouts), F2 `normsN_…` /
-`normsN_lt_…` (traces = N; x = task or lifetimes), F3 `curves_…`, F4
-`curvesN_…` / `curvesN_lt_…`, and one `checks_{solver}_eta{η}` table per
-solver with `checks_….csv` behind it.  `--cells d0=0,lam=1` restricts
-F1–F4; `--all` or `--diag mhalf kaczmarz by_step check2` adds the
-diagnostic families under `figures/diag/`; `--save-figdata` writes the
-plotted arrays next to each figure.  `analyze.py`
+Figures go to `figures/` as `.png` with `INDEX.md` (PLAN.md §12.3–§12.4).
+By default: `slices/` holds one norms slice (S1) and one curves slice (S2)
+per readout and κ, with columns = δ₀, traces = N and x in lifetimes;
+`summary/` holds the maps M1 (lifetime m½κ_s²/N, drift of mean |a|√Q and
+E(0) over δ₀ × N, one panel per readout), M2 (m½ vs N) and M3 (m½ vs E(0));
+`checks/` holds one `checks_{solver}_eta{η}` table per solver with
+`checks_….csv` behind it.  A sweep with several λ gets one set per λ.
+Stage 1 (λ = 4 only) is 23 files.  `--cells d0=0,lam=1` (or `--cells all`)
+adds the per-cell families F1 `norms_…`, F2 `normsN_…`/`normsN_lt_…`, F3
+`curves_…`, F4 `curvesN_…`/`curvesN_lt_…` under `figures/cells/`; `--all`
+or `--diag kaczmarz by_step check2` adds the diagnostic families under
+`figures/diag/`; `--save-figdata` writes the plotted arrays next to each
+figure.  The slice/summary layout is specified in PLAN.md §12.3 and its
+implementation order in §12.8.  `analyze.py`
 pools seeds into `summary.csv` (one row per condition: `S0`, `E0`, `m_half`,
 `censored`, realized λ, gauge maxima, check-2 flag counts) and `curves.json`.
 

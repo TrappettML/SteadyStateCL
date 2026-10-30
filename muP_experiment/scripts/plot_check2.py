@@ -776,7 +776,7 @@ def write_cells(rows, fig_dir):
     return path
 
 
-def run(out_dir, fig_dir, records=None, figdata=False, levels=False, diag=False, skipped=None):
+def run(out_dir, fig_dir, records=None, figdata=False, levels=False, diag=False, skipped=None, rows=None):
     """Compute the check statistics, draw the checks table, and with ``diag`` the C2 figures.
 
     Parameters
@@ -791,6 +791,9 @@ def run(out_dir, fig_dir, records=None, figdata=False, levels=False, diag=False,
         Draw the diagnostic figures C2-A … C2-E into ``diag/check2/``.
     skipped : list of str, optional
         Labels of infeasible runs (feasibility row); loaded here when ``records`` is None.
+    rows : list of dict, optional
+        ``_grid_stats(records)`` when the caller has computed it already
+        (``analyze.py`` shares it with the M1 maps).
 
     Returns
     -------
@@ -802,7 +805,8 @@ def run(out_dir, fig_dir, records=None, figdata=False, levels=False, diag=False,
     index = []
     if not records:
         return index
-    rows = _grid_stats(records)
+    if rows is None:
+        rows = _grid_stats(records)
     write_cells(rows, fig_dir)
     fig_table(records, rows, fig_dir, index, skipped, figdata)
     if diag:

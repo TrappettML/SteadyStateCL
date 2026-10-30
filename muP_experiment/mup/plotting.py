@@ -1089,39 +1089,72 @@ def mhalf_ticks(ax, m_by_readout: dict) -> None:
             ax.plot([m1], [y], "o", ms=4, mfc=col, mec=col, transform=tr, zorder=6, scaley=False, scalex=False)
 
 
-def drift_map(ax, z, beta, d0s, lams, beta_fmt=None, zmax: float = 5.0):
-    """``imshow`` of the significance β/se on the (δ₀ rows, λ columns) grid with β printed in each cell (§12.6 C2-C).
+def heat_map(ax, colour, text, row_vals, col_vals, cmap="RdBu_r", vmin=None, vmax=None, text_fmt=None, outline=None):
+    """``imshow`` of a (rows × columns) grid with a value printed in every cell (M1 of §12.3; C2-C through ``drift_map``).
 
     Parameters
     ----------
     ax : matplotlib Axes
-    z : (n_d0, n_lam) array
-        β/se(β); NaN for missing cells (hatched).
-    beta : (n_d0, n_lam) array
-        β, printed to 2 significant figures.
-    d0s, lams : sequences for the tick labels (through ``fmt``)
-    beta_fmt : callable, optional
-        Text of a β value (default ``fmt2``).
-    zmax : float
-        Fixed colour limit (±zmax, the same in every figure).
+    colour : (n_row, n_col) array
+        The colour of each cell; NaN cells are hatched ``GREY_NA`` (missing).
+    text : (n_row, n_col) array or None
+        What to print in each cell: numbers go through ``text_fmt``, strings
+        are printed as they are, NaN / empty prints nothing.
+    row_vals, col_vals : sequences
+        Tick labels (through ``fmt``); rows run upward (``origin="lower"``).
+    cmap : str
+    vmin, vmax : float, optional
+        Fixed colour limits (the same in every figure); default the data range.
+    text_fmt : callable, optional
+        Text of a numeric cell (default ``fmt2``).
+    outline : (n_row, n_col) bool array, optional
+        Cells drawn with a black box.
 
     Returns
     -------
     matplotlib AxesImage
     """
-    z, beta = np.asarray(z, float), np.asarray(beta, float)
-    beta_fmt = beta_fmt or fmt2
-    im = ax.imshow(np.nan_to_num(z, nan=0.0), cmap="RdBu_r", vmin=-zmax, vmax=zmax, origin="lower", aspect="auto", zorder=1)
-    for (a, b), v in np.ndenumerate(z):
+    colour = np.asarray(colour, float)
+    text_fmt = text_fmt or fmt2
+    finite = colour[np.isfinite(colour)]
+    lo = float(np.min(finite)) if vmin is None and len(finite) else (vmin if vmin is not None else 0.0)
+    hi = float(np.max(finite)) if vmax is None and len(finite) else (vmax if vmax is not None else 1.0)
+    if hi <= lo:
+        hi = lo + 1.0
+    im = ax.imshow(np.where(np.isfinite(colour), colour, lo), cmap=cmap, vmin=lo, vmax=hi, origin="lower", aspect="auto", zorder=1)
+    cm = plt.get_cmap(cmap)
+    for (a, b), v in np.ndenumerate(colour):
         if not np.isfinite(v):
             ax.add_patch(Rectangle((b - 0.5, a - 0.5), 1, 1, hatch="///", fc="white", ec=GREY_NA, lw=0, zorder=2))
-            continue
-        if abs(v) > 3:
+            tc = GREY_CAPTION
+        else:
+            r, g, bl, _ = cm((v - lo) / (hi - lo))
+            tc = "white" if 0.299 * r + 0.587 * g + 0.114 * bl < 0.5 else "k"
+        if outline is not None and np.asarray(outline)[a, b]:
             ax.add_patch(Rectangle((b - 0.5, a - 0.5), 1, 1, fill=False, ec="k", lw=LW_TRACE, zorder=3))
-        ax.text(b, a, beta_fmt(beta[a, b]), ha="center", va="center", fontsize=FS_MIN,
-                color="white" if abs(v) > 0.6 * zmax else "k", zorder=4)
-    ax.set_xticks(range(len(lams))); ax.set_xticklabels([fmt(l) for l in lams])
-    ax.set_yticks(range(len(d0s))); ax.set_yticklabels([fmt(d) for d in d0s])
+        if text is None:
+            continue
+        t = np.asarray(text, object)[a, b]
+        if isinstance(t, str):
+            label = t
+        else:
+            label = "" if t is None or not np.isfinite(float(t)) else text_fmt(float(t))
+        if label:
+            ax.text(b, a, label, ha="center", va="center", fontsize=FS_MIN, color=tc, zorder=4)
+    ax.set_xticks(range(len(col_vals))); ax.set_xticklabels([fmt(c) for c in col_vals])
+    ax.set_yticks(range(len(row_vals))); ax.set_yticklabels([fmt(r) for r in row_vals])
+    ax.set_xlim(-0.5, len(col_vals) - 0.5); ax.set_ylim(-0.5, len(row_vals) - 0.5)
     ax.grid(False)
     ax._mup_no_const_check = True
     return im
+
+
+def drift_map(ax, z, beta, d0s, lams, beta_fmt=None, zmax: float = 5.0):
+    """``heat_map`` of the significance β/se on the (δ₀ rows, λ columns) grid with β printed in each cell (§12.6 C2-C).
+
+    Colour = β/se on fixed ±``zmax``; a black outline marks |β/se| > 3; NaN cells are hatched.
+    """
+    z = np.asarray(z, float)
+    with np.errstate(invalid="ignore"):
+        outline = np.abs(z) > 3
+    return heat_map(ax, z, beta, d0s, lams, "RdBu_r", -zmax, zmax, beta_fmt or fmt2, outline)

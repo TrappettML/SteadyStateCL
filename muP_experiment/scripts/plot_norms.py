@@ -1,10 +1,14 @@
 #!/usr/bin/env python
-"""Weight-norm figures F1 and F2 (PLAN.md §12.3): norms vs task from batch files; per-step traces only with ``--diag``.
+"""Weight-norm figures (PLAN.md §12.3): norms vs task from batch files; per-step traces only with ``--diag``.
 
     python scripts/plot_norms.py results/<sweep> [--fig-dir DIR] [--save-figdata] [--diag]
 
-F1 (``norms/norms_…``): rows = quantity, columns = N, traces = readouts.
-F2 (``norms/normsN_…`` and ``normsN_lt_…``): rows = quantity, columns =
+S1, the default (``slices/norms_{readout}_…``): one file per readout and
+κ; rows = quantity (rows constant by construction for that readout
+dropped), columns = δ₀, traces = N, x = t κ_s²/N (lifetimes).
+Per-cell, only for the records ``analyze.py`` selects with ``--cells``:
+F1 (``cells/norms/norms_…``): rows = quantity, columns = N, traces = readouts.
+F2 (``cells/norms/normsN_…`` and ``normsN_lt_…``): rows = quantity, columns =
 readouts, traces = N (x = task, or lifetimes in the ``_lt`` file).
 Every trace is a block mean over half a lifetime (§12.7 G10) with the raw
 per-task seed mean faint behind it; nothing is shaded, the half boundary
@@ -22,7 +26,7 @@ import _path  # noqa: F401
 from mup import io
 from mup import plotting as P
 from mup.config import is_gated
-from mup.results import by_kappa, group_by, kappa_min, load_runs, seed_stack
+from mup.results import by_kappa, group_by, kappa_min, load_runs, seed_stack, slice_groups
 
 #: F1/F2 rows: (scalar key, quantile keys or None); heads_fro2_post is appended when task heads are present
 ROWS = (("Q_act_pre", ("Q_q05", "Q_q95")), ("a2_act_post", None), ("aQ_act_post", ("aQ_q05", "aQ_q95")),
@@ -89,6 +93,57 @@ def _missing_text(missing):
     return "; not recorded (older batch files, rerun the sweep): " + "; ".join(parts)
 
 
+def fig_S1(records, fig_dir, index, figdata):
+    """S1: norms slice, one file per (readout, κ, λ, solver, η); rows = quantities, columns = δ₀, traces = N, x in lifetimes (PLAN.md §12.3)."""
+    na, kmin = _na(), kappa_min(records)
+    for (ro, kappa, lam, solver, eta), members in slice_groups(records).items():
+        rows = [(k, qk) for k, qk in _rows(members) if (k, ro) not in na]
+        d0s_all = sorted({r.run.delta0 for r in members})
+        Ns = sorted({r.run.N for r in members})
+        for part, d0s in enumerate(P.col_chunks(d0s_all)):
+            fig, axes = P.grid(len(rows), len(d0s), sharex="all", sharey="row")
+            data, missing = {}, set()
+            for j, d0 in enumerate(d0s):
+                for i_N, N in enumerate(Ns):
+                    recs = [r for r in members if r.run.N == N and r.run.delta0 == d0]
+                    if not recs:
+                        continue
+                    r0 = recs[0]
+                    ks = r0.kappa_sched(kmin)
+                    scale = ks ** 2 / N
+                    x = np.arange(r0.T, dtype=float) * scale
+                    w = max(1, int(round(N / (2 * ks ** 2))))
+                    cuts = (r0.T_burn + r0.T_meas // 2,)
+                    col = P.n_shade(i_N, len(Ns))
+                    for i, (key, qk) in enumerate(rows):
+                        if key not in r0.scalars:
+                            missing.add((key, ro, N))
+                            continue
+                        xb, mb, sb = _block_trace(axes[i, j], x, seed_stack(recs, key), w, cuts, col, P.READOUT_STYLE[ro],
+                                                  [seed_stack(recs, k) for k in qk] if qk else None)
+                        data[f"d{d0}_N{N}_{key}"] = np.stack([xb, mb, sb])
+                    half = (r0.T_burn + r0.T_meas / 2) * scale
+                    for i in range(len(rows)):
+                        axes[i, j].axvline(half, color=col, ls=":", lw=P.LW_EVENT, zorder=1)
+                for i, (key, _) in enumerate(rows):
+                    if all((key, ro, N) in missing for N in Ns if any(r.run.N == N and r.run.delta0 == d0 for r in members)):
+                        P.na_slot(axes[i, j], "not recorded\n(older batch file)")
+                axes[0, j].set_title(rf"$\delta_0$ = {P.fmt(d0)}")
+                axes[-1, j].set_xlabel(r"$t\kappa_s^2/N$ (lifetimes)")
+            for i, (key, _) in enumerate(rows):
+                axes[i, 0].set_ylabel(P.qlabel(key))
+            keys = [k for k, _ in rows]
+            if "logf_sum" in keys:
+                P.ref_line(axes[keys.index("logf_sum"), 0], 0.0)
+            P.fig_legend(fig, None, handles=P.n_handles(Ns))
+            P.cell_title(fig, kappa, None, lam, solver, eta, P.READOUT_LABEL[ro] + ", traces = N")
+            P.caption(fig, "thick: mean over seeds and blocks of half a lifetime, band ±1 s.e.; faint: per-task seed mean; "
+                           "thin: 5 % and 95 % over active units; dotted: half boundary of each N"
+                      + ("; dashed: ungated" if not is_gated(ro) else "") + _omitted(members, _rows(members)) + _missing_text(missing))
+            stem = P.cell_stem(kappa, None, lam, solver, eta, readout=ro) + (f"_part{part + 1}" if part else "")
+            P.save(fig, os.path.join(fig_dir, "slices", "norms_" + stem), data if figdata else None, index, "slices", stem)
+
+
 def fig_F1(records, fig_dir, index, figdata):
     """F1: norms vs task, columns = N, traces = readouts; one figure per (κ, δ₀, λ, solver, η)."""
     na, kmin = _na(), kappa_min(records)
@@ -140,7 +195,7 @@ def fig_F1(records, fig_dir, index, figdata):
             P.caption(fig, "thick: mean over seeds and blocks of half a lifetime, band ±1 s.e.; faint: per-task seed mean; "
                            "thin: 5 % and 95 % over active units; dotted: half boundary" + _omitted(members, rows) + _missing_text(missing))
             stem = P.cell_stem(kappa, d0, lam, solver, eta)
-            P.save(fig, os.path.join(fig_dir, "norms", "norms_" + stem), data if figdata else None, index, "norms", stem)
+            P.save(fig, os.path.join(fig_dir, "cells", "norms", "norms_" + stem), data if figdata else None, index, "cells/norms", stem)
 
 
 def fig_F2(records, fig_dir, index, figdata):
@@ -193,7 +248,7 @@ def fig_F2(records, fig_dir, index, figdata):
                                "thin: 5 % and 95 % over active units; dotted: half boundary of each N; dashed columns: ungated"
                           + _omitted(members, rows) + _missing_text(missing))
                 stem = P.cell_stem(kappa, d0, lam, solver, eta)
-                P.save(fig, os.path.join(fig_dir, "norms", ("normsN_lt_" if lt else "normsN_") + stem), data if figdata else None, index, "norms", stem)
+                P.save(fig, os.path.join(fig_dir, "cells", "norms", ("normsN_lt_" if lt else "normsN_") + stem), data if figdata else None, index, "cells/norms", stem)
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +298,8 @@ def family_B(out_dir, fig_dir, index, figdata):
             P.save(fig, os.path.join(fig_dir, "diag", "by_step", "steps_" + stem), data if figdata else None, index, "diag/by_step", stem)
 
 
-def run(out_dir, fig_dir, records=None, figdata=False, diag=False):
-    """Make F1 and F2 (and, with ``diag``, the by-step family).
+def run(out_dir, fig_dir, records=None, figdata=False, diag=False, cells=None):
+    """Make the norms slice S1 (and, for ``cells``, F1/F2; with ``diag``, the by-step family).
 
     Parameters
     ----------
@@ -258,6 +313,9 @@ def run(out_dir, fig_dir, records=None, figdata=False, diag=False):
         Write the plotted arrays as ``.npz`` next to each figure.
     diag : bool
         Also draw ``diag/by_step/`` from the trace files.
+    cells : list of RunRecord, optional
+        Records of the cells selected with ``--cells``; F1 and F2 are drawn
+        for these into ``cells/norms/`` (nothing per cell when ``None``).
 
     Returns
     -------
@@ -268,8 +326,10 @@ def run(out_dir, fig_dir, records=None, figdata=False, diag=False):
         records, _ = load_runs(out_dir)
     index = []
     if records:
-        fig_F1(records, fig_dir, index, figdata)
-        fig_F2(records, fig_dir, index, figdata)
+        fig_S1(records, fig_dir, index, figdata)
+    if cells:
+        fig_F1(cells, fig_dir, index, figdata)
+        fig_F2(cells, fig_dir, index, figdata)
     if diag:
         family_B(out_dir, fig_dir, index, figdata)
     return index
@@ -292,10 +352,12 @@ def main(argv=None):
     ap.add_argument("--fig-dir", default=None)
     ap.add_argument("--save-figdata", action="store_true")
     ap.add_argument("--diag", action="store_true", help="also draw the per-step family from traces/ (diag/by_step/)")
+    ap.add_argument("--cells", action="store_true", help="also draw the per-cell families F1/F2 for every cell (cells/norms/)")
     args = ap.parse_args(argv)
     fig_dir = args.fig_dir or os.path.join(args.out_dir, "figures")
-    index = run(args.out_dir, fig_dir, None, args.save_figdata, args.diag)
-    print(f"{len(index)} figures → {fig_dir}/norms")
+    records, _ = load_runs(args.out_dir)
+    index = run(args.out_dir, fig_dir, records, args.save_figdata, args.diag, records if args.cells else None)
+    print(f"{len(index)} figures → {fig_dir}/slices")
     return 0
 
 
