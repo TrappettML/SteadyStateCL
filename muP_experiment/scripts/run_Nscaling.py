@@ -30,7 +30,8 @@ a ``ProcessPoolExecutor`` of ``--workers`` processes (default: the
 number of physical cores; 1 runs everything in this process), each
 pinned to one XLA thread as ``mup.driver`` does for the sweep; the
 per-seed half-lives are gathered per condition afterwards.  Largest N
-first, so the long runs do not trail at the end.
+first, so the long runs do not trail at the end.  The workers share a
+JAX persistent compilation cache in ``<out>/jax_cache`` (safe to delete).
 """
 import argparse
 import math
@@ -125,7 +126,7 @@ def _report(key, mh, T):
           f"  censored or infeasible {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
 
 
-def collect(runs: list, workers: int = 1) -> dict:
+def collect(runs: list, workers: int = 1, cache_dir: str = "") -> dict:
     """``{(N, kappa_label, readout): (n_seeds,) m½ array}`` for every condition of ``runs``.
 
     Parameters
@@ -136,6 +137,12 @@ def collect(runs: list, workers: int = 1) -> dict:
         here, in order.  Each worker is pinned to one XLA thread
         (``driver.PINNED_ENV``), so ``workers`` should not exceed the
         physical core count.
+    cache_dir : str
+        JAX persistent compilation cache shared by the workers (empty: none).
+        Every worker compiles the same few programs (one per N); with the
+        cache the first to finish writes them and the rest load them, which
+        also silences XLA's "constant folding is taking > 1s" alarm on a
+        many-core machine where dozens of single-threaded compiles collide.
     """
     cond = {}                                             # condition → runs, in seed order
     for r in runs:
@@ -149,6 +156,10 @@ def collect(runs: list, workers: int = 1) -> dict:
     else:
         # spawn (never fork: the parent has JAX initialised) with single-threaded XLA in every child
         os.environ.update(PINNED_ENV)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+            os.environ.update(JAX_COMPILATION_CACHE_DIR=os.path.abspath(cache_dir),
+                              JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS="0")
         ctx = mp.get_context("spawn")
         ex = ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
         results = (f.result() for f in as_completed([ex.submit(_job, k, r) for k, r in jobs]))
@@ -273,7 +284,7 @@ def main(argv=None):
     workers = args.workers or physical_cores()
     print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds} "
           f"workers={workers}", flush=True)
-    res = collect(runs, workers)
+    res = collect(runs, workers, cache_dir=os.path.join(args.out, "jax_cache"))
 
     klabels = [P.fmt(k) for k in args.kappa]
     fdir = os.path.join(args.out, "figures")

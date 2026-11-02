@@ -1410,6 +1410,11 @@ count; spawn context, each child pinned to one XLA thread with
 `driver.PINNED_ENV`, largest N first) and the per-seed half-lives are
 gathered per condition afterwards, so on the Xeon the wall time is
 that of the slowest single run (an N = 100 run, 2800 tasks, ≈ 1 min).
+The workers share a JAX persistent compilation cache
+(`results/Nscaling/jax_cache`, safe to delete): without it every
+worker compiles the same programs, and on the Xeon dozens of
+single-threaded compiles at once trip XLA's "constant folding is
+taking > 1s" alarm (a warning on stderr, not a failure; 2026-11-02).
 
 - **Figure 1** (`results/Nscaling/figures/mhalf_vs_N_k1_d00_lam4.png`):
   x = N (log, ticks at the grid), y = m½ in tasks (log), one trace per
