@@ -33,7 +33,7 @@ python scripts/analyze.py results/stage1
 | `--threads T` | XLA/BLAS threads per worker (default 1, PLAN.md decision 5). |
 | `--batch-id i` | Run exactly batch `i` in-process from the existing manifest without touching it (what the driver's subprocesses call). |
 | `--dry-run` | Only write `manifest.json` and print every batch with its infeasible-run count; nothing runs or is deleted. |
-| `--fresh` | Delete the sweep's `batch_*.npz`, `traces/`, `logs/`, `figures/`, `summary.csv` and `curves.json`, then rerun every batch. Irreversible. |
+| `--fresh` | Delete the sweep's `batches/`, `traces/`, `logs/`, `figures/`, `summary.csv` and `curves.json`, then rerun every batch. Irreversible. |
 | `--log-every n` | Print progress every `n` tasks within a batch (`0`: only the per-batch line). |
 
 Without `--fresh` a rerun resumes: a batch is skipped when its file exists
@@ -90,7 +90,7 @@ sweep lists the ungated conditions once per (N, δ₀, λ, η, seed) with
 `kappa_label = "sqrtN"`.  Figures draw ungated conditions dashed.
 | `tests/` | tests 1–6 and 9–10 of the plan plus config/schedule tests; `reference_hash.txt` is test 6's stored hash |
 
-## Result schema (`results/<name>/batch_*.npz`, schema 2)
+## Result schema (`results/<name>/batches/batch_*.npz`, schema 2)
 
 `ages` (n_ages,); running moments `sum_s`, `sum_s2`, `sum_e`, `sum_e2`, `count`
 (B, n_ages, 2 halves); per-task scalars (T, B), all listed in

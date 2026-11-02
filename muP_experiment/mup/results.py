@@ -1,7 +1,7 @@
 """Host-side access to a sweep's results for the figure scripts (PLAN.md §12).
 
 ``analyze.py``, ``plot_norms.py`` and ``plot_check2.py`` all read the same
-``batch_*.npz`` files; this module turns them into one record per run with
+``batches/batch_*.npz`` files; this module turns them into one record per run with
 its per-task scalars and running moments, and groups records by condition.
 Nothing here touches raw state.
 """

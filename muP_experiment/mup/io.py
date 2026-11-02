@@ -14,9 +14,14 @@ from mup.config import Config, Run, make_batches, make_runs
 SCHEMA_VERSION = 2   # 2: PLAN.md §12.1 norm scalars (pre/post, logf, quantiles); 1: the original set
 
 
+def batches_dir(out_dir: str) -> str:
+    """``<out_dir>/batches``: where the per-batch ``.npz`` files live."""
+    return os.path.join(out_dir, "batches")
+
+
 def batch_path(out_dir: str, batch_id: int) -> str:
-    """Path of batch ``batch_id``'s ``.npz`` inside ``out_dir``."""
-    return os.path.join(out_dir, f"batch_{batch_id:05d}.npz")
+    """Path of batch ``batch_id``'s ``.npz`` (``<out_dir>/batches/batch_<id>.npz``)."""
+    return os.path.join(batches_dir(out_dir), f"batch_{batch_id:05d}.npz")
 
 
 def save_batch(out_dir: str, batch_id: int, results: dict, runs: list[Run], extra: Optional[dict] = None) -> str:
@@ -38,7 +43,7 @@ def save_batch(out_dir: str, batch_id: int, results: dict, runs: list[Run], extr
     str
         Path written (atomically, via a temp name that ``load_sweep`` ignores).
     """
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(batches_dir(out_dir), exist_ok=True)
     meta = {
         "schema": SCHEMA_VERSION,
         "batch_id": batch_id,
@@ -49,7 +54,7 @@ def save_batch(out_dir: str, batch_id: int, results: dict, runs: list[Run], extr
     arrays = {k: np.asarray(v) for k, v in results.items()}
     arrays["meta_json"] = np.array(json.dumps(meta))
     path = batch_path(out_dir, batch_id)
-    tmp = os.path.join(out_dir, f".tmp_{os.getpid()}_batch_{batch_id:05d}.npz")   # never matches load_sweep's filter
+    tmp = os.path.join(batches_dir(out_dir), f".tmp_{os.getpid()}_batch_{batch_id:05d}.npz")   # never matches load_sweep's filter
     np.savez_compressed(tmp, **arrays)
     os.replace(tmp, path)
     return path
@@ -168,7 +173,7 @@ def load_traces(out_dir: str) -> list[tuple[np.ndarray, np.ndarray, Run, dict]]:
 
 
 def clear_sweep(out_dir: str) -> list[str]:
-    """Delete a sweep's batch files, traces, logs and derived outputs (``--fresh``); the manifest is rewritten by the caller.
+    """Delete a sweep's batch files (``batches/``), traces, logs and derived outputs (``--fresh``); the manifest is rewritten by the caller.
 
     Returns
     -------
@@ -181,9 +186,9 @@ def clear_sweep(out_dir: str) -> list[str]:
         return removed
     for f in sorted(os.listdir(out_dir)):
         path = os.path.join(out_dir, f)
-        if re.fullmatch(r"batch_\d+\.npz", f) or f in ("summary.csv", "curves.json", "validate.log"):
+        if f in ("summary.csv", "curves.json", "validate.log"):
             os.remove(path); removed.append(path)
-        elif f in ("traces", "logs", "figures") and os.path.isdir(path):
+        elif f in ("batches", "traces", "logs", "figures") and os.path.isdir(path):
             shutil.rmtree(path); removed.append(path)
     return removed
 
@@ -200,8 +205,11 @@ def load_sweep(out_dir: str) -> list[tuple[dict, list[Run], dict]]:
     -------
     list of (results, runs, meta)
     """
-    files = sorted(f for f in os.listdir(out_dir) if re.fullmatch(r"batch_\d+\.npz", f))
-    return [load_batch(os.path.join(out_dir, f)) for f in files]
+    bdir = batches_dir(out_dir)
+    if not os.path.isdir(bdir):
+        return []
+    files = sorted(f for f in os.listdir(bdir) if re.fullmatch(r"batch_\d+\.npz", f))
+    return [load_batch(os.path.join(bdir, f)) for f in files]
 
 
 # ----------------------------------------------------------------------------

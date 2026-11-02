@@ -116,7 +116,7 @@ muP_experiment/
     test_vmap_vs_loop.py test_reproducible.py test_config.py test_plotting.py conftest.py
     reference_hash.txt (test 6's stored hash)
   results/             (gitignored) one subfolder per sweep:
-    <sweep>/batch_*.npz  manifest.json  summary.csv  curves.json  logs/
+    <sweep>/batches/batch_*.npz  manifest.json  summary.csv  curves.json  logs/
     <sweep>/figures/     subfolders by figure family (§12.4), never loose files
     <sweep>/traces/      per-step norm traces (§12.2), only for configs with trace: true
 ```
@@ -420,7 +420,7 @@ one width with `--N 100`.
   it hands the manifest to `mup/driver.py`, which runs `run_sweep.py
   --batch-id i` subprocesses; `--batch-id` is therefore also the way to run
   one batch by hand.
-- `scripts/analyze.py` only reads `results/<name>/batch_*.npz`.
+- `scripts/analyze.py` only reads `results/<name>/batches/batch_*.npz`.
 - `scripts/validate.py` and `scripts/bench.py` build their own small runs
   internally and do not touch `results/<sweep>/`.
 - `mup/` is a library; nothing in it is run directly.
@@ -1277,3 +1277,162 @@ change is `T_per_N: 7.0` and `extra: [{N: 100, kappa: 4.0}]` in
    N = 200 at both κ and κ = 4 at N = 100. Rerun on the Xeon; read in
    the order table → M4 → M5 → M6 → M7 → M8 → S1/S2.
 
+
+### 12.10 Gauge comparison: Δᵢ per step with and without the projection (2026-11-02)
+
+*Added 2026-11-02; implemented the same day.* Check 1 (§6, §12.6) only
+reports `max|Δᵢ − Δ₀|` after the last projection of each task, so it
+shows that the projection pins the gauge but not what the gauge does
+without it, or at what rate the discrete population step drifts away
+from the conserved Δᵢ of gradient flow. `scripts/run_gauge_comp.py`
+answers that directly for one cell.
+
+- **What it runs.** N = 100, κ = 1, δ₀ = 0, λ = 4, population solver,
+  one seed, the Stage-1 stream length (T_burn + T_meas = 1400 tasks ×
+  40 steps = 56 000 steps; `--tasks` shortens it). Every readout of §4
+  is run twice from the same initial state and task stream: once with
+  `do_proj` forced to 0 and once forced to 1, so the two rows differ
+  only in the projection. The loop is the task loop of `run_task`
+  (task draw, head draw, step + `project_rows`) without the probes,
+  written in the script, and `Δᵢ = (aᵢ² − Qᵢᵢ)/η` (`model.imbalance`)
+  is recorded after every step: mean, min and max over the active
+  units of the current task, and `max|Δᵢ − Δ₀|`.
+- **The figure** (`results/gauge_comp/figures/gauge_comp_N100_k1_d00_lam4.png`,
+  arrays in the `.npz` beside it): two rows × one column, x = global
+  training step on a log axis, y = the active-unit mean of Δᵢ with the
+  min–max band, one trace per readout in the §12.0 colours, Δ₀ as the
+  grey reference line. Row 1 without the projection, row 2 with it.
+  Not part of `analyze.py`; run it on its own when the kernels or the
+  projection change.
+- **Result (2026-11-02).** With the projection, every readout holds
+  `max|Δᵢ − Δ₀| ≤ 6e-15` over all 56 000 steps (check 1 at every step,
+  not only at task ends). Without it, Δᵢ drifts negative, i.e. Qᵢᵢ
+  outruns aᵢ²: slowly for the first ~10³ steps, then to a mean of about
+  −10 for the gated shared and gated frozen readouts and −60 for the
+  learned shared readout by the end of the stream; the frozen (ungated)
+  readout stays near −1 and the task-heads readout within 0.3, since a
+  fresh head is redrawn at Δᵢ = Δ₀ every task. This is the O(h) Euler
+  drift of §3.3 accumulated over the stream, and the reason the
+  projection runs after every step (§3.4). Note that the "gauge
+  projection" row applies the projection to the frozen readouts too,
+  which §4 does not (their `do_proj` is 0); that row is the test of the
+  projection, not a readout condition of the sweep.
+
+### 12.11 First-teacher signal against task: S₀(t) vs t (2026-11-02)
+
+*Added and implemented 2026-11-02; redefined the same day from "S(0) of
+the task just learned" to the first teacher tracked forward.* The
+half-life is defined on S(m)/S(0) averaged over probes (§5, S2);
+`scripts/run_szero.py` shows the same decay for ONE probe, the first
+task, against the task index, so that forgetting can be seen as a time
+series rather than an age average: S₀(t) = u_t·w₀*/|w₀*|² with
+u_t = (g₀ ⊙ a) W_t / pN, the gate g₀ of task 0 and its stored head
+(task heads) or the current shared readout, evaluated after every
+task t (the probe fixed at k = 0, age m = t).
+
+- **What it runs.** N = 100, κ = 1, δ₀ = 0, λ = 4, population solver,
+  4 seeds, every readout of §4, the Stage-1 stream length
+  T_burn + T_meas = 14N = 1400 tasks from a fresh initialisation (task 0
+  is the probed one, so nothing is discarded as burn-in);
+  each readout's seeds as one `batched_run_task` batch, S₀ read from
+  the state's probe 0 after each task. `--seeds`, `--tasks`,
+  `--delta0`, `--lam`, `--N`, `--kappa` override.
+- **The figure** (`results/szero/figures/szero_N100_k1_d00_lam4.png`,
+  arrays in the `.npz` beside it): x = t + 1 on a log axis, so the
+  value after task 0 is drawn at x = 1, y = S₀(t)/S₀(0) (the seed mean
+  divided by its value after task 0, so every trace starts at 1; the raw
+  arrays are in the `.npz`), one trace per readout (seed mean,
+  ±1 s.e. band over seeds), grey lines at 0 and ½; m½, where the mean
+  first crosses S₀(0)/2 (linear interpolation), is given per readout in
+  the caption. Not part of `analyze.py`.
+- **Result (2026-11-02).** S₀(0) ≈ 1 for every readout (0.97 gated
+  frozen, 0.985 frozen). The gated readouts decay roughly
+  exponentially with m½ = 86 (gated shared), 85 (gated frozen) and 68
+  (task heads) tasks, i.e. 0.7–0.9 N, against the N ln 2 ≈ 69 of the
+  e^{−m/N} picture (§12.3 M6); task heads is the fastest since its
+  stored head is never retrained. The two ungated readouts (learned
+  shared, frozen) drop to ≈ 0 after ONE task: with every unit active a
+  new teacher at λ = 4 overwrites the whole W: u_t = a W_t / N is one
+  D-vector shared by every probe, so it can track only the latest
+  teacher. Their S₀(0) ≈ 1 like the others (checked against
+  `evaluate_probes` at age 0, identical to all digits), m½ = 0.5 by
+  interpolation, and the age-averaged S2 curves of §12.3 for these
+  readouts are dominated by that first step. Memory in this model is a property of
+  gating, not of the readout. Past ≈ 4 m½ every trace sits at 0 within
+  the seed noise for the remaining 1000 tasks; nothing comes back.
+
+### 12.12 Steady-state teacher signal against age: S_T(τ) vs τ (2026-11-02)
+
+*Added and implemented 2026-11-02.* §12.11 follows the FIRST teacher
+from a fresh initialisation, where the network is not yet in its
+steady state. `scripts/run_stask.py` is the same figure with the probe
+taken after the network has reached it: train T = T_burn + T_meas =
+1400 tasks (N = 100), then follow the teacher of task T for τ = 0 … 1000
+more tasks, S_T(τ) = u_{T+τ}·w_T*/|w_T*|² with the gate of task T and
+its stored head (task heads) or the current shared readout. Same
+cell as §12.11 (N = 100, κ = 1, δ₀ = 0, λ = 4, population solver, 4
+seeds, every readout); the probe buffer is sized T + τ + 1 so every
+task of the longer stream has a slot. `--T`, `--tau`, `--seeds`,
+`--delta0`, `--lam`, `--N`, `--kappa` override.
+
+- **The figure** (`results/stask/figures/stask_N100_k1_d00_lam4.png`,
+  arrays in the `.npz` beside it): x = τ + 1 on a log axis (τ = 0, the
+  task just learned, at x = 1), y = S_T(τ)/S_T(0) (seed mean divided by
+  its value at τ = 0, so every trace starts at 1; raw arrays in the
+  `.npz`), one trace per readout (seed
+  mean, ±1 s.e. band over seeds), grey lines at 0 and ½; m½ (first
+  crossing of S_T(0)/2, linear interpolation) in the caption. Not part
+  of `analyze.py`.
+- **Result (2026-11-02).** S_T(0) ≈ 1 for every readout (0.994 gated
+  frozen, 0.986 frozen, 0.996 learned shared). Half-lives at steady
+  state: gated shared 75, gated frozen 78, task heads 71 tasks, i.e.
+  0.7–0.8 N, all within a few tasks of N ln 2 ≈ 69 and closer to it
+  than the fresh-start values of §12.11 (86, 85, 68): once the norms
+  have settled, the three gated readouts forget at the same rate. The
+  ungated readouts drop to ≈ 0 after one task, as in §12.11. Every
+  trace is at 0 within seed noise by τ ≈ 300 and stays there.
+
+### 12.13 Steady-state half-life against width: m½ vs N, simulation vs equation (2026-11-02)
+
+*Added and implemented 2026-11-02.* `scripts/run_Nscaling.py` turns the
+§12.12 measurement into a scaling figure. For every (N, κ, readout,
+seed) the network trains the Stage-1 stream T = T_burn + T_meas = 14N
+tasks, then T more while the teacher of task T is followed, S_T(m) =
+u_{T+m}·w_T*/|w_T*|², m = 0 … T; the half-life m½ is the first m with
+S_T(m)/S_T(0) ≤ ½ (linear interpolation), the number of tasks a memory
+survives at half alignment or better. A seed that never crosses in T
+tasks is censored and dropped (counted in the caption). Default grid:
+N ∈ {5, 10, 20, 50, 100}, κ ∈ {1, 2, 4}, δ₀ = 0, λ = 4, population
+solver, 4 seeds, every readout; the probe buffer is sized 2T + 1.
+
+- **Figure 1** (`results/Nscaling/figures/mhalf_vs_N_k1_d00_lam4.png`):
+  x = N (log, ticks at the grid), y = m½ in tasks (log), one trace per
+  readout at κ = 1 (seed mean, ±1 s.e. bars), the ungated readouts at
+  their κ-free value; dotted grey m½ = N ln 2 (the task-heads estimate
+  of §12.3 M4).
+- **Figure 2** (`results/Nscaling/figures/mhalf_theory_nln2_d00_lam4.png`):
+  one panel per gated readout, traces = κ in shades of the readout's
+  colour (lightest = smallest κ), solid = simulation (seed mean, ±1
+  s.e. bars), dotted = the equation. `--theory nln2` (default) draws
+  m½ = N ln 2 for every κ; `--theory nk2` draws N ln 2 / κ², the N/κ²
+  claim that §12.3 M4–M5 found the Stage-1 data do not support.
+- Per-condition seed values in `mhalf_d00_lam4.npz` beside the figures.
+  Not part of `analyze.py`; M4 and M5 there give the same quantity
+  from the sweep's age-averaged curves.
+- **Result (2026-11-02; no seed censored).** At κ = 1 every gated
+  readout grows as m½ ∝ N from N = 5 to 100 (log–log slope ≈ 1); task
+  heads sits on N ln 2 at every N (67 ± 7 at N = 100 vs 69), gated
+  frozen just below it (56 ± 8), gated shared at about 0.6 of it
+  (42 ± 3). The ungated readouts are at 0.5 tasks for every N. Against
+  κ: task heads shows no κ dependence (66–76 at N = 100 for κ = 1, 2,
+  4), gated shared and gated frozen are flat between κ = 1 and 2 but
+  drop to ≈ 13 tasks at κ = 4, N = 100, and to the ungated floor
+  (< 1 task) at κ = 4, N ≤ 20, where the gate density κ/√N ≥ 0.9 makes
+  the runs effectively ungated. So the shared readouts do carry a κ
+  dependence, but it sets in only once κ/√N is of order 1, not as
+  N/κ² throughout; N ln 2 is the right equation for task heads at
+  every κ and for the shared readouts at κ/√N ≲ 0.2. Note that this
+  m½ is computed per seed and then averaged; the seed-mean curve of
+  §12.12 crosses ½ later (75 vs 42 for gated shared at N = 100,
+  κ = 1) because the per-seed curves are noisy and noise reaches the
+  threshold early, so the two numbers are not interchangeable.
