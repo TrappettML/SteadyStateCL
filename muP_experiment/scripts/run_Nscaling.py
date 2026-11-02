@@ -35,12 +35,11 @@ reproduce the JAX sweep's draws bit for bit, only their distribution).
 Every run (N, κ, readout, seed) is independent, so each is one job of
 a ``ProcessPoolExecutor`` of ``--workers`` processes (default:
 ``psutil.cpu_count(logical=False)``, the physical cores; 1 runs
-everything in this process), every worker pinned to one BLAS thread.
-Largest N first, so the long runs do not trail at the end.
+everything in this process); scheduling is left to the OS.  Largest N
+first, so the long runs do not trail at the end.
 """
 import argparse
 import math
-import multiprocessing as mp
 import os
 import subprocess
 import sys
@@ -54,11 +53,6 @@ from mup import plotting as P
 from mup.config import Config, READOUT_ORDER, is_gated, make_runs
 
 GATED = tuple(ro for ro in READOUT_ORDER if is_gated(ro))
-
-#: One BLAS/OpenMP thread per worker process; set before the pool spawns.
-PINNED_ENV = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
-              "VECLIB_MAXIMUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1"}
-
 
 def half_life(m: np.ndarray) -> float:
     """First task at which ``m`` falls to ``m[0]/2``, linearly interpolated; NaN if never (as ``run_szero.half_life``, which imports JAX)."""
@@ -240,9 +234,7 @@ def collect(runs: list, workers: int = 1) -> dict:
     runs : list of config.Run
     workers : int
         Processes in the pool, one run (seed) per job; 1 runs the jobs
-        here, in order.  Each worker is pinned to one BLAS thread
-        (``PINNED_ENV``), so ``workers`` should not exceed the physical
-        core count.
+        here, in order.
     """
     cond = {}                                             # condition → runs, in seed order
     for r in runs:
@@ -256,9 +248,7 @@ def collect(runs: list, workers: int = 1) -> dict:
             _, mh = _job(k, r)
             per_seed.setdefault(k[:3], {})[k[3]] = mh
     else:
-        os.environ.update(PINNED_ENV)                     # inherited by the spawned workers before they import numpy
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+        with ProcessPoolExecutor(max_workers=workers) as ex:
             futs = [ex.submit(_job, k, r) for k, r in jobs]
             for f in as_completed(futs):
                 (N, k, ro, seed), mh = f.result()
