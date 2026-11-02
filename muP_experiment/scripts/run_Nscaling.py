@@ -25,11 +25,12 @@ figures in ``results/Nscaling/figures/``:
 
 The per-condition values are written to ``mhalf_….npz`` beside the figures.
 
-The (N, κ, readout) conditions are independent, so they run in a
-``ProcessPoolExecutor`` of ``--workers`` processes (default: the number
-of physical cores; 1 runs everything in this process), each pinned to
-one XLA thread as ``mup.driver`` does for the sweep.  Largest N first,
-so the long conditions do not trail at the end.
+Every run (N, κ, readout, seed) is independent, so each is one job of
+a ``ProcessPoolExecutor`` of ``--workers`` processes (default: the
+number of physical cores; 1 runs everything in this process), each
+pinned to one XLA thread as ``mup.driver`` does for the sweep; the
+per-seed half-lives are gathered per condition afterwards.  Largest N
+first, so the long runs do not trail at the end.
 """
 import argparse
 import math
@@ -107,13 +108,11 @@ def physical_cores() -> int:
     return os.cpu_count() or 1
 
 
-def _job(key: tuple, batch: list) -> tuple:
-    """One condition in a worker process: ``(key, m½ per seed)``; ``None`` for the array if every seed is infeasible."""
-    ok = feasible(batch)
-    batch = [r for r, f in zip(batch, ok) if f]
-    if not batch:
-        return key, None
-    return key, mhalf_batch(batch)
+def _job(key: tuple, run) -> tuple:
+    """One run (one seed) in a worker process: ``(key, m½)``; NaN when the run is infeasible (δ₀ ≤ −min_i Q0_i)."""
+    if not feasible([run])[0]:
+        return key, float("nan")
+    return key, float(mhalf_batch([run])[0])
 
 
 def _report(key, mh, T):
@@ -123,7 +122,7 @@ def _report(key, mh, T):
     n_ok = int(np.isfinite(mh).sum())
     se = np.nanstd(mh, ddof=1) / math.sqrt(n_ok) if n_ok > 1 else 0.0
     print(f"  N={key[0]:4d} κ={key[1]:5s} {key[2]:15s} T={T:5d}  m½ = {np.nanmean(mh):7.2f} ± {se:5.2f}"
-          f"  censored {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
+          f"  censored or infeasible {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
 
 
 def collect(runs: list, workers: int = 1) -> dict:
@@ -133,33 +132,41 @@ def collect(runs: list, workers: int = 1) -> dict:
     ----------
     runs : list of config.Run
     workers : int
-        Processes in the pool; 1 runs the conditions here, in order.  Each
-        worker is pinned to one XLA thread (``driver.PINNED_ENV``), so
-        ``workers`` should not exceed the physical core count.
+        Processes in the pool, one run (seed) per job; 1 runs the jobs
+        here, in order.  Each worker is pinned to one XLA thread
+        (``driver.PINNED_ENV``), so ``workers`` should not exceed the
+        physical core count.
     """
-    groups = {}
+    cond = {}                                             # condition → runs, in seed order
     for r in runs:
-        groups.setdefault((r.N, r.kappa_label, r.readout), []).append(r)
-    T_of = {k: b[0].T_burn + b[0].T_meas for k, b in groups.items()}
-    order = sorted(groups, key=lambda k: (-k[0], READOUT_ORDER.index(k[2]), k[1]))     # largest N first
-    out = {}
+        cond.setdefault((r.N, r.kappa_label, r.readout), []).append(r)
+    T_of = {k: b[0].T_burn + b[0].T_meas for k, b in cond.items()}
+    jobs = [((r.N, r.kappa_label, r.readout, r.seed), r) for r in runs]
+    jobs.sort(key=lambda j: (-j[0][0], READOUT_ORDER.index(j[0][2]), j[0][1], j[0][3]))   # largest N first
+    per_seed = {}
     if workers <= 1:
-        for key in order:
-            key, mh = _job(key, groups[key])
-            _report(key, mh, T_of[key])
-            if mh is not None:
-                out[key] = mh
-        return out
-    # spawn (never fork: the parent has JAX initialised) with single-threaded XLA in every child
-    os.environ.update(PINNED_ENV)
-    ctx = mp.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
-        futs = {ex.submit(_job, key, groups[key]): key for key in order}
-        for fut in as_completed(futs):
-            key, mh = fut.result()
-            _report(key, mh, T_of[key])
-            if mh is not None:
-                out[key] = mh
+        results = (_job(k, r) for k, r in jobs)
+    else:
+        # spawn (never fork: the parent has JAX initialised) with single-threaded XLA in every child
+        os.environ.update(PINNED_ENV)
+        ctx = mp.get_context("spawn")
+        ex = ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
+        results = (f.result() for f in as_completed([ex.submit(_job, k, r) for k, r in jobs]))
+    try:
+        for (N, k, ro, seed), mh in results:
+            per_seed[(N, k, ro)] = per_seed.get((N, k, ro), {})
+            per_seed[(N, k, ro)][seed] = mh
+    finally:
+        if workers > 1:
+            ex.shutdown()
+    out = {}
+    for key in sorted(cond, key=lambda k: (k[0], READOUT_ORDER.index(k[2]), k[1])):
+        mh = np.array([per_seed[key][r.seed] for r in cond[key]])
+        if np.isnan(mh).all() and not np.isfinite(mh).any():
+            _report(key, None, T_of[key])
+            continue
+        out[key] = mh
+        _report(key, mh, T_of[key])
     return out
 
 
