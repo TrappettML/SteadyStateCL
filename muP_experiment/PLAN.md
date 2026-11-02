@@ -1405,16 +1405,29 @@ tasks is censored and dropped (counted in the caption). Default grid:
 N ∈ {5, 10, 20, 50, 100}, κ ∈ {1, 2, 4}, δ₀ = 0, λ = 4, population
 solver, 4 seeds, every readout; the probe buffer is sized 2T + 1.
 Every run (N, κ, readout, seed; 220 on the default grid) is its own
-job of a `ProcessPoolExecutor` (`--workers`, default the physical core
-count; spawn context, each child pinned to one XLA thread with
-`driver.PINNED_ENV`, largest N first) and the per-seed half-lives are
-gathered per condition afterwards, so on the Xeon the wall time is
-that of the slowest single run (an N = 100 run, 2800 tasks, ≈ 1 min).
-The workers share a JAX persistent compilation cache
-(`results/Nscaling/jax_cache`, safe to delete): without it every
-worker compiles the same programs, and on the Xeon dozens of
-single-threaded compiles at once trip XLA's "constant folding is
-taking > 1s" alarm (a warning on stderr, not a failure; 2026-11-02).
+job of a `ProcessPoolExecutor` (`--workers`, default
+`psutil.cpu_count(logical=False)`, largest N first) and the per-seed
+half-lives are gathered per condition afterwards, so on the Xeon the
+wall time is that of the slowest single run. **No JAX (2026-11-02):**
+the first version batched the runs with `vmap` under JAX; on the Xeon
+96 single-threaded workers compiling at once tripped XLA's "constant
+folding is taking > 1s" alarm and then killed the pool
+(`BrokenProcessPool`). The script now runs the dynamics through
+`mup/npmodel.py`, a float64 NumPy port of §3.2–§3.5 for one run
+(tested against `mup.model` to 1e-12 in `tests/test_npmodel.py`): the
+steps touch only the active rows (inactive rows get exactly zero and
+f = 1), rank-1 updates run in place with BLAS `dger`, the row norms
+Q_i are advanced analytically between the projections and recomputed
+from W once per task, and an ungated frozen run moves W only along the
+fixed a and is advanced in a D-vector. The package `mup` no longer
+imports JAX on import (`mup/_x64.py` holds the x64 switch). Seeds use
+`numpy.random.default_rng(run.rng_seed())`, so they match the JAX
+sweep in distribution, not bit for bit. Cost at N = 1000 (M2, one
+core): ≈ 8 ms per task for the gated and frozen readouts, ≈ 110 ms for
+learned shared (the one full-matrix case), i.e. 4–55 min per
+half-life run. `scripts/run_weight_norms.py` (mean Q_ii and mean a_i²
+against task and against N, §12.1 keys `Q_all`, `a2_all`) uses the
+same kernel and pool.
 
 - **Figure 1** (`results/Nscaling/figures/mhalf_vs_N_k1_d00_lam4.png`):
   x = N (log, ticks at the grid), y = m½ in tasks (log), one trace per

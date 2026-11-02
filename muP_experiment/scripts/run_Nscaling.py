@@ -25,12 +25,9 @@ figures in ``results/Nscaling/figures/``:
 
 The per-condition values are written to ``mhalf_….npz`` beside the figures.
 
-This experiment does not use JAX: the dynamics of ``mup.model`` (teacher
-and gate draws, population / SGD step, row projection, stored-head
-rescaling) are re-implemented here for one run in float64 NumPy, so a
-run is a plain Python loop with no compilation.  A run's random stream is
-``numpy.random.default_rng(run.rng_seed())`` (so the seeds do not
-reproduce the JAX sweep's draws bit for bit, only their distribution).
+This experiment does not use JAX: the dynamics run through the float64
+NumPy port ``mup.npmodel`` (one run, a plain Python loop over tasks, no
+compilation; seeds reproduce the JAX sweep in distribution, not bit for bit).
 
 Every run (N, κ, readout, seed) is independent, so each is one job of
 a ``ProcessPoolExecutor`` of ``--workers`` processes (default:
@@ -50,6 +47,7 @@ import numpy as np
 import _path  # noqa: F401
 
 from mup import plotting as P
+from mup import npmodel
 from mup.config import Config, READOUT_ORDER, is_gated, make_runs
 
 GATED = tuple(ro for ro in READOUT_ORDER if is_gated(ro))
@@ -71,67 +69,6 @@ def theory(N: float, kappa: float, kind: str) -> float:
     return N * math.log(2) / (kappa ** 2 if kind == "nk2" else 1.0)
 
 
-# ----------------------------------------------------------------------------
-# float64 NumPy port of the single-run kernels of ``mup.model`` (PLAN.md §2–§3)
-# ----------------------------------------------------------------------------
-def _Q_diag(W: np.ndarray) -> np.ndarray:
-    """Q_ii = |W_i|² / D for every row."""
-    return (W * W).sum(-1) / W.shape[1]
-
-
-def _draw_readout(rng: np.random.Generator, Q: np.ndarray, eta: float, Delta0: float) -> np.ndarray:
-    """a_i = ε_i √(η (Δ₀ + Q_ii/η)), ε_i = ±1; NaN where Δ₀ + Q_ii/η < 0 (infeasible δ₀)."""
-    eps = rng.choice(np.array([-1.0, 1.0]), size=Q.shape)
-    with np.errstate(invalid="ignore"):
-        return eps * np.sqrt(eta * (Delta0 + Q / eta))
-
-
-def _sgd_step(W, a, g, w, rng, eta, pN, learn_a):
-    """One online-SGD step, eqs. (sgdW)–(sgda); returns (W, a)."""
-    D = W.shape[1]
-    sqD = math.sqrt(D)
-    x = rng.standard_normal(D)
-    hx = W @ x / sqD
-    ga = g * a
-    e = ga @ hx / pN - w @ x / sqD
-    W_n = W - (eta * e / sqD) * np.outer(ga, x)
-    a_n = a - learn_a * eta / D * g * e * hx
-    return W_n, a_n
-
-
-def _pop_step(W, a, g, w, h, eta, pN, learn_a):
-    """One population-gradient step, eq. (pop), simultaneous in W and a; returns (W, a)."""
-    D = W.shape[1]
-    ga = g * a
-    r = ga @ W / pN - w
-    a_n = a - learn_a * h * eta * g * (W @ r) / D
-    W_n = W - (h * eta) * np.outer(ga, r)
-    return W_n, a_n
-
-
-def _project_rows(W, a, g, eta, Delta0, do_proj):
-    """Rescale every active unit onto Δ_i = Δ₀, eq. (proj), in the cancellation-free product form.
-
-    Returns ``(W, a, f)`` with ``f`` the (N,) factor applied to the rows of W
-    (1 for untouched units) so the stored heads can be rescaled by 1/f.
-    """
-    N = W.shape[0]
-    if not do_proj:
-        return W, a, np.ones(N)
-    Q = _Q_diag(W)
-    A = a * a / eta
-    B = Q / eta
-    AB = A * B
-    big = 0.5 * (abs(Delta0) + np.hypot(Delta0, 2.0 * np.sqrt(AB)))
-    small = AB / big
-    Ap, Bp = (big, small) if Delta0 >= 0.0 else (small, big)
-    act = g == 1.0
-    a_new = np.where(act, np.sign(a) * np.sqrt(eta * Ap), a)
-    f = np.where(act, np.sqrt(eta * Bp / Q), 1.0)
-    W_new = W * f[:, None]
-    return W_new, a_new, f
-
-
 def mhalf_run(run) -> float:
     """Half-life m½ of one run: train T tasks, follow the teacher of task T for T more.
 
@@ -145,52 +82,23 @@ def mhalf_run(run) -> float:
         m½ in tasks; NaN when censored (no crossing within T tasks) or
         infeasible (δ₀ ≤ −min_i Q0_i, so the initial readout is not real).
     """
-    N, D = run.N, run.D
     T = run.T_burn + run.T_meas
-    eta, h, pN, Delta0 = float(run.eta), float(run.h), float(run.pN), float(run.Delta0)
-    gated, learn_a = run.gated == 1.0, float(run.learn_a)
-    do_proj, use_heads = run.do_proj == 1.0, run.use_heads == 1.0
-    n_steps, solver = int(run.n_steps), run.solver
-    assert n_steps >= 1
-    if solver not in ("pop", "sgd"):
-        raise ValueError(f"unknown solver {solver!r}")
-    rng = np.random.default_rng(run.rng_seed())
-
-    W = rng.standard_normal((N, D))
-    a = _draw_readout(rng, _Q_diag(W), eta, Delta0)
+    use_heads = run.use_heads == 1.0
+    rng, W, a = npmodel.init_run(run)
     if not np.isfinite(a).all():
         return float("nan")                                   # protocol.feasible
-    w_T = g_T = head_T = None                                 # probe of task T
-
-    def task(t):
-        """Train task ``t``; stores the probe when t == T and rescales the stored head afterwards."""
-        nonlocal W, a, w_T, g_T, head_T
-        w = rng.standard_normal(D)
-        g = (rng.uniform(size=N) < pN / N).astype(np.float64) if gated else np.ones(N)
-        head = _draw_readout(rng, _Q_diag(W), eta, Delta0)
-        if use_heads:
-            a = head
-        fcum = np.ones(N)
-        for i in range(n_steps):
-            if solver == "sgd":
-                W, a = _sgd_step(W, a, g, w, rng, eta, pN, learn_a)
-            else:
-                W, a = _pop_step(W, a, g, w, h, eta, pN, learn_a)
-            W, a, f = _project_rows(W, a, g, eta, Delta0, do_proj)
-            fcum *= f
-        if use_heads and head_T is not None:
-            head_T = head_T / fcum                            # model.rescale_heads for the stored probe
-        if t == T:
-            w_T, g_T, head_T = w, g, (a.copy() if use_heads else None)
-
-    for t in range(T):
-        task(t)
     S = np.empty(T + 1)
-    for m in range(T + 1):
-        task(T + m)
+    for t, W, a, g, w, fcum in npmodel.tasks(run, rng, W, a, 2 * T + 1):
+        if t < T:
+            continue
+        if t == T:
+            w_T, act_T, head_T = w, np.flatnonzero(g == 1.0), (a.copy() if use_heads else None)
+            w_T2 = w_T @ w_T
+        elif use_heads:
+            head_T = head_T / fcum                            # model.rescale_heads for the stored probe
         a_T = head_T if use_heads else a
-        u = (g_T * a_T) @ W / pN                              # run_stask._signal_k
-        S[m] = (u * w_T).sum() / (w_T * w_T).sum()
+        u = a_T[act_T] @ W[act_T] / float(run.pN)             # run_stask._signal_k: (g_T ⊙ a_T) @ W / pN
+        S[t - T] = (u @ w_T) / w_T2
     return float(half_life(S))
 
 
