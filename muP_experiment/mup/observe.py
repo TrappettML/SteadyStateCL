@@ -4,7 +4,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
-import mup  # noqa: F401
+import mup._x64  # noqa: F401  (enables x64)
 from mup.model import Params, State
 
 

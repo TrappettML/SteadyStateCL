@@ -9,7 +9,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-import mup  # noqa: F401  (enables x64)
+import mup._x64  # noqa: F401  (enables x64)
 
 
 class Params(NamedTuple):

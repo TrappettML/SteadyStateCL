@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-import mup  # noqa: F401  (enables x64)
+import mup._x64  # noqa: F401  (enables x64)
 from mup.config import Config, make_runs
 from mup.model import Params, init_state
 

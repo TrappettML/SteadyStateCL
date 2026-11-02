@@ -25,13 +25,18 @@ figures in ``results/Nscaling/figures/``:
 
 The per-condition values are written to ``mhalf_….npz`` beside the figures.
 
+This experiment does not use JAX: the dynamics of ``mup.model`` (teacher
+and gate draws, population / SGD step, row projection, stored-head
+rescaling) are re-implemented here for one run in float64 NumPy, so a
+run is a plain Python loop with no compilation.  A run's random stream is
+``numpy.random.default_rng(run.rng_seed())`` (so the seeds do not
+reproduce the JAX sweep's draws bit for bit, only their distribution).
+
 Every run (N, κ, readout, seed) is independent, so each is one job of
-a ``ProcessPoolExecutor`` of ``--workers`` processes (default: the
-number of physical cores; 1 runs everything in this process), each
-pinned to one XLA thread as ``mup.driver`` does for the sweep; the
-per-seed half-lives are gathered per condition afterwards.  Largest N
-first, so the long runs do not trail at the end.  The workers share a
-JAX persistent compilation cache in ``<out>/jax_cache`` (safe to delete).
+a ``ProcessPoolExecutor`` of ``--workers`` processes (default:
+``psutil.cpu_count(logical=False)``, the physical cores; 1 runs
+everything in this process), every worker pinned to one BLAS thread.
+Largest N first, so the long runs do not trail at the end.
 """
 import argparse
 import math
@@ -41,21 +46,30 @@ import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
 import _path  # noqa: F401
 
 from mup import plotting as P
 from mup.config import Config, READOUT_ORDER, is_gated, make_runs
-from mup.observe import age_schedule
-from mup.driver import PINNED_ENV
-from mup.protocol import batched_init, batched_run_task, feasible, make_params
-from run_stask import _signal_k
-from run_szero import half_life
 
 GATED = tuple(ro for ro in READOUT_ORDER if is_gated(ro))
+
+#: One BLAS/OpenMP thread per worker process; set before the pool spawns.
+PINNED_ENV = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+              "VECLIB_MAXIMUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1"}
+
+
+def half_life(m: np.ndarray) -> float:
+    """First task at which ``m`` falls to ``m[0]/2``, linearly interpolated; NaN if never (as ``run_szero.half_life``, which imports JAX)."""
+    half = m[0] / 2
+    below = np.nonzero(m <= half)[0]
+    if len(below) == 0:
+        return float("nan")
+    j = int(below[0])
+    if j == 0:
+        return 0.0
+    return j - 1 + (m[j - 1] - half) / (m[j - 1] - m[j])
 
 
 def theory(N: float, kappa: float, kind: str) -> float:
@@ -63,37 +77,131 @@ def theory(N: float, kappa: float, kind: str) -> float:
     return N * math.log(2) / (kappa ** 2 if kind == "nk2" else 1.0)
 
 
-def mhalf_batch(batch: list) -> np.ndarray:
-    """Per-seed half-lives of one homogeneous batch: train T tasks, follow teacher T for T more.
+# ----------------------------------------------------------------------------
+# float64 NumPy port of the single-run kernels of ``mup.model`` (PLAN.md §2–§3)
+# ----------------------------------------------------------------------------
+def _Q_diag(W: np.ndarray) -> np.ndarray:
+    """Q_ii = |W_i|² / D for every row."""
+    return (W * W).sum(-1) / W.shape[1]
+
+
+def _draw_readout(rng: np.random.Generator, Q: np.ndarray, eta: float, Delta0: float) -> np.ndarray:
+    """a_i = ε_i √(η (Δ₀ + Q_ii/η)), ε_i = ±1; NaN where Δ₀ + Q_ii/η < 0 (infeasible δ₀)."""
+    eps = rng.choice(np.array([-1.0, 1.0]), size=Q.shape)
+    with np.errstate(invalid="ignore"):
+        return eps * np.sqrt(eta * (Delta0 + Q / eta))
+
+
+def _sgd_step(W, a, g, w, rng, eta, pN, learn_a):
+    """One online-SGD step, eqs. (sgdW)–(sgda); returns (W, a)."""
+    D = W.shape[1]
+    sqD = math.sqrt(D)
+    x = rng.standard_normal(D)
+    hx = W @ x / sqD
+    ga = g * a
+    e = ga @ hx / pN - w @ x / sqD
+    W_n = W - (eta * e / sqD) * np.outer(ga, x)
+    a_n = a - learn_a * eta / D * g * e * hx
+    return W_n, a_n
+
+
+def _pop_step(W, a, g, w, h, eta, pN, learn_a):
+    """One population-gradient step, eq. (pop), simultaneous in W and a; returns (W, a)."""
+    D = W.shape[1]
+    ga = g * a
+    r = ga @ W / pN - w
+    a_n = a - learn_a * h * eta * g * (W @ r) / D
+    W_n = W - (h * eta) * np.outer(ga, r)
+    return W_n, a_n
+
+
+def _project_rows(W, a, g, eta, Delta0, do_proj):
+    """Rescale every active unit onto Δ_i = Δ₀, eq. (proj), in the cancellation-free product form.
+
+    Returns ``(W, a, f)`` with ``f`` the (N,) factor applied to the rows of W
+    (1 for untouched units) so the stored heads can be rescaled by 1/f.
+    """
+    N = W.shape[0]
+    if not do_proj:
+        return W, a, np.ones(N)
+    Q = _Q_diag(W)
+    A = a * a / eta
+    B = Q / eta
+    AB = A * B
+    big = 0.5 * (abs(Delta0) + np.hypot(Delta0, 2.0 * np.sqrt(AB)))
+    small = AB / big
+    Ap, Bp = (big, small) if Delta0 >= 0.0 else (small, big)
+    act = g == 1.0
+    a_new = np.where(act, np.sign(a) * np.sqrt(eta * Ap), a)
+    f = np.where(act, np.sqrt(eta * Bp / Q), 1.0)
+    W_new = W * f[:, None]
+    return W_new, a_new, f
+
+
+def mhalf_run(run) -> float:
+    """Half-life m½ of one run: train T tasks, follow the teacher of task T for T more.
 
     Parameters
     ----------
-    batch : list of config.Run
-        Same (N, κ, readout); one entry per seed.
+    run : config.Run
 
     Returns
     -------
-    (n_seeds,) array
-        m½ in tasks, NaN where censored (no crossing within T tasks).
+    float
+        m½ in tasks; NaN when censored (no crossing within T tasks) or
+        infeasible (δ₀ ≤ −min_i Q0_i, so the initial readout is not real).
     """
-    r0 = batch[0]
-    T = r0.T_burn + r0.T_meas
-    p = make_params(batch)
-    keys = jnp.stack([jax.random.PRNGKey(r.rng_seed()) for r in batch])
-    state = batched_init(r0.N, r0.D, 2 * T + 1)(keys, p)
-    ages = jnp.asarray(age_schedule(r0.N, r0.kappa_s, T, r0.n_ages_geom, r0.m_max_factor))
-    step = batched_run_task(r0.n_steps, r0.solver)
-    for _ in range(T):
-        state, _ = step(state, p, ages)
-    S = np.zeros((T + 1, len(batch)))
+    N, D = run.N, run.D
+    T = run.T_burn + run.T_meas
+    eta, h, pN, Delta0 = float(run.eta), float(run.h), float(run.pN), float(run.Delta0)
+    gated, learn_a = run.gated == 1.0, float(run.learn_a)
+    do_proj, use_heads = run.do_proj == 1.0, run.use_heads == 1.0
+    n_steps, solver = int(run.n_steps), run.solver
+    assert n_steps >= 1
+    if solver not in ("pop", "sgd"):
+        raise ValueError(f"unknown solver {solver!r}")
+    rng = np.random.default_rng(run.rng_seed())
+
+    W = rng.standard_normal((N, D))
+    a = _draw_readout(rng, _Q_diag(W), eta, Delta0)
+    if not np.isfinite(a).all():
+        return float("nan")                                   # protocol.feasible
+    w_T = g_T = head_T = None                                 # probe of task T
+
+    def task(t):
+        """Train task ``t``; stores the probe when t == T and rescales the stored head afterwards."""
+        nonlocal W, a, w_T, g_T, head_T
+        w = rng.standard_normal(D)
+        g = (rng.uniform(size=N) < pN / N).astype(np.float64) if gated else np.ones(N)
+        head = _draw_readout(rng, _Q_diag(W), eta, Delta0)
+        if use_heads:
+            a = head
+        fcum = np.ones(N)
+        for i in range(n_steps):
+            if solver == "sgd":
+                W, a = _sgd_step(W, a, g, w, rng, eta, pN, learn_a)
+            else:
+                W, a = _pop_step(W, a, g, w, h, eta, pN, learn_a)
+            W, a, f = _project_rows(W, a, g, eta, Delta0, do_proj)
+            fcum *= f
+        if use_heads and head_T is not None:
+            head_T = head_T / fcum                            # model.rescale_heads for the stored probe
+        if t == T:
+            w_T, g_T, head_T = w, g, (a.copy() if use_heads else None)
+
+    for t in range(T):
+        task(t)
+    S = np.empty(T + 1)
     for m in range(T + 1):
-        state, _ = step(state, p, ages)
-        S[m] = np.asarray(_signal_k(state, p, T))
-    return np.array([half_life(S[:, j]) for j in range(len(batch))])
+        task(T + m)
+        a_T = head_T if use_heads else a
+        u = (g_T * a_T) @ W / pN                              # run_stask._signal_k
+        S[m] = (u * w_T).sum() / (w_T * w_T).sum()
+    return float(half_life(S))
 
 
 def physical_cores() -> int:
-    """Physical (not logical) core count: psutil, else ``sysctl`` on macOS, else ``os.cpu_count()``."""
+    """Physical (not logical) core count: ``psutil.cpu_count(logical=False)``, else ``sysctl`` on macOS, else ``os.cpu_count()``."""
     try:
         import psutil
         n = psutil.cpu_count(logical=False)
@@ -110,10 +218,8 @@ def physical_cores() -> int:
 
 
 def _job(key: tuple, run) -> tuple:
-    """One run (one seed) in a worker process: ``(key, m½)``; NaN when the run is infeasible (δ₀ ≤ −min_i Q0_i)."""
-    if not feasible([run])[0]:
-        return key, float("nan")
-    return key, float(mhalf_batch([run])[0])
+    """One run (one seed) in a worker process: ``(key, m½)``; NaN when censored or infeasible."""
+    return key, mhalf_run(run)
 
 
 def _report(key, mh, T):
@@ -126,7 +232,7 @@ def _report(key, mh, T):
           f"  censored or infeasible {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
 
 
-def collect(runs: list, workers: int = 1, cache_dir: str = "") -> dict:
+def collect(runs: list, workers: int = 1) -> dict:
     """``{(N, kappa_label, readout): (n_seeds,) m½ array}`` for every condition of ``runs``.
 
     Parameters
@@ -134,15 +240,9 @@ def collect(runs: list, workers: int = 1, cache_dir: str = "") -> dict:
     runs : list of config.Run
     workers : int
         Processes in the pool, one run (seed) per job; 1 runs the jobs
-        here, in order.  Each worker is pinned to one XLA thread
-        (``driver.PINNED_ENV``), so ``workers`` should not exceed the
-        physical core count.
-    cache_dir : str
-        JAX persistent compilation cache shared by the workers (empty: none).
-        Every worker compiles the same few programs (one per N); with the
-        cache the first to finish writes them and the rest load them, which
-        also silences XLA's "constant folding is taking > 1s" alarm on a
-        many-core machine where dozens of single-threaded compiles collide.
+        here, in order.  Each worker is pinned to one BLAS thread
+        (``PINNED_ENV``), so ``workers`` should not exceed the physical
+        core count.
     """
     cond = {}                                             # condition → runs, in seed order
     for r in runs:
@@ -152,28 +252,21 @@ def collect(runs: list, workers: int = 1, cache_dir: str = "") -> dict:
     jobs.sort(key=lambda j: (-j[0][0], READOUT_ORDER.index(j[0][2]), j[0][1], j[0][3]))   # largest N first
     per_seed = {}
     if workers <= 1:
-        results = (_job(k, r) for k, r in jobs)
+        for k, r in jobs:
+            _, mh = _job(k, r)
+            per_seed.setdefault(k[:3], {})[k[3]] = mh
     else:
-        # spawn (never fork: the parent has JAX initialised) with single-threaded XLA in every child
-        os.environ.update(PINNED_ENV)
-        if cache_dir:
-            os.makedirs(cache_dir, exist_ok=True)
-            os.environ.update(JAX_COMPILATION_CACHE_DIR=os.path.abspath(cache_dir),
-                              JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS="0")
+        os.environ.update(PINNED_ENV)                     # inherited by the spawned workers before they import numpy
         ctx = mp.get_context("spawn")
-        ex = ProcessPoolExecutor(max_workers=workers, mp_context=ctx)
-        results = (f.result() for f in as_completed([ex.submit(_job, k, r) for k, r in jobs]))
-    try:
-        for (N, k, ro, seed), mh in results:
-            per_seed[(N, k, ro)] = per_seed.get((N, k, ro), {})
-            per_seed[(N, k, ro)][seed] = mh
-    finally:
-        if workers > 1:
-            ex.shutdown()
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+            futs = [ex.submit(_job, k, r) for k, r in jobs]
+            for f in as_completed(futs):
+                (N, k, ro, seed), mh = f.result()
+                per_seed.setdefault((N, k, ro), {})[seed] = mh
     out = {}
     for key in sorted(cond, key=lambda k: (k[0], READOUT_ORDER.index(k[2]), k[1])):
         mh = np.array([per_seed[key][r.seed] for r in cond[key]])
-        if np.isnan(mh).all() and not np.isfinite(mh).any():
+        if not np.isfinite(mh).any():
             _report(key, None, T_of[key])
             continue
         out[key] = mh
@@ -270,7 +363,7 @@ def main(argv=None):
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--theory", choices=["nln2", "nk2"], default="nln2")
     ap.add_argument("--workers", type=int, default=None,
-                    help="processes in the pool, one condition each (default: physical cores; 1: in-process)")
+                    help="processes in the pool, one run each (default: psutil physical cores; 1: in-process)")
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "Nscaling"))
     args = ap.parse_args(argv)
 
@@ -284,7 +377,7 @@ def main(argv=None):
     workers = args.workers or physical_cores()
     print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds} "
           f"workers={workers}", flush=True)
-    res = collect(runs, workers, cache_dir=os.path.join(args.out, "jax_cache"))
+    res = collect(runs, workers)
 
     klabels = [P.fmt(k) for k in args.kappa]
     fdir = os.path.join(args.out, "figures")
