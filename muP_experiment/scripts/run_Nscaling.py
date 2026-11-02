@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Steady-state half-life against width (PLAN.md §12.13): m½ from S_T(m)/S_T(0) vs N.
 
-    python scripts/run_Nscaling.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0] [--lam 4] [--seeds 4]
+    python scripts/run_Nscaling.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0] [--lam 4] [--seeds 4] [--workers W]
 
 For every (N, κ, readout, seed) the network trains the Stage-1 stream of
 T = T_burn + T_meas tasks (14N under ``configs/stage1.yaml``), then T
@@ -24,11 +24,20 @@ figures in ``results/Nscaling/figures/``:
     m½ = N ln 2 / κ² (the N/κ² claim of PLAN.md §12.3).
 
 The per-condition values are written to ``mhalf_….npz`` beside the figures.
+
+The (N, κ, readout) conditions are independent, so they run in a
+``ProcessPoolExecutor`` of ``--workers`` processes (default: the number
+of physical cores; 1 runs everything in this process), each pinned to
+one XLA thread as ``mup.driver`` does for the sweep.  Largest N first,
+so the long conditions do not trail at the end.
 """
 import argparse
 import math
+import multiprocessing as mp
 import os
+import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import jax
 import jax.numpy as jnp
@@ -39,6 +48,7 @@ import _path  # noqa: F401
 from mup import plotting as P
 from mup.config import Config, READOUT_ORDER, is_gated, make_runs
 from mup.observe import age_schedule
+from mup.driver import PINNED_ENV
 from mup.protocol import batched_init, batched_run_task, feasible, make_params
 from run_stask import _signal_k
 from run_szero import half_life
@@ -80,25 +90,76 @@ def mhalf_batch(batch: list) -> np.ndarray:
     return np.array([half_life(S[:, j]) for j in range(len(batch))])
 
 
-def collect(runs: list) -> dict:
-    """``{(N, kappa_label, readout): (n_seeds,) m½ array}`` for every condition of ``runs``."""
-    out = {}
+def physical_cores() -> int:
+    """Physical (not logical) core count: psutil, else ``sysctl`` on macOS, else ``os.cpu_count()``."""
+    try:
+        import psutil
+        n = psutil.cpu_count(logical=False)
+        if n:
+            return int(n)
+    except ImportError:
+        pass
+    if sys.platform == "darwin":
+        try:
+            return int(subprocess.check_output(["sysctl", "-n", "hw.physicalcpu"]).decode().strip())
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            pass
+    return os.cpu_count() or 1
+
+
+def _job(key: tuple, batch: list) -> tuple:
+    """One condition in a worker process: ``(key, m½ per seed)``; ``None`` for the array if every seed is infeasible."""
+    ok = feasible(batch)
+    batch = [r for r, f in zip(batch, ok) if f]
+    if not batch:
+        return key, None
+    return key, mhalf_batch(batch)
+
+
+def _report(key, mh, T):
+    if mh is None:
+        print(f"  N={key[0]} κ={key[1]} {key[2]}: every seed infeasible, skipped", flush=True)
+        return
+    n_ok = int(np.isfinite(mh).sum())
+    se = np.nanstd(mh, ddof=1) / math.sqrt(n_ok) if n_ok > 1 else 0.0
+    print(f"  N={key[0]:4d} κ={key[1]:5s} {key[2]:15s} T={T:5d}  m½ = {np.nanmean(mh):7.2f} ± {se:5.2f}"
+          f"  censored {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
+
+
+def collect(runs: list, workers: int = 1) -> dict:
+    """``{(N, kappa_label, readout): (n_seeds,) m½ array}`` for every condition of ``runs``.
+
+    Parameters
+    ----------
+    runs : list of config.Run
+    workers : int
+        Processes in the pool; 1 runs the conditions here, in order.  Each
+        worker is pinned to one XLA thread (``driver.PINNED_ENV``), so
+        ``workers`` should not exceed the physical core count.
+    """
     groups = {}
     for r in runs:
         groups.setdefault((r.N, r.kappa_label, r.readout), []).append(r)
-    for key in sorted(groups, key=lambda k: (k[0], READOUT_ORDER.index(k[2]), k[1])):
-        batch = groups[key]
-        ok = feasible(batch)
-        batch = [r for r, f in zip(batch, ok) if f]
-        if not batch:
-            print(f"  N={key[0]} κ={key[1]} {key[2]}: every seed infeasible, skipped", flush=True)
-            continue
-        mh = mhalf_batch(batch)
-        out[key] = mh
-        T = batch[0].T_burn + batch[0].T_meas
-        print(f"  N={key[0]:4d} κ={key[1]:5s} {key[2]:15s} T={T:5d}  m½ = {np.nanmean(mh):7.2f} ± "
-              f"{np.nanstd(mh, ddof=1) / math.sqrt(np.isfinite(mh).sum()) if np.isfinite(mh).sum() > 1 else 0:5.2f}"
-              f"  censored {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
+    T_of = {k: b[0].T_burn + b[0].T_meas for k, b in groups.items()}
+    order = sorted(groups, key=lambda k: (-k[0], READOUT_ORDER.index(k[2]), k[1]))     # largest N first
+    out = {}
+    if workers <= 1:
+        for key in order:
+            key, mh = _job(key, groups[key])
+            _report(key, mh, T_of[key])
+            if mh is not None:
+                out[key] = mh
+        return out
+    # spawn (never fork: the parent has JAX initialised) with single-threaded XLA in every child
+    os.environ.update(PINNED_ENV)
+    ctx = mp.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+        futs = {ex.submit(_job, key, groups[key]): key for key in order}
+        for fut in as_completed(futs):
+            key, mh = fut.result()
+            _report(key, mh, T_of[key])
+            if mh is not None:
+                out[key] = mh
     return out
 
 
@@ -190,6 +251,8 @@ def main(argv=None):
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--theory", choices=["nln2", "nk2"], default="nln2")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="processes in the pool, one condition each (default: physical cores; 1: in-process)")
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "Nscaling"))
     args = ap.parse_args(argv)
 
@@ -200,8 +263,10 @@ def main(argv=None):
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
     run0 = runs[0]
-    print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds}", flush=True)
-    res = collect(runs)
+    workers = args.workers or physical_cores()
+    print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds} "
+          f"workers={workers}", flush=True)
+    res = collect(runs, workers)
 
     klabels = [P.fmt(k) for k in args.kappa]
     fdir = os.path.join(args.out, "figures")

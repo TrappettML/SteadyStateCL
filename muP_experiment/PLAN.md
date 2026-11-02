@@ -1404,6 +1404,10 @@ survives at half alignment or better. A seed that never crosses in T
 tasks is censored and dropped (counted in the caption). Default grid:
 N ∈ {5, 10, 20, 50, 100}, κ ∈ {1, 2, 4}, δ₀ = 0, λ = 4, population
 solver, 4 seeds, every readout; the probe buffer is sized 2T + 1.
+The 55 conditions are independent and run in a `ProcessPoolExecutor`
+(`--workers`, default the physical core count; spawn context, each
+child pinned to one XLA thread with `driver.PINNED_ENV`, largest N
+first), so on the Xeon the wall time is that of the slowest condition.
 
 - **Figure 1** (`results/Nscaling/figures/mhalf_vs_N_k1_d00_lam4.png`):
   x = N (log, ticks at the grid), y = m½ in tasks (log), one trace per
