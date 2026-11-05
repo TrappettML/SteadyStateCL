@@ -32,6 +32,7 @@ import warnings
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
@@ -41,6 +42,8 @@ import _path  # noqa: F401
 from mup import plotting as P
 from mup import npmodel
 from mup.config import Config, READOUT_ORDER, is_gated, make_runs
+
+_T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 #: Recorded per task: (key, y-axis label)
 QUANT = (("Q_all", r"mean $Q_{ii} = |W_i|^2/D$"), ("a2_all", r"mean $a_i^2$"), ("u2", r"$|u_t|^2/D$"))
@@ -54,16 +57,15 @@ def norms_run(run) -> dict:
     rng, W, a = npmodel.init_run(run)
     if not np.isfinite(a).all():
         return out                                            # protocol.feasible: δ₀ ≤ −min_i Q0_i
-    for t, W, a, g, w, fcum in npmodel.tasks(run, rng, W, a, T):
-        Q = npmodel.Q_diag(W)
+    for t, W, a, g, w, fcum, Q, u in npmodel.tasks(run, rng, W, a, T):
+        # Q and u come tracked from the active block: nothing here reads W (PLAN: SCALING_N10k.md step A)
         a2 = a * a
         n_act = g.sum()
         out["Q_all"][t] = Q.mean()
         out["a2_all"][t] = a2.mean()
         out["Q_act"][t] = (g * Q).sum() / n_act if n_act > 0 else np.nan
         out["a2_act"][t] = (g * a2).sum() / n_act if n_act > 0 else np.nan
-        u = (g * a) @ W / float(run.pN)                       # effective weight of the task just trained
-        out["u2"][t] = (u @ u) / W.shape[1]
+        out["u2"][t] = (u @ u) / W.shape[1]                   # effective weight of the task just trained
     return out
 
 
@@ -258,4 +260,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    _dt = time.perf_counter() - _T0
+    print(f"run_weight_norms: total {_dt:.1f} s ({_dt / 60:.2f} min) from after the imports to the end", flush=True)
+    sys.exit(_rc)

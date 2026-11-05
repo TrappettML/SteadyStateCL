@@ -13,11 +13,14 @@ every batch.
 import argparse
 import os
 import sys
+import time
 
 import _path  # noqa: F401
 
 from mup import io
 from mup.config import Config
+
+_T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 
 def main(argv=None):
@@ -123,4 +126,7 @@ def run_batch(out, i, batch, log_every, update_manifest=True):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    _dt = time.perf_counter() - _T0
+    print(f"run_sweep: total {_dt:.1f} s ({_dt / 60:.2f} min) from after the imports to the end", flush=True)
+    sys.exit(_rc)

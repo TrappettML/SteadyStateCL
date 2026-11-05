@@ -40,6 +40,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
@@ -49,6 +50,8 @@ import _path  # noqa: F401
 from mup import plotting as P
 from mup import npmodel
 from mup.config import Config, READOUT_ORDER, is_gated, make_runs
+
+_T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 GATED = tuple(ro for ro in READOUT_ORDER if is_gated(ro))
 
@@ -88,7 +91,7 @@ def mhalf_run(run) -> float:
     if not np.isfinite(a).all():
         return float("nan")                                   # protocol.feasible
     S = np.empty(T + 1)
-    for t, W, a, g, w, fcum in npmodel.tasks(run, rng, W, a, 2 * T + 1):
+    for t, W, a, g, w, fcum, _Q, _u in npmodel.tasks(run, rng, W, a, 2 * T + 1):
         if t < T:
             continue
         if t == T:
@@ -289,4 +292,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    _dt = time.perf_counter() - _T0
+    print(f"run_Nscaling: total {_dt:.1f} s ({_dt / 60:.2f} min) from after the imports to the end", flush=True)
+    sys.exit(_rc)

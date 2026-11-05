@@ -20,6 +20,7 @@ next to the figure as ``stask_….npz``.
 import argparse
 import os
 import sys
+import time
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +33,8 @@ from mup.config import Config, READOUT_ORDER, make_runs
 from mup.observe import age_schedule
 from mup.protocol import batched_init, batched_run_task, feasible, make_params
 from run_szero import half_life
+
+_T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 
 @jax.jit
@@ -179,4 +182,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    _dt = time.perf_counter() - _T0
+    print(f"run_stask: total {_dt:.1f} s ({_dt / 60:.2f} min) from after the imports to the end", flush=True)
+    sys.exit(_rc)

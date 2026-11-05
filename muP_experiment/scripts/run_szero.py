@@ -20,6 +20,7 @@ per-task arrays are written next to the figure as ``szero_….npz``.
 import argparse
 import os
 import sys
+import time
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +32,8 @@ from mup import plotting as P
 from mup.config import Config, READOUT_ORDER, make_runs
 from mup.observe import age_schedule
 from mup.protocol import batched_run_task, feasible, init_batch
+
+_T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 
 @jax.jit
@@ -185,4 +188,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    _dt = time.perf_counter() - _T0
+    print(f"run_szero: total {_dt:.1f} s ({_dt / 60:.2f} min) from after the imports to the end", flush=True)
+    sys.exit(_rc)

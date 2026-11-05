@@ -18,6 +18,7 @@ written next to the figure as ``gauge_comp_….npz``.
 import argparse
 import os
 import sys
+import time
 
 import jax
 import jax.numpy as jnp
@@ -29,6 +30,8 @@ from mup import model
 from mup import plotting as P
 from mup.config import Config, READOUT_ORDER, make_runs
 from mup.protocol import _step_fn, make_params
+
+_T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 #: the two rows: (do_proj value, row title)
 ROWS = ((0.0, "no gauge projection"), (1.0, "gauge projection after every step"))
@@ -177,4 +180,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    _dt = time.perf_counter() - _T0
+    print(f"run_gauge_comp: total {_dt:.1f} s ({_dt / 60:.2f} min) from after the imports to the end", flush=True)
+    sys.exit(_rc)
