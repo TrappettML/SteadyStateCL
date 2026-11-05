@@ -7,14 +7,15 @@ For every (N, κ, readout, seed) the network trains the Stage-1 stream of
 T = T_burn + T_meas tasks (14N under ``configs/stage1.yaml``) and, after
 every task, records the hidden-layer norm mean_i Q_ii = mean_i |W_i|²/D
 (= tr(WWᵀ)/(N D)) and the output-layer norm mean_i a_i², both over all
-N units (``_all``) and over the task's active units (``_act``); for task
-heads ``a`` is the head of the task just trained.  Figures in
-``results/weight_norms/figures/``:
+N units (``_all``) and over the task's active units (``_act``), and the
+effective weight norm |u_t|²/D of the task just trained, u_t = (g ⊙ a) W / pN
+(the gate g of that task; for task heads ``a`` is its head, as in
+``run_Nscaling.mhalf_run``).  Figures in ``results/weight_norms/figures/``:
 
-``norms_vs_task_k{κ}_…``   rows = (mean Q_ii, mean a_i²), columns = N,
+``norms_vs_task_k{κ}_…``   rows = (mean Q_ii, mean a_i², |u_t|²/D), columns = N,
     traces = readouts at the first κ listed (ungated readouts have no κ),
     x = task; seed mean with a ±1 s.e. band, burn-in shaded.
-``norms_vs_N_…``           rows = the same two quantities, columns = κ,
+``norms_vs_N_…``           rows = the same three quantities, columns = κ,
     x = N (log), y = the steady-state value (mean over the measurement
     window t ≥ T_burn, then seed mean ± 1 s.e. bars), traces = readouts;
     the ungated readouts repeat in every column.
@@ -42,8 +43,8 @@ from mup import npmodel
 from mup.config import Config, READOUT_ORDER, is_gated, make_runs
 
 #: Recorded per task: (key, y-axis label)
-QUANT = (("Q_all", r"mean $Q_{ii} = |W_i|^2/D$"), ("a2_all", r"mean $a_i^2$"))
-ALL_KEYS = ("Q_all", "Q_act", "a2_all", "a2_act")
+QUANT = (("Q_all", r"mean $Q_{ii} = |W_i|^2/D$"), ("a2_all", r"mean $a_i^2$"), ("u2", r"$|u_t|^2/D$"))
+ALL_KEYS = ("Q_all", "Q_act", "a2_all", "a2_act", "u2")
 
 
 def norms_run(run) -> dict:
@@ -61,6 +62,8 @@ def norms_run(run) -> dict:
         out["a2_all"][t] = a2.mean()
         out["Q_act"][t] = (g * Q).sum() / n_act if n_act > 0 else np.nan
         out["a2_act"][t] = (g * a2).sum() / n_act if n_act > 0 else np.nan
+        u = (g * a) @ W / float(run.pN)                       # effective weight of the task just trained
+        out["u2"][t] = (u @ u) / W.shape[1]
     return out
 
 
@@ -113,6 +116,7 @@ def collect(runs: list, workers: int = 1) -> dict:
         n_ok = int(np.isfinite(ss["Q_all"]).sum())
         print(f"  N={key[0]:4d} κ={key[1]:5s} {key[2]:15s} T={out[key]['Q_all'].shape[1]:5d}  "
               f"steady mean Q = {np.nanmean(ss['Q_all']):7.3f}  mean a² = {np.nanmean(ss['a2_all']):7.3f}  "
+              f"|u|²/D = {np.nanmean(ss['u2']):7.3f}  "
               f"infeasible {len(b) - n_ok}/{len(b)}", flush=True)
     return out
 
@@ -162,8 +166,9 @@ def fig_vs_task(res: dict, Ns: list, klabel: str, run0, path: str) -> str:
         axes[r, 0].set_ylabel(lab)
     r0 = run0[0]
     P.cell_title(fig, kappa=klabel, d0=r0.delta0, lam=r0.lam, solver=r0.solver, eta=r0.eta)
-    P.caption(fig, f"after each task: mean over all N units of Q_ii = |W_i|²/D (top) and of a_i² (bottom; the head "
-                   f"just trained for task heads); seed mean, band ±1 s.e. over seeds; grey: burn-in, dotted: half of "
+    P.caption(fig, f"after each task: mean over all N units of Q_ii = |W_i|²/D (top) and of a_i² (middle; the head "
+                   f"just trained for task heads), and the effective weight norm |u_t|²/D of the task just trained, "
+                   f"u_t = (g ⊙ a) W / pN (bottom); seed mean, band ±1 s.e. over seeds; grey: burn-in, dotted: half of "
                    f"the measurement window; the ungated readouts have no κ; {n_inf} infeasible seeds dropped.")
     P.fig_legend(fig, readouts)
     return P.save(fig, path, figdata=figdata)
@@ -206,8 +211,9 @@ def fig_vs_N(res: dict, Ns: list, klabels: list, run0, path: str) -> str:
         axes[r, 0].set_ylabel(lab)
     r0 = run0[0]
     P.cell_title(fig, d0=r0.delta0, lam=r0.lam, solver=r0.solver, eta=r0.eta)
-    P.caption(fig, "steady-state norms: mean over the measurement window (t ≥ T_burn) of mean_i Q_ii (top) and "
-                   "mean_i a_i² (bottom), then seed mean with ±1 s.e. bars; the ungated readouts have no κ and "
+    P.caption(fig, "steady-state norms: mean over the measurement window (t ≥ T_burn) of mean_i Q_ii (top), "
+                   "mean_i a_i² (middle) and the effective weight norm |u_t|²/D, u_t = (g ⊙ a) W / pN (bottom), "
+                   "then seed mean with ±1 s.e. bars; the ungated readouts have no κ and "
                    "repeat in every column.")
     P.fig_legend(fig, readouts, marker=True)
     return P.save(fig, path, figdata=figdata)
