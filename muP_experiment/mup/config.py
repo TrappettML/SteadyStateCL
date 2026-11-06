@@ -52,7 +52,8 @@ class Config:
     ----------
     name : results subfolder
     N : widths; D = D_factor·N
-    kappa : gate scales for the gated readouts (floats or "sqrtN")
+    kappa : gate scales for the gated readouts (floats or "sqrtN"), 1 ≤ κ ≤ √N (``kappa_ok``); gated
+        runs at an (N, κ) outside that range are skipped and listed on stdout by ``make_runs``
     readout : readout keys (``READOUTS``)
     delta0 : dimensionless imbalances δ₀ = ηΔ₀ (> −1)
     lam : learning per task λ = Λ ā²
@@ -62,7 +63,7 @@ class Config:
     h_max, pop_contraction, sgd_contraction : step-size rules of §3.6
     D_factor, T_factor, T_per_N, T_min : D = D_factor·N; T_burn = T_meas = max(T_min, round(T_per_N·N)) when
         T_per_N > 0 (a fixed number of measured half-lives, PLAN.md §12.3), else max(T_min, round(T_factor·N/κ_s²))
-    extra : extra gated (N, κ) cells, each ``{N: …, kappa: …}``
+    extra : extra gated (N, κ) cells, each ``{N: …, kappa: …}``; skipped like ``kappa`` outside 1 ≤ κ ≤ √N
     batch_size : max runs per vmap batch
     n_ages_geom, m_max_factor : probe-age schedule (§5)
     trace, trace_points : per-step traces (§12.2), separate configs only
@@ -214,7 +215,7 @@ class Run:
         Every run of the grid draws its own weights, teachers, gates and SGD
         inputs; nothing is shared across seeds or across conditions.  The
         solver, step size and η are left out so that η-halving and the
-        population-vs-SGD validation (scripts/validate.py) compare the same
+        population-vs-SGD validation (old/validate.py) compare the same
         task streams, and so is σ₀ (check 5 compares initial scales on the
         same streams).
         """
@@ -331,6 +332,32 @@ def resolve_kappa(k: Any, N: int) -> tuple[float, str]:
     return float(k), str(k)
 
 
+#: relative slack on the κ ≤ √N bound, so a κ typed as a rounded √N still passes
+KAPPA_RTOL = 1e-4
+
+
+def kappa_ok(kappa: float, N: int) -> bool:
+    """Whether 1 ≤ κ ≤ √N: the gate density κ/√N is at most 1 and the mean active count κ√N at least √N."""
+    return 1.0 - KAPPA_RTOL <= kappa <= math.sqrt(N) * (1.0 + KAPPA_RTOL)
+
+
+def kappa_skip_reason(kappa: float, N: int) -> str:
+    """
+    Why a gated run at (N, κ) is skipped, or "" when 1 ≤ κ ≤ √N.
+
+    Above √N the gate g_i ~ Bernoulli(κ/√N) saturates (every unit active, as
+    ungated) while the readout still divides by pN = κ√N > N, so the run would
+    be an ungated network with its output and step size shrunk by √N/κ, not a
+    gated one.  Below 1 the mean active count κ√N drops under √N and, for
+    κ√N < 1, most tasks draw no active unit at all.
+    """
+    if kappa > math.sqrt(N) * (1.0 + KAPPA_RTOL):
+        return "κ > √N, gate saturated"
+    if kappa < 1.0 - KAPPA_RTOL:
+        return "κ < 1"
+    return ""
+
+
 def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run]:
     """
     Expand the grid of a config into a list of runs.
@@ -343,6 +370,12 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
     gated runs (20N/κ_min² tasks, or 2·T_per_N·N for every run when
     ``T_per_N`` is set); ``kappa_sched`` records κ_s on every run.  The
     gated cells of ``cfg.extra`` are added to the N × κ product.
+
+    Gated runs need 1 ≤ κ ≤ √N (``kappa_skip_reason``).  Those at an (N, κ)
+    of the product or of ``cfg.extra`` outside that range are skipped, never
+    raised on, and one line on stdout lists the skipped cells of the whole
+    grid (not just ``N_filter``), so a κ list can be swept over widths too
+    small for its largest values.  The ungated runs are unaffected.
 
     Parameters
     ----------
@@ -362,14 +395,16 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
     for readout in cfg.readout:
         if readout not in READOUTS:
             raise ValueError(f"unknown readout {readout!r}; known: {list(READOUTS)}")
+    if any(map(is_gated, cfg.readout)):
+        _note_skipped_kappas(cfg)
     runs = []
     extra_N = [int(e["N"]) for e in cfg.extra if int(e["N"]) not in cfg.N]
     for N in list(cfg.N) + sorted(set(extra_N)):
         if N_filter is not None and N not in N_filter:
             continue
         D = cfg.D_factor * N
-        kappas = [resolve_kappa(k, N) for k in cfg.kappa] if N in cfg.N else []
-        kappas += [resolve_kappa(e["kappa"], N) for e in cfg.extra if int(e["N"]) == N]
+        kappas = [kl for kl in (resolve_kappa(k, N) for k in cfg.kappa) if kappa_ok(kl[0], N)] if N in cfg.N else []
+        kappas += [kl for kl in (resolve_kappa(e["kappa"], N) for e in cfg.extra if int(e["N"]) == N) if kappa_ok(kl[0], N)]
         kappa_min = min(k for k, _ in kappas) if kappas else math.sqrt(N)
         for readout in cfg.readout:
             if not is_gated(readout) and N not in cfg.N:
@@ -392,6 +427,27 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
                         trace=bool(cfg.trace), trace_points=int(cfg.trace_points), sigma0=float(sigma0),
                     ))
     return runs
+
+
+def _note_skipped_kappas(cfg: Config) -> list[tuple[int, str, str]]:
+    """
+    Print one line listing the gated (N, κ) cells of the whole grid that ``make_runs`` skips.
+
+    Returns
+    -------
+    list of (N, kappa_label, reason)
+    """
+    cells = [(N, k) for N in cfg.N for k in cfg.kappa] + [(int(e["N"]), e["kappa"]) for e in cfg.extra]
+    skipped = []
+    for N, k in cells:
+        kappa, klabel = resolve_kappa(k, N)
+        why = kappa_skip_reason(kappa, N)
+        if why and (N, klabel, why) not in skipped:
+            skipped.append((N, klabel, why))
+    if skipped:
+        print("note: skipped gated runs outside 1 ≤ κ ≤ √N: "
+              + ", ".join(f"(N={N}, κ={k}: {why})" for N, k, why in sorted(skipped)), flush=True)
+    return skipped
 
 
 def make_batches(runs: Sequence[Run], batch_size: int) -> list[list[Run]]:

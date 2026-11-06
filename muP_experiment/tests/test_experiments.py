@@ -166,7 +166,44 @@ def test_plan_gpu_fills_cards_without_overcutting(monkeypatch):
     pl = pool.plan(_args(gpus=[], split=2), [(_runs(N=10, seeds=2), 20)] * 20)
     assert pl.pieces == [2] * 20
     chains = [(_runs(N=10, seeds=8), 80), (_runs(N=10, seeds=8), 40), (_runs(N=10, seeds=8), 10)]
-    assert pool.plan(_args(gpus=[]), chains).pieces == [4, 2, 1]   # one piece per card × share of the longest chain
+    assert pool.plan(_args(gpus=[]), chains).pieces == [3, 2, 1]   # ceil(cards × share of the total cost)
+    equal = [(_runs(N=10, seeds=8), 80)] * 6                       # six equal groups: none is cut
+    assert pool.plan(_args(gpus=[]), equal).pieces == [1] * 6
+
+
+def test_plan_memory_split_is_a_multiple_of_the_cards(monkeypatch):
+    from mup import driver, pool
+    monkeypatch.setattr(driver, "visible_gpus", lambda: [0, 1, 2, 3])
+    runs = _runs(N=10, seeds=12)
+    one = pool.job_bytes(runs[:1], 20, 16, 8.0)
+    # a process's share holds 2.5 runs: pieces of 2 runs, so 6 are needed and 8 (two per card) are made
+    monkeypatch.setattr(driver, "gpu_memory_gb", lambda: one * 2.5 * 3 / driver.GPU_MEM_SHARE / 2 ** 30)
+    pl = pool.plan(_args(gpus=[]), [(runs, 20)])
+    assert pl.per_gpu == 3 and pl.pieces == [8]
+
+
+def test_assign_balances_largest_first():
+    from mup import pool
+    unit_of = pool.assign([8, 7, 6, 5, 4, 3, 2, 1], 4)
+    load = [0] * 4
+    for u, c in zip(unit_of, [8, 7, 6, 5, 4, 3, 2, 1]):
+        load[u] += c
+    assert unit_of[:4] == [0, 1, 2, 3] and max(load) - min(load) <= 1
+    assert pool.assign([], 4) == [] and pool.assign([1.0, 2.0], 1) == [0, 0]
+
+
+def test_group_key_separates_block_sizes_and_job_cost_has_overhead():
+    cfg = Config(N=[100], readout=["gated_shared", "gated_frozen", "learned_shared"], kappa=["1", "4"],
+                 delta0=[0.0], lam=[1.0], seeds=1, T_factor=0.25, T_min=4)
+    runs = make_runs(cfg)
+    keys = {X.group_key(r) for r in runs}
+    assert all(k[-1] == r.block_rows() for r in runs for k in [X.group_key(r)])
+    assert len({X.group_key(r)[-1] for r in runs if r.readout == "gated_shared"}) == 2   # one block per κ
+    ungated = [r for r in runs if r.readout == "learned_shared"]
+    assert X.group_key(ungated[0])[-1] == 100 and len(keys) >= 4
+    r = runs[0]
+    assert X.job_cost([r], 10) > X.run_cost(r, 10) > 0
+    assert X.job_cost([r, r], 10) - X.job_cost([r], 10) == pytest.approx(X.run_cost(r, 10))
 
 
 def test_plan_gpu_respects_memory(monkeypatch):
@@ -206,3 +243,19 @@ def test_progress_lines_reach_the_log_in_process_and_from_workers(tmp_path):
             assert any("task 10/20 (50%)" in ln for ln in prog), lines
         assert sum("done" in ln for ln in lines) == 2
     assert pool._REPORT is None
+
+
+def test_loss_curves_match_stream_trace(small_runs):
+    """The learning curve's end point is the stream's L_end of that task, and its steps are the trace's loss column."""
+    import dataclasses
+    from mup.protocol import TRACE_QUANT, run_stream
+    runs = [dataclasses.replace(r, trace=True, trace_points=1000) for r in small_runs]
+    T = runs[0].T_burn + runs[0].T_meas
+    ref = run_stream(runs, chunk=1)
+    tasks = [0, 1, T // 2 - 1, T // 2, T - 2, T - 1]
+    L = X.loss_curves(small_runs, tasks, T, chunk=3)
+    assert L.shape == (len(runs), len(tasks), runs[0].n_steps + 1)
+    for j, t in enumerate(tasks):
+        np.testing.assert_allclose(L[:, j, -1], ref["L_end"][t], rtol=1e-9, atol=1e-12)
+        np.testing.assert_allclose(L[:, j, 1:], ref["trace"][:, t, :, TRACE_QUANT.index("loss")], rtol=1e-5, atol=1e-7)
+    assert np.all(L[:, :, 0] > L[:, :, -1])                     # every task is learned

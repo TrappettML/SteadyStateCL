@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for p in (ROOT, os.path.join(ROOT, "scripts")):
+for p in (ROOT, os.path.join(ROOT, "scripts"), os.path.join(ROOT, "old")):
     if p not in sys.path:
         sys.path.insert(0, p)
 

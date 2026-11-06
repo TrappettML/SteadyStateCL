@@ -64,6 +64,29 @@ def test_T_per_N_and_extra_cells():
     assert len(make_runs(stage1)) == 2448
 
 
+
+def test_kappa_range(capsys):
+    """Gated runs outside 1 ≤ κ ≤ √N are skipped, never raised on, and listed on stdout (over the whole grid,
+    not just N_filter); κ = √N (typed or rounded) is kept; ungated runs are unaffected."""
+    G = ["gated_shared", "frozen"]
+    runs = make_runs(Config(N=[5, 10, 20], kappa=["1", "4"], readout=G, seeds=1))
+    assert sorted({(r.N, r.kappa_label) for r in runs if r.gated}) == [(5, "1"), (10, "1"), (20, "1"), (20, "4")]
+    assert sorted(r.N for r in runs if not r.gated) == [5, 10, 20]
+    assert all(r.pN <= r.N for r in runs)
+    out = capsys.readouterr().out
+    assert "(N=5, κ=4: κ > √N" in out and "(N=10, κ=4: κ > √N" in out and "N=20" not in out
+    assert {r.N for r in make_runs(Config(N=[5, 20], kappa=["4"], readout=G, seeds=1), N_filter=[5])} == {5}
+    assert "(N=5, κ=4" in capsys.readouterr().out
+    for cfg, n_gated in ((dict(N=[5, 10], kappa=[4.0]), 0), (dict(N=[100], kappa=[0.5, 1.0]), 1),
+                         (dict(N=[100], kappa=[1.0], extra=[{"N": 10, "kappa": 4.0}]), 1)):
+        runs = make_runs(Config(readout=G, seeds=1, **cfg))
+        assert sum(r.gated == 1.0 for r in runs) == n_gated and "skipped" in capsys.readouterr().out
+    runs = make_runs(Config(N=[10], kappa=["sqrtN", 3.1623], readout=["gated_shared"], seeds=1))
+    assert len(runs) == 2 and all(abs(r.pN - 10) < 1e-3 for r in runs) and capsys.readouterr().out == ""
+    assert len(make_runs(Config(N=[10], kappa=[4.0], readout=["frozen"], seeds=1))) == 1
+    assert capsys.readouterr().out == ""
+
+
 def test_age_schedule_and_half_life():
     ages = age_schedule(100, 1.0, 2000)
     assert ages[0] == 0 and ages[-1] == round(4 * math.log(2) * 100) and np.all(np.diff(ages) > 0)

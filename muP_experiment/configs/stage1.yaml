@@ -16,7 +16,7 @@ seeds: 8
 solver: pop
 eta: [1.0]
 h_max: 1.0
-# h ā² ≤ 0.1 (plan).  scripts/validate.py measures an O(h) Euler bias of
+# h ā² ≤ 0.1 (plan).  old/validate.py measures an O(h) Euler bias of
 # ΔS(0) ≈ +0.017 (frozen) / +0.005 (learned) at this value at N=10, λ=1;
 # 0.01 costs 10× the steps (n_steps = 100λ per task) and reduces it 10×.
 pop_contraction: 0.1

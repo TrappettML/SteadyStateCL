@@ -20,6 +20,7 @@ a script recomputes everything it draws.
 | `scripts/run_Nscaling.py` | how the steady-state half-life m½ scales with N and κ, against N ln 2 | `results/Nscaling/` |
 | `scripts/run_weight_norms.py` | are the weight norms bounded, and how do they scale with N and κ | `results/weight_norms/` |
 | `scripts/run_imbalance_comp.py` | how the steady-state norms and the half-life depend on δ₀, across N, κ and readouts | `results/imbalance_results/` |
+| `scripts/run_training_verify.py` | is every task learned: the per-step loss at the start, middle and end of the stream | `results/training_verify/` |
 
 ## Setup
 
@@ -56,6 +57,7 @@ python scripts/run_stask.py --N 100 200 --kappa 1 2 --seeds 8 --T 2800 --gpus   
 python scripts/run_Nscaling.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
 python scripts/run_weight_norms.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
 python scripts/run_imbalance_comp.py --N 5 10 20 50 100 200 --kappa 1 2 4 --delta0 0 1 2 4 --seeds 8 --gpus
+python scripts/run_training_verify.py --seeds 8 --gpus                 # the four default cells
 
 # Xeon, CPU processes (keep --workers moderate: many XLA compiles at once stall the node)
 python scripts/run_Nscaling.py --N 5 10 20 50 100 --kappa 1 2 4 --seeds 8 --workers 16
@@ -236,6 +238,29 @@ Output, under `results/imbalance_results/`:
 Console: per (N, κ, readout, δ₀) the steady means, m½ ± s.e. and the
 censored-or-infeasible count.
 
+### `run_training_verify.py` — the loss of the task being trained
+
+```
+python scripts/run_training_verify.py [--cell N,kappa,delta0 ...] [--seeds 4] [--lam 4] [--gpus]
+```
+
+For every cell (default `100,2,1`, `50,1,0`, `20,1,4`, `200,2,1`) every
+readout × seed trains through the
+Stage-1 stream, and the population loss of the task being trained is
+recorded before its first step and after each step for six tasks: the
+first two, the middle two (T/2 − 1, T/2) and the last two.  The rest of
+the stream trains untraced (`experiments.loss_curves`).
+
+Output, in `results/training_verify/`: `loss_N{N}_k{κ}_d0{δ₀}.png` — three
+panels on a broken x axis (first two | middle two | last two tasks), y =
+loss (log), one trace per readout drawn continuously across the task
+switch (faint dotted line), seed mean ± 1 s.e. band; the loss jumps when a
+new task starts and decays as it is learned.  `loss_….npz` holds the
+curves, `{readout}` (n_seeds, 6, n_steps + 1), with `tasks`.
+
+Console: per readout the loss at the start and end of the first and the
+last traced task.
+
 ## Readouts
 
 | key | gated | learns a | projection | heads | what it is |
@@ -255,7 +280,7 @@ and in the caption.
 
 | path | what |
 |---|---|
-| `scripts/run_*.py` (the five above) | each: build the runs, group them into jobs, run the jobs through `mup.pool`, draw |
+| `scripts/run_*.py` (the scripts above) | each: build the runs, group them into jobs, run the jobs through `mup.pool`, draw |
 | `mup/experiments.py` | the batched kernels and job functions of the scripts: one task without observables, the per-task/per-step observables evaluated inside a `scan`, NaN columns for infeasible runs |
 | `mup/pool.py` | the jobs over GPUs, CPU processes or in-process; `--gpus` planning |
 | `mup/config.py` | `Config` (YAML), `Run`, readout table, task duration, grid → runs |
@@ -266,7 +291,9 @@ and in the caption.
 | `configs/stage1.yaml` | the settings every script starts from |
 | `tests/` | `test_experiments.py` (kernels vs the sweep kernel, the pool, the planner), `test_block.py`, `test_gpu.py`, and the kernel tests |
 
-Other scripts in `scripts/` (the sweep `run_sweep.py`, `analyze.py`,
-`plot_*.py`, `validate.py`, `bench.py`, `run_sigma0.py`, `gpu_check.py`) and
-the modules they use (`observe.py`, `io.py`, `results.py`, `npmodel.py`)
-are not part of the current write-up and are not documented here.
+Old code lives in `old/`: the scripts of the earlier, sweep-based version
+of the experiments (the sweep `run_sweep.py`, `analyze.py`, `plot_*.py`,
+`validate.py`, `bench.py`, `run_sigma0.py`, `gpu_check.py`), run as
+`python old/<script>.py`.  They and the `mup/` modules only they use
+(`results.py`, `npmodel.py`, and most of `observe.py` and `io.py`) are not
+part of the current write-up and are not documented here.

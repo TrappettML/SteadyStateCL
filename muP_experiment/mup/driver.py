@@ -1,6 +1,6 @@
 """Multiprocessing launcher for the Xeon and the GPU node (PLAN.md §0.5, §8).
 
-Launches ``scripts/run_sweep.py --batch-id i`` subprocesses from the sweep
+Launches ``old/run_sweep.py --batch-id i`` subprocesses from the sweep
 manifest with a bounded pool.  Each batch writes its own ``.npz`` so the
 sweep is resumable: rerunning skips finished batches.
 
@@ -53,7 +53,7 @@ GPU_ENV = {
 GPU_MEM_SHARE = 0.9
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUN_SWEEP = os.path.join(os.path.dirname(HERE), "scripts", "run_sweep.py")
+RUN_SWEEP = os.path.join(os.path.dirname(HERE), "old", "run_sweep.py")
 
 
 def visible_gpus() -> list[int]:

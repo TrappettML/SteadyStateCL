@@ -10,8 +10,8 @@ gate g₀ of task 0 and its stored head (task heads) or the current shared
 readout, projected on w₀* (PLAN.md §5 with the probe fixed at k = 0 and
 age m = t).  S₀(0) is the signal just after learning task 0 and the
 decay of S₀(t) from there is the memory of that task; the half-life m½
-is where the seed mean crosses S₀(0)/2 and is given per readout in the caption.  One
-trace per readout of §4 as the seed mean with a ±1 s.e. band over seeds.
+is each seed's own first crossing of S₀(0)/2, averaged over seeds, and is given per readout in the caption.  One
+trace per readout of §4 as the seed mean of each seed's S₀(t)/S₀(0) with a ±1 s.e. band over seeds.
 N = 100, κ = 1, δ₀ = 0 by default; solver, λ and step-size rule come from
 ``configs/stage1.yaml``; the stream is the
 Stage-1 one, T_burn + T_meas tasks (1400 at N = 100), unless ``--tasks``.  The
@@ -79,7 +79,7 @@ def make_jobs(groups_: dict[tuple, list[Run]], T: int, pieces: Sequence[int]) ->
     jobs = []
     for (key, runs), k in zip(groups_.items(), pieces):
         for i, part in enumerate(X.split(runs, k)):
-            jobs.append(((key, i), {"runs": part, "T_pre": 0, "n_follow": T, "k": 0}, X.run_cost(part[0], T) * len(part)))
+            jobs.append(((key, i), {"runs": part, "T_pre": 0, "n_follow": T, "k": 0}, X.job_cost(part, T)))
     return jobs
 
 
@@ -145,16 +145,13 @@ def figure(S0: dict[str, np.ndarray], run0: Run, path: str) -> str:
     mh = {}
     for ro, Y in S0.items():
         T, n = Y.shape
-        t = np.arange(T)
-        m = Y.mean(1)
-        se = Y.std(1, ddof=1) / np.sqrt(n) if n > 1 else np.zeros(T)
-        x = t + 1                                                       # log axis: task 0 is drawn at x = 1
-        s0 = m[0]                                                       # y is S₀(t)/S₀(0): every trace starts at 1
-        P.band(ax, x, (m - se) / s0, (m + se) / s0, P.READOUT_COLOR[ro])
-        P.plot_readout(ax, x, m / s0, ro)
-        mh[ro] = half_life(m)
+        x = np.arange(T) + 1                                            # log axis: task 0 is drawn at x = 1
+        m, se, mh[ro] = seed_signal(Y)                                  # each seed's S₀(t)/S₀(0) and half-life
+        P.band(ax, x, m - se, m + se, P.READOUT_COLOR[ro])
+        P.plot_readout(ax, x, m, ro)
         figdata[f"S0_{ro}"] = Y
-        figdata[f"S0norm_{ro}"] = m / s0
+        figdata[f"S0norm_{ro}"] = m
+        figdata[f"mhalf_{ro}"] = mh[ro]
     figdata["task"] = np.arange(max(Y.shape[0] for Y in S0.values()))
     P.ref_line(ax, 0.0)
     P.ref_line(ax, 0.5)
@@ -164,13 +161,11 @@ def figure(S0: dict[str, np.ndarray], run0: Run, path: str) -> str:
     n_seeds = max(Y.shape[1] for Y in S0.values())
     P.cell_title(fig, kappa=run0.kappa_label, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta,
                  extra=f"N = {run0.N}")
-    def _m(ro):
-        v = mh[ro]
-        return "> T" if not np.isfinite(v) else f"{v:.1f}"
-    mtxt = ", ".join(f"{P.READOUT_LABEL[ro]} {_m(ro)}" for ro in S0)
-    P.caption(fig, f"line: seed mean of the first teacher's signal after task t divided by its value after task 0, "
-                   f"drawn at t + 1 so task 0 is at 1 ({n_seeds} seeds); band: ±1 s.e. over seeds; half-life m½ "
-                   f"(tasks) where the mean crosses ½ (grey line): {mtxt}.")
+    T_all = max(Y.shape[0] for Y in S0.values())
+    mtxt = ", ".join(f"{P.READOUT_LABEL[ro]} {mhalf_text(mh[ro], T_all)}" for ro in S0)
+    P.caption(fig, f"line: seed mean of each seed's first-teacher signal after task t divided by its own value after "
+                   f"task 0, drawn at t + 1 so task 0 is at 1 ({n_seeds} seeds); band: ±1 s.e. over seeds; half-life "
+                   f"m½ (tasks): each seed's first crossing of ½ (grey line), mean ± s.e. over seeds: {mtxt}.")
     P.fig_legend(fig, list(S0))
     return P.save(fig, path, figdata=figdata)
 
@@ -185,6 +180,35 @@ def half_life(m: np.ndarray) -> float:
     if j == 0:
         return 0.0
     return j - 1 + (m[j - 1] - half) / (m[j - 1] - m[j])
+
+
+def seed_signal(Y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-seed statistics of a (T, n_seeds) signal.
+
+    Returns
+    -------
+    (m, se, mh)
+        Seed mean and s.e. over seeds of each seed's own Y(t)/Y(0), and each
+        seed's own half-life (``half_life`` of its column; NaN when it never
+        reaches half).
+    """
+    T, n = Y.shape
+    with np.errstate(invalid="ignore", divide="ignore"):
+        Yn = Y / Y[:1]
+    m = Yn.mean(1)
+    se = Yn.std(1, ddof=1) / np.sqrt(n) if n > 1 else np.zeros(T)
+    return m, se, np.array([half_life(Y[:, j]) for j in range(n)])
+
+
+def mhalf_text(mh: np.ndarray, T: int) -> str:
+    """Seed mean ± s.e. of the per-seed half-lives over the seeds that reach half, and how many do not."""
+    fin = mh[np.isfinite(mh)]
+    if len(fin) == 0:
+        return f"> {T}"
+    txt = f"{fin.mean():.1f}" + (f" ± {fin.std(ddof=1) / np.sqrt(len(fin)):.1f}" if len(fin) > 1 else "")
+    if len(fin) < len(mh):
+        txt += f" ({len(mh) - len(fin)}/{len(mh)} seeds never reach ½, left out)"
+    return txt
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -209,6 +233,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             "seeds": args.seeds, "extra": (), "trace": False}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
+    if not runs:
+        print("no runs left after skipping κ outside [1, √N]; nothing to do", flush=True)
+        return 0
     cells_ = cells(runs)
     T_of = {key: args.tasks or (cell[0].T_burn + cell[0].T_meas) for key, cell in cells_.items()}
     if len(set(T_of.values())) != 1:
@@ -225,7 +252,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"cell N={N} κ={k} δ₀={d0} λ={lam}:")
         for ro, Y in S0.items():
             m = Y.mean(1)
-            print(f"  {ro:15s} S₀(0) = {m[0]:.4f}  m½ = {half_life(m):.1f}  S₀(T−1) = {m[-1]:+.4f}", flush=True)
+            print(f"  {ro:15s} S₀(0) = {m[0]:.4f}  m½ = {mhalf_text(seed_signal(Y)[2], Y.shape[0])}  "
+                  f"S₀(T−1) = {m[-1]:+.4f}", flush=True)
         if not S0:
             continue
         cell = cells_[(N, k, d0, lam)]

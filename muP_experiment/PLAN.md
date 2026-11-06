@@ -1,13 +1,15 @@
 # PLAN.md — maintenance notes for the μP continual-learning experiments
 
 This file is for whoever (human or AI) changes the code.  It records what
-the five experiment scripts compute, which library code they stand on, the
+the experiment scripts compute, which library code they stand on, the
 invariants that code relies on, and what has been measured.  How to run
 them is in `README.md`; the mathematics is in
 `writing/Derivations/muP_experiment/muP_experiment.tex` (the "write-up";
 equation labels below refer to it).
 
-**Scope (2026-11-06).** The write-up is being revised around five scripts:
+**Scope (2026-11-06).** The write-up is being revised around these scripts,
+run in this order, every parameter written out, by `run_all.sh`
+(`./run_all.sh --dry-run` lists the commands):
 
 | script | figure | here |
 |---|---|---|
@@ -16,13 +18,23 @@ equation labels below refer to it).
 | `scripts/run_stask.py` | S_T(τ): a steady-state teacher's signal against age | §6.3 |
 | `scripts/run_Nscaling.py` | m½ against N and κ, simulation vs N ln 2 | §6.4 |
 | `scripts/run_weight_norms.py` | weight norms against task and against N | §6.5 |
+| `scripts/run_imbalance_comp.py` | weight norms and m½ across δ₀ | §6.6 |
+| `scripts/run_training_verify.py` | per-step loss at the start, middle and end of the stream | §6.7 |
 
-Everything else in `scripts/` (`run_sweep.py`, `analyze.py`, `plot_norms.py`,
-`plot_check2.py`, `validate.py`, `bench.py`, `run_sigma0.py`, `gpu_check.py`)
-and the modules only they use (`mup/observe.py`, `mup/io.py`,
-`mup/results.py`, `mup/npmodel.py`) stay in the repository and keep passing
-their tests, but are outside this document.  Do not extend them for the
-write-up; add to the five scripts or to `mup/experiments.py`.
+**Old code lives in `old/`.** The scripts of the earlier, sweep-based
+version of the experiments (`run_sweep.py`, `analyze.py`, `plot_norms.py`,
+`plot_check2.py`, `validate.py`, `bench.py`, `run_sigma0.py`,
+`gpu_check.py` with its helper `conftest_free.py`) were moved there on
+2026-11-06; they run as `python old/<script>.py` (`old/_path.py` puts the
+package root on `sys.path`, as `scripts/_path.py` does).  The `mup/`
+modules only they use (`mup/results.py`, `mup/npmodel.py`) and the
+sweep-only parts of `mup/observe.py`, `mup/io.py` and `mup/driver.py`
+stay in the package, because `experiments.py` and `pool.py` import the
+rest of those three modules.  The old code keeps passing its tests
+(`tests/test_plotting.py` imports the old scripts from `old/`;
+`driver.launch` starts `old/run_sweep.py`) but is outside this document.
+Do not extend it for the write-up; add to the scripts in `scripts/` or to
+`mup/experiments.py`.
 
 ## 1. Stack and machines
 
@@ -49,7 +61,8 @@ argument parsing and the pool's parent process stay JAX-free.
 
 ```
 scripts/_path.py            puts the package root on sys.path (import _path first)
-scripts/run_*.py            the five scripts (§6)
+scripts/run_*.py            the experiment scripts (§6)
+run_all.sh                  runs them in the order of the table above, every parameter explicit
 mup/config.py               Config (YAML), Run, READOUTS, task_duration, make_runs
 mup/model.py                Params, State, steps, projection, init, train_block
 mup/protocol.py             run_task (the reference kernel), make_params, batched_init,
@@ -330,13 +343,18 @@ a warning as a bug in the figure.
   (several `--N` without `--tasks` is a `SystemExit`).  Task 0 is the
   probed task, so nothing is burn-in.
 - `by_readout` stacks a cell's columns per readout as `(T, n_seeds)`,
-  dropping seeds with any NaN; `half_life(m)`: first index where the seed
-  mean `m ≤ m[0]/2`, linearly interpolated, NaN if never.
+  dropping seeds with any NaN.  `seed_signal(Y)`: each seed's Y/Y[0]
+  (seed mean ± s.e. plotted) and each seed's `half_life` (first index
+  where that seed's curve ≤ its own value at 0 / 2, linearly
+  interpolated, NaN if never); `mhalf_text` gives the mean ± s.e. over
+  the seeds that reach ½ and the count of those that do not.
 - Figure per cell `szero_N{N}_k{κ}_d0{δ₀}_lam{λ}`, one panel 5.2 × 2.6 in:
-  x = t + 1 (log), y = m/m[0] with the ±1 s.e. band, `ref_line` at 0 and
-  ½, m½ per readout in the caption.  `.npz`: `task`, `S0_{readout}`
-  (T, n_seeds), `S0norm_{readout}`.
-- Result (2026-11-02, N = 100, κ = 1, δ₀ = 0, λ = 4, 4 seeds): S₀(0) ≈ 1
+  x = t + 1 (log), y = the seed mean of each seed's S₀(t)/S₀(0) with the
+  ±1 s.e. band, `ref_line` at 0 and ½, m½ per readout in the caption.
+  `.npz`: `task`, `S0_{readout}` (T, n_seeds), `S0norm_{readout}`,
+  `mhalf_{readout}` (per seed).
+- Result (2026-11-02, N = 100, κ = 1, δ₀ = 0, λ = 4, 4 seeds; m½ then
+  read off the seed-mean curve, not yet per seed): S₀(0) ≈ 1
   for every readout.  The gated readouts decay roughly exponentially with
   m½ = 86 (gated shared), 85 (gated frozen), 68 (task heads) tasks, i.e.
   0.7–0.9 N against N ln 2 ≈ 69.  The ungated readouts drop to ≈ 0 after
@@ -347,16 +365,17 @@ a warning as a bug in the figure.
 ### 6.3 `run_stask.py` — S_T(τ) against age at steady state
 
 - Reuses `run_szero`'s `cells`, `groups`, `columns`, `per_cell`,
-  `by_readout`, `half_life` (imported from it; `_path` makes `scripts/`
-  importable).
+  `by_readout`, `seed_signal`, `mhalf_text` (imported from it; `_path`
+  makes `scripts/` importable).
 - Job: `signal_after_tasks(runs, T_pre=T, n_follow=tau + 1, k=T)` with
   `T` = `--T` or `T_burn + T_meas` (same for every cell, else
   `SystemExit`), `tau` = `--tau` (1000).  The head buffer is `T + τ + 1`
   slots.
 - Figure per cell `stask_N{N}_k{κ}_d0{δ₀}_lam{λ}` as 6.2 with x = τ + 1,
   `T` in the title.  `.npz`: `tau`, `ST_{readout}` (τ + 1, n_seeds),
-  `STnorm_{readout}`.
-- Result (2026-11-02, same cell as 6.2, T = 1400, τ ≤ 1000): S_T(0) ≈ 1;
+  `STnorm_{readout}`, `mhalf_{readout}` (per seed).
+- Result (2026-11-02, same cell as 6.2, T = 1400, τ ≤ 1000; m½ of the
+  seed-mean curve, before the per-seed rule): S_T(0) ≈ 1;
   steady-state half-lives gated shared 75, gated frozen 78, task heads 71
   tasks, within a few tasks of N ln 2 ≈ 69 and closer to it than the
   fresh-start values — once the norms have settled the three gated
@@ -438,6 +457,25 @@ a warning as a bug in the figure.
   (`plot_readout`); dotted `N ln 2` in every panel.
 - `imbalance_comp.npz`: `N{N}_k{κ}_{readout}_d0{δ₀}_{key}` and `_mhalf`.
 
+### 6.7 `run_training_verify.py` — the per-step loss at start, middle and end
+
+- Cells `(N, κ, δ₀)` from `--cell N,kappa,delta0` (defaults `100,2,1`,
+  `50,1,0`, `20,1,4`, `200,2,1`);
+  every readout × seed of a cell under the config's stream rules;
+  `groups` by `group_key + (T,)`, `pool.plan` over them.
+- `experiments.loss_curves(runs, tasks, T)`: trains the stream with
+  `train_kernel` between the listed tasks and runs `loss_kernel`
+  (`loss_task`: `train_block(traced=True, closed=False)`, the loss column
+  of the trace rows, preceded by the loss before the first step) on each
+  listed task → (B, len(tasks), n_steps + 1).  `windows(T)` = `[0, 1,
+  T/2 − 1, T/2, T − 2, T − 1]`.  `tests/test_experiments.py` pins the
+  curve to the stream's `trace` and `L_end`.
+- Figure `loss_N{N}_k{κ}_d0{δ₀}`: `grid(1, 3, sharey="row")`, each panel
+  two tasks on x = step within task (ticks 0, n, 0, n), the switch a dotted
+  `axvline` at n + ½, y log with ≤ 6 ticks, inner spines removed and break
+  marks between the panels; `plot_readout` + `band` (seed mean ± s.e.);
+  `.npz`: `{readout}` (n_seeds, 6, n_steps + 1), `tasks`, `step`.
+
 ## 7. Plotting conventions used (`mup/plotting.py`)
 
 `apply_style()` first in every figure function.  Panels from
@@ -474,6 +512,19 @@ regenerate.
 
 ## 9. Invariants and gotchas when changing things
 
+- **Per seed, then the mean.** Every run draws its own weights,
+  teachers, gates, heads and SGD inputs from `Run.rng_seed()`, so no two
+  seeds share a stream.  Every statistic a figure or table reports is
+  computed on each seed's own data and only then averaged over seeds
+  (± s.e.m. over seeds): half-lives from each seed's S(m), normalisation
+  by each seed's own S(0) or level, CVs from each seed's moments, ratios
+  per seed.  Never compute a nonlinear statistic on a seed-pooled or
+  seed-averaged curve.  Helpers: `results.seed_curves`, `seed_mhalf`,
+  `mhalf_stats`, `seed_mean`, `seed_sem`; `experiments.seed_curves` for
+  `stream_batch` results.  A condition's m½ is NaN and `censored` when
+  any seed's curve never reaches ½ (`m_half_lower`, `n_censored` keep
+  the rest); the cell scripts' captions give the mean over the seeds
+  that cross with the count of those that do not.
 - **A job is homogeneous.** Runs in one job share `(N, D, solver,
   n_steps, closed)`; `_batch` asserts it.  Anything that varies per run
   must be a `Params` field (a 0-d float), not a Python branch.
@@ -527,3 +578,13 @@ regenerate.
   with lazy row scale and tracked Q (`train_block`) and the frozen
   population closed form; the cell scripts train each ungated run once.
   Documentation narrowed to the five scripts (this file).
+- 2026-11-06: per-seed statistics everywhere.  Half-lives, S/S(0), CVs,
+  half-window ratios and the M8 level had been computed on seed-pooled
+  curves in `results`, `analyze`, `plot_check2`, `plot_norms`,
+  `run_szero`, `run_stask`, `run_sigma0` and `validate`; now each seed's
+  own value is averaged (§9).  `experiments.pooled_curves` became
+  `seed_curves`, which also keeps every seed of a condition split over
+  two batches (the old dict update kept only the last batch's seeds).
+- 2026-11-06: the sweep-based scripts moved to `old/` (Scope above);
+  `run_all.sh` runs the experiment scripts in the note's order with every
+  parameter written out.

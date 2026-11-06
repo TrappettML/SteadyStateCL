@@ -87,7 +87,7 @@ def make_jobs(groups_: dict[tuple, list[Run]], pieces: Sequence[int]) -> list[tu
         T = key[-1]
         for i, part in enumerate(X.split(runs, k)):
             jobs.append(((key, i), {"runs": part, "T_pre": T, "n_follow": T + 1, "k": T},
-                         X.run_cost(part[0], 2 * T + 1) * len(part)))
+                         X.job_cost(part, 2 * T + 1)))
     return jobs
 
 
@@ -242,6 +242,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             "seeds": args.seeds, "extra": (), "trace": False}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
+    if not runs:
+        print("no runs left after skipping κ outside [1, √N]; nothing to do", flush=True)
+        return 0
     run0 = runs[0]
     plan = pool.plan(args, [(g, 2 * key[-1] + 1) for key, g in groups(runs).items()])
     print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds}  "

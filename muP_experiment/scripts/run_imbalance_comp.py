@@ -76,10 +76,10 @@ def make_jobs(groups_: dict, pieces, kind: str) -> list:
         T = key[-1]
         for i, part in enumerate(X.split(runs, k)):
             if kind == "norms":
-                jobs.append(((key, i), {"runs": part, "T": T}, X.run_cost(part[0], T) * len(part)))
+                jobs.append(((key, i), {"runs": part, "T": T}, X.job_cost(part, T)))
             else:
                 jobs.append(((key, i), {"runs": part, "T_pre": T, "n_follow": T + 1, "k": T},
-                             X.run_cost(part[0], 2 * T + 1) * len(part)))
+                             X.job_cost(part, 2 * T + 1)))
     return jobs
 
 
@@ -261,6 +261,9 @@ def main(argv=None) -> int:
             "seeds": args.seeds, "extra": (), "trace": False}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
+    if not runs:
+        print("no runs left after skipping κ outside [1, √N]; nothing to do", flush=True)
+        return 0
     run0 = runs[0]
     g = groups(runs)
     plan_norms = pool.plan(args, [(v, k[-1]) for k, v in g.items()], out_per_task=8 * len(ALL_KEYS))

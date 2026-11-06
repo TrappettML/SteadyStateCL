@@ -82,7 +82,7 @@ def make_jobs(groups_: dict[tuple, list[tuple[Run, float]]], n_tasks: int) -> li
     jobs = []
     for key, pairs in groups_.items():
         runs, do_proj = [r for r, _ in pairs], [d for _, d in pairs]
-        jobs.append((key, {"runs": runs, "do_proj": do_proj, "n_tasks": n_tasks}, X.run_cost(runs[0], n_tasks) * len(runs)))
+        jobs.append((key, {"runs": runs, "do_proj": do_proj, "n_tasks": n_tasks}, X.job_cost(runs, n_tasks)))
     return jobs
 
 
@@ -193,6 +193,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "lam": [args.lam if args.lam is not None else cfg.lam[0]], "seeds": args.seeds,
                     "extra": (), "trace": False})
     runs = make_runs(cfg)
+    if not runs:
+        print("no runs left after skipping κ outside [1, √N]; nothing to do", flush=True)
+        return 0
     run0 = runs[0]
     n_tasks = args.tasks or (run0.T_burn + run0.T_meas)
     cells_ = cells(runs)

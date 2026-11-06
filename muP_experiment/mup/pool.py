@@ -13,11 +13,15 @@ CPU (``gpus=None, workers > 1``)
 in-process (``gpus=None, workers <= 1``)
     The jobs run here, in order.
 
-The largest jobs, one per worker slot, are pinned to the slots in order —
-slot ``s`` sits on card ``s % len(gpus)``, so the pieces of the longest
-group land on different cards; the rest are claimed dynamically, largest
-first (``cost``), through a directory of claim files, so a card that
-finishes early takes the next job.  Arguments and results travel as pickles;
+Every job is assigned to a card before the workers start: largest first,
+each to the card with the least load so far (``assign``: the usual
+longest-first greedy, which keeps the cards' loads within one job of each
+other), so where the big jobs land no longer depends on which worker wins
+the race.  Worker slot ``s`` serves card ``s % len(gpus)`` and claims its
+card's jobs largest first through a directory of claim files; a worker
+whose card has nothing left takes another card's remaining jobs (largest
+first), so a card that finishes early still helps.  On the CPU every
+slot is its own "card".  Arguments and results travel as pickles;
 a job function is named ``"module:function"`` and must be importable in the
 worker (``mup.experiments`` holds the ones of the scripts).  Workers are
 ``python -m mup.pool <dir>``.
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import math
 import os
 import pickle
 import subprocess
@@ -82,6 +87,30 @@ def n_slots(gpus: Optional[list[int]], per_gpu: int = 1, workers: int = 0) -> in
     if gpus:
         return len(gpus) * max(per_gpu, 1)
     return max(workers, 1)
+
+
+def assign(costs: Sequence[float], units: int) -> list[int]:
+    """Unit (card, or CPU slot) of every job: jobs largest first, each to the unit with the least load so far.
+
+    Parameters
+    ----------
+    costs : sequence of float
+        One per job.
+    units : int
+
+    Returns
+    -------
+    list of int
+        ``unit_of[i]`` for job ``i``; ties go to the lowest unit.
+    """
+    units = max(int(units), 1)
+    load = [0.0] * units
+    unit_of = [0] * len(costs)
+    for i in sorted(range(len(costs)), key=lambda i: -float(costs[i])):
+        u = min(range(units), key=lambda u: (load[u], u))
+        unit_of[i] = u
+        load[u] += float(costs[i])
+    return unit_of
 
 
 def run_jobs(func: str, jobs: Sequence[tuple], gpus: Optional[list[int]] = None, per_gpu: int = 1,
@@ -144,11 +173,12 @@ def run_jobs(func: str, jobs: Sequence[tuple], gpus: Optional[list[int]] = None,
         return out
 
     order = sorted(range(len(jobs)), key=lambda i: -float(jobs[i][2]))
-    pinned = {order[s]: s for s in range(min(slots, len(order)))}      # the largest jobs, one per slot
+    units = len(gpus) if gpus else slots
+    unit_of = assign([j[2] for j in jobs], units)                      # card (or CPU slot) of every job
     tmp = keep_dir or tempfile.mkdtemp(prefix="mup_pool_")
     os.makedirs(tmp, exist_ok=True)
     with open(os.path.join(tmp, "spec.pkl"), "wb") as fh:
-        pickle.dump({"func": func, "order": order, "keys": [str(j[0]) for j in jobs], "pinned": pinned}, fh)
+        pickle.dump({"func": func, "order": order, "keys": [str(j[0]) for j in jobs], "unit_of": unit_of}, fh)
     for i, (_, kw, _) in enumerate(jobs):
         with open(os.path.join(tmp, f"job_{i}.pkl"), "wb") as fh:
             pickle.dump(kw, fh)
@@ -164,10 +194,15 @@ def run_jobs(func: str, jobs: Sequence[tuple], gpus: Optional[list[int]] = None,
                                        stdout=logf, stderr=subprocess.STDOUT), logf, where))
     if log:
         log(f"{len(jobs)} jobs on {slots} worker{'s' if slots != 1 else ''} "
-            f"({'GPUs ' + ','.join(map(str, gpus)) if gpus else 'CPU'}): the {len(pinned)} largest pinned "
-            f"{'one per slot' if len(pinned) == slots else 'to slots in order'}, the rest claimed largest first")
-        for i, s in pinned.items():
-            log(f"  {jobs[i][0]} -> {procs[s][2]}")
+            f"({'GPUs ' + ','.join(map(str, gpus)) if gpus else 'CPU'}): each job on the least-loaded "
+            f"{'card' if gpus else 'slot'}, largest first; a {'card' if gpus else 'slot'} that runs out takes "
+            f"the others' remaining jobs")
+        total = sum(float(j[2]) for j in jobs) or 1.0
+        for u in range(units):
+            mine = [i for i in order if unit_of[i] == u]
+            share = sum(float(jobs[i][2]) for i in mine) / total
+            log(f"  {procs[u][2]}: {len(mine)} job{'s' if len(mine) != 1 else ''}, {100 * share:.0f}% of the cost: "
+                + ", ".join(str(jobs[i][0]) for i in mine))
 
     seen = set()
     shown: dict[int, str] = {}
@@ -229,12 +264,13 @@ def _worker(tmp: str) -> int:
         spec = pickle.load(fh)
     where = os.environ.get("MUP_POOL_WHERE", "worker")
     slot = int(os.environ.get("MUP_POOL_SLOT", "-1"))
-    pinned = spec.get("pinned", {})
-    mine = [i for i, s in pinned.items() if s == slot]
-    free = [i for i in spec["order"] if i not in pinned]
-    left = [i for i in spec["order"] if i in pinned and i not in mine]     # another slot's, only if it died
+    unit_of = spec["unit_of"]
+    units = max(unit_of, default=0) + 1
+    unit = slot % units if slot >= 0 else -1
+    mine = [i for i in spec["order"] if unit_of[i] == unit]            # this card's jobs, largest first
+    left = [i for i in spec["order"] if unit_of[i] != unit]            # the others', once this card is done
     f = resolve_func(spec["func"])
-    for i in mine + free + left:
+    for i in mine + left:
         try:
             fd = os.open(os.path.join(tmp, f"claim_{i}"), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
@@ -362,12 +398,14 @@ def plan(args: argparse.Namespace, groups: Sequence[tuple], out_per_task: float 
 
     With ``--gpus`` the cards are the ids given, else ``driver.visible_gpus()``,
     else ``GPU_COUNT``; their memory comes from ``nvidia-smi`` or ``GPU_MEM_GB``.
-    A job's wall time is its sequential chain (tasks × n_steps) and the run
-    ends when the longest chain does, so the plan cuts each group into one
-    piece per card times its share of the longest chain (the widest group:
-    one piece per card, which ``run_jobs`` pins to different cards; a group
-    with half the chain: half as many), never more than its runs, and more
-    only when a batch does not fit a process's share of the memory.  ``per_gpu``
+    ``run_jobs`` places every job on the least-loaded card, so a group is
+    cut only as far as balance needs: into ``ceil(cards · its share of the
+    total cost)`` pieces (``experiments.job_cost``: a lone widest group
+    becomes one piece per card; one of many equal groups stays whole, since
+    every piece pays the per-step launch overhead again), never more than
+    its runs, and more only when a batch does not fit a process's share of
+    the memory — then rounded up to a multiple of the card count so the
+    pieces spread evenly over the cards.  ``per_gpu``
     processes per card (as many as ``MAX_PER_GPU`` and the memory allow, no
     more than there are runs to occupy them) interleave the shorter chains
     with the long ones.  The chunk is the largest whose stacked observable
@@ -413,12 +451,17 @@ def plan(args: argparse.Namespace, groups: Sequence[tuple], out_per_task: float 
                              f"{mem_slot / 2**30:.1f} GB share of a {mem_gb:.0f} GB card")
         workers, slots = 0, len(gpus) * per_gpu
         chunk = int(args.chunk) if args.chunk else 0
-    chain = [T * runs[0].n_steps for runs, T in groups]
+    if gpus:
+        from mup.experiments import job_cost
+        cost = [job_cost(runs, T) for runs, T in groups]
+        total = sum(cost) or 1.0
     pieces = []
-    for (runs, T), b, c in zip(groups, B, chain):
+    for gi, ((runs, T), b) in enumerate(zip(groups, B)):
         need = 1
         while job_bytes(runs[: -(-b // need)], T, CHUNKS[-1], out_per_task) > mem_slot:
             need += 1
+        if gpus and need > 1:
+            need = -(-need // len(gpus)) * len(gpus)                 # a multiple of the card count
         if not split:
             if need > 1:
                 raise SystemExit(f"a batch of {b} runs needs {job_bytes(runs, T, CHUNKS[-1], out_per_task) / 2**30:.1f} GB "
@@ -426,7 +469,7 @@ def plan(args: argparse.Namespace, groups: Sequence[tuple], out_per_task: float 
             pieces.append(1)
             continue
         if gpus:
-            fill = -(-len(gpus) * c // max(chain))
+            fill = max(1, math.ceil(len(gpus) * cost[gi] / total - 1e-9))
         else:
             fill = -(-slots * b // B_tot) if len(groups) < slots else 1
         want = max(need, int(args.split) if args.split else fill)

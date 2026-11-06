@@ -21,6 +21,7 @@ the job's runs.
 from __future__ import annotations
 
 import functools
+import warnings
 from typing import Callable, Optional, Sequence
 
 import jax
@@ -277,26 +278,95 @@ def imbalance_over_steps(runs: Sequence, do_proj: Sequence[float], n_tasks: int,
     return _expand(R, ok, axis=0)
 
 
+def loss_task(state: State, p: Params, *, n_steps: int, solver: str, K: int) -> tuple[State, jnp.ndarray]:
+    """``train_task`` returning the task's learning curve: the population loss L_c = |u_c − w_c|²/(2D) of the
+    task being trained before its first step and after each of its ``n_steps`` steps, (n_steps + 1,).
+
+    Always steps (never the closed form), since the curve is the point.
+    """
+    N, D = state.W.shape
+    k_teach, k_head, k_stream = model.task_keys(state.key, state.t)
+    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated)
+    head = model.draw_readout(k_head, model.Q_diag(state.W), p)
+    a = jnp.where(p.use_heads == 1.0, head, state.a)
+    t = state.t
+    loss0 = model.loss(state._replace(w=w_t, g=g_t, a=a), p)
+    r = model.train_block(state.W, a, g_t, w_t, p, k_stream, n_steps=n_steps, solver=solver, K=K, closed=False, traced=True)
+    state = state._replace(W=r["W"], a=r["a"], g=g_t, w=w_t)
+    state = model.rescale_heads(state, p, r["f"])
+    state = state._replace(heads=state.heads.at[t].set(jnp.where(p.use_heads == 1.0, g_t * state.a, 0.0)))
+    return state._replace(t=t + 1), jnp.concatenate([loss0[None], r["rows"][:, 6]])
+
+
+@functools.lru_cache(maxsize=None)
+def loss_kernel(n_steps: int, solver: str, K: int) -> Callable:
+    """``f(state, p) -> (state, L)`` with ``L`` (B, n_steps + 1) the learning curve of the next task; state donated."""
+    return jax.jit(jax.vmap(functools.partial(loss_task, n_steps=n_steps, solver=solver, K=K)), donate_argnums=(0,))
+
+
+def loss_curves(runs: Sequence, tasks: Sequence[int], T: int, chunk: Optional[int] = None) -> np.ndarray:
+    """(B, len(tasks), n_steps + 1) learning curves of the listed tasks of a ``T``-task stream (``run_training_verify.py``).
+
+    The tasks in between are trained untraced in chunks; NaN rows for infeasible runs.
+    """
+    r0 = runs[0]
+    tasks = sorted(set(int(t) for t in tasks))
+    assert all(0 <= t < T for t in tasks), "tasks must lie in [0, T)"
+    state, p, ok, (K, closed) = _batch(runs, T)
+    if state is None:
+        return np.full((len(runs), len(tasks), r0.n_steps + 1), np.nan)
+    out = []
+    prog = pool.Progress(T)
+    t = 0
+    for tt in tasks:
+        for n in chunks(tt - t, chunk):
+            state = train_kernel(r0.n_steps, r0.solver, n, K, closed)(state, p)
+            prog.add(n)
+        state, L = loss_kernel(r0.n_steps, r0.solver, K)(state, p)
+        out.append(np.asarray(L))
+        prog.add(1)
+        t = tt + 1
+    return _expand(np.stack(out, 1), ok, axis=0)
+
+
 def stream_batch(runs: Sequence, chunk: Optional[int] = None) -> dict:
     """``protocol.run_stream`` of one sweep batch (``validate.py``, ``run_sigma0.py``), reporting every tenth of its tasks."""
     T = runs[0].T_burn + runs[0].T_meas
     return run_stream(runs, log=pool.report, log_every=max(1, T // 10), chunk=chunk)
 
 
-def pooled_curves(batch: Sequence, res: dict) -> dict:
-    """Pool a batch's moments over seeds: ``{(N, readout, eta): (ages, S, E, cv_s, S_se)}`` (``validate.py``)."""
-    mom = {f: res[f] for f in Moments.FIELDS}
-    per_seed = curves(mom)["S"]
+def seed_curves(pairs: Sequence[tuple]) -> dict:
+    """Each seed's own S(m), E(m) and CV of s from ``stream_batch`` results, by condition (``validate.py``, ``run_sigma0.py``).
+
+    Parameters
+    ----------
+    pairs : sequence of (batch, res)
+        The runs of each batch and its ``stream_batch`` result; a condition's
+        seeds may be spread over several batches.
+
+    Returns
+    -------
+    dict
+        ``{(N, readout, eta): {"ages", "seeds", "S_seeds", "E_seeds", "cv_seeds", "S", "E", "cv_s", "S_se"}}``:
+        the per-seed (n_seeds, n_ages) curves in seed order, their seed means
+        (``S``, ``E``, ``cv_s``) and the s.e.m. of ``S`` over seeds (NaN for one seed).
+    """
+    rows = {}
+    for batch, res in pairs:
+        c = curves({f: res[f] for f in Moments.FIELDS})
+        for i, r in enumerate(batch):
+            e = rows.setdefault((r.N, r.readout, r.eta), {"ages": res["ages"], "rows": []})
+            e["rows"].append((r.seed, c["S"][i], c["E"][i], c["cv_s"][i]))
     out = {}
-    for key in {(r.N, r.readout, r.eta) for r in batch}:
-        idx = [i for i, r in enumerate(batch) if (r.N, r.readout, r.eta) == key]
-        s = {f: mom[f][idx].sum((0, 2)) for f in Moments.FIELDS}
-        n = s["count"]
-        with np.errstate(invalid="ignore", divide="ignore"):
-            S, E = s["sum_s"] / n, s["sum_e"] / n
-            cv = np.sqrt(np.maximum(s["sum_s2"] / n - S**2, 0)) / np.abs(S)
-        se = per_seed[idx].std(0, ddof=1) / np.sqrt(len(idx)) if len(idx) > 1 else np.full_like(S, np.nan)
-        out[key] = (res["ages"], S, E, cv, se)
+    for key, e in rows.items():
+        rs = sorted(e["rows"], key=lambda t: t[0])
+        S, E, cv = (np.stack([t[k] for t in rs]) for k in (1, 2, 3))
+        n = len(rs)
+        with np.errstate(invalid="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            out[key] = {"ages": e["ages"], "seeds": [t[0] for t in rs], "S_seeds": S, "E_seeds": E, "cv_seeds": cv,
+                        "S": np.nanmean(S, 0), "E": np.nanmean(E, 0), "cv_s": np.nanmean(cv, 0),
+                        "S_se": S.std(0, ddof=1) / np.sqrt(n) if n > 1 else np.full(S.shape[1], np.nan)}
     return out
 
 
@@ -304,14 +374,32 @@ def pooled_curves(batch: Sequence, res: dict) -> dict:
 # grouping runs into jobs
 # ----------------------------------------------------------------------------
 def group_key(r) -> tuple:
-    """Runs that can share one vmap batch here: (N, D, solver, n_steps, closed) — every κ, readout and seed
-    of a width, the closed-form runs (frozen unprojected population) apart from the stepped ones."""
-    return (r.N, r.D, r.solver, r.n_steps, r.closed)
+    """Runs that can share one vmap batch here: (N, D, solver, n_steps, closed, K) — every readout and seed of a
+    width with the same block of active rows K (``Run.block_rows``: the ungated readouts have K = N, a gated
+    readout K ≈ κ√N + 8 s.d., so every κ is its own group), the closed-form runs (frozen unprojected population)
+    apart from the stepped ones.  A batch steps every run on the block of its largest gate, so mixing K would
+    make the narrow-gate runs pay for the wide one."""
+    return (r.N, r.D, r.solver, r.n_steps, r.closed, r.block_rows())
+
+
+#: Per-step overhead of a device call in the units of ``run_cost`` (elements of the block streamed per step,
+#: B·K·D): one launch of the vmap'd step costs about as much as streaming 3·10⁷ doubles.  Fitted to the GPU
+#: log of 2026-11-06 (V100: ~0.8 ms per step at N ≤ 200, where the block part is a fraction of that), so
+#: rough; the point is that a small batch is not free and the cost of a job does not vanish with its size.
+STEP_OVERHEAD = 3.0e7
 
 
 def run_cost(r, T: int) -> float:
-    """Rough device time of one run over ``T`` tasks (N·D per step)."""
-    return float(r.N) * r.D * r.n_steps * T
+    """Rough device time of one run over ``T`` tasks: K·D per step on its block of active rows (no overhead)."""
+    return float(r.block_rows()) * r.D * r.n_steps * T
+
+
+def job_cost(runs: Sequence, T: int) -> float:
+    """Rough device time of a job of ``runs`` over ``T`` tasks: per step the block of the batch, B·K·D, plus the
+    launch overhead ``STEP_OVERHEAD``; ``pool.run_jobs`` orders and places the jobs by it."""
+    r = runs[0]
+    K = max(rr.block_rows() for rr in runs)
+    return float(r.n_steps) * T * (len(runs) * K * r.D + STEP_OVERHEAD)
 
 
 def split(runs: Sequence, pieces: int) -> list[list]:

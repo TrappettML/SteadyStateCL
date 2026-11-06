@@ -292,30 +292,93 @@ def drift_rate(x: np.ndarray, lifetimes: np.ndarray, T_burn: int, T_meas: int) -
     return float(coef[0]), float(np.sqrt(cov[0, 0]))
 
 
+def seed_mean(X, axis: int = 0) -> np.ndarray:
+    """Mean over seeds (``axis``) of per-seed values, ignoring seeds without a value (NaN); NaN where none has one."""
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmean(np.asarray(X, float), axis=axis)
+
+
+def seed_sem(X, axis: int = 0) -> np.ndarray:
+    """s.e.m. over seeds (``axis``) of per-seed values, ignoring seeds without a value; NaN with fewer than two."""
+    X = np.asarray(X, float)
+    n = np.isfinite(X).sum(axis)
+    with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        sd = np.nanstd(X, axis=axis, ddof=1)
+    return np.where(n > 1, sd / np.sqrt(np.maximum(n, 1)), np.nan)
+
+
+def seed_curves(records: Iterable[RunRecord], halves=(0, 1)) -> dict:
+    """Every seed's own ``S``, ``E``, ``cv_s``, ``cv_e``, ``n`` (``RunRecord.curve``) as (n_seeds, n_ages) arrays."""
+    cs = [r.curve(halves) for r in records]
+    return {k: np.stack([c[k] for c in cs]) for k in cs[0]}
+
+
+def seed_mhalf(records: Iterable[RunRecord], halves=(0, 1)) -> np.ndarray:
+    """Half-life of each seed's own S(m) over the given measurement halves.
+
+    Returns
+    -------
+    (n_seeds,) array
+        ``inf`` where the seed's curve never reaches S(0)/2 (censored), NaN
+        where the seed has no curve (S(0) not finite, e.g. an infeasible run).
+    """
+    out = []
+    for r in records:
+        S = r.curve(halves)["S"]
+        if not np.isfinite(S[0]):
+            out.append(np.nan)
+            continue
+        m, cens = half_life(r.ages, S)
+        out.append(np.inf if cens else m)
+    return np.asarray(out, float)
+
+
+def mhalf_stats(per: np.ndarray) -> dict:
+    """Seed mean of per-seed half-lives (``seed_mhalf``).
+
+    Returns
+    -------
+    dict
+        ``m_half`` the mean over the seeds with a curve, NaN (and ``censored``
+        True) when any of them never reaches S(0)/2, since the mean is then
+        not defined, or when no seed has a curve; ``m_half_se`` the s.e.m. over
+        the uncensored seeds (NaN with fewer than two); ``m_half_lower`` the
+        mean over the uncensored seeds (a lower bound when some are censored);
+        ``n_censored``; ``n_used`` the seeds with a curve.
+    """
+    per = np.asarray(per, float)
+    per = per[~np.isnan(per)]
+    fin = per[np.isfinite(per)]
+    n_cens = int(len(per) - len(fin))
+    censored = n_cens > 0 or len(per) == 0
+    return {"m_half": float(fin.mean()) if not censored else np.nan,
+            "m_half_se": float(sem(fin)) if len(fin) > 1 else np.nan,
+            "m_half_lower": float(fin.mean()) if len(fin) else np.nan,
+            "censored": bool(censored), "n_censored": n_cens, "n_used": int(len(per))}
+
+
 def condition_mhalf(records: Iterable[RunRecord], halves=(0, 1)) -> tuple[float, bool]:
-    """Half-life of the seed-pooled S(m) of a condition.
+    """Half-life of a condition: each seed's own half-life over the given halves, averaged over seeds (``mhalf_stats``).
 
     Parameters
     ----------
     records : iterable of RunRecord sharing a condition
     halves : tuple
-        Measurement halves to pool.
+        Measurement halves each seed's S(m) is taken from.
 
     Returns
     -------
     (m_half, censored)
+        NaN and True when any seed's curve never reaches S(0)/2.
     """
-    records = list(records)
-    hs = list(halves)
-    tot = sum(r.moments["sum_s"][:, hs].sum(-1) for r in records)
-    n = sum(r.moments["count"][:, hs].sum(-1) for r in records)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        S = tot / n
-    return half_life(records[0].ages, S)
+    st = mhalf_stats(seed_mhalf(list(records), halves))
+    return st["m_half"], st["censored"]
 
 
 def mhalf_by_condition(records: Iterable[RunRecord]) -> dict:
-    """Half-life of every condition with its seed scatter (M4, M5, M8 and check 4′ of PLAN.md §12.3, §12.6).
+    """Half-life of every condition, the seed mean of the per-seed half-lives (M4, M5, M8 and check 4′ of PLAN.md §12.3, §12.6).
 
     Parameters
     ----------
@@ -324,19 +387,16 @@ def mhalf_by_condition(records: Iterable[RunRecord]) -> dict:
     Returns
     -------
     dict
-        ``{condition key: {"m_half", "m_half_se", "censored", "n_seeds"}}``:
-        ``m_half`` the half-life of the seed-pooled S(m) (what M1/M2 show),
-        ``m_half_se`` the s.e.m. over seeds of the per-seed half-lives (NaN
-        with fewer than two finite ones), ``censored`` when the pooled curve
-        never reaches S(0)/2.
+        ``{condition key: {"m_half", "m_half_se", "censored", "n_censored", "m_half_lower", "n_seeds"}}``
+        (``mhalf_stats``): each seed's half-life from its own S(m), then the
+        mean over seeds; ``censored`` (and ``m_half`` NaN) when any seed's
+        curve never reaches S(0)/2.
     """
     out = {}
     for key, recs in group_by(records, COND_KEYS).items():
-        m, cens = condition_mhalf(recs)
-        per = np.array([half_life(r.ages, r.curve()["S"])[0] for r in recs], float)
-        per = per[np.isfinite(per)]
-        out[key] = {"m_half": float(m), "m_half_se": float(sem(per)) if len(per) > 1 else np.nan,
-                    "censored": bool(cens), "n_seeds": len(recs)}
+        st = mhalf_stats(seed_mhalf(recs))
+        out[key] = {"m_half": st["m_half"], "m_half_se": st["m_half_se"], "censored": st["censored"],
+                    "n_censored": st["n_censored"], "m_half_lower": st["m_half_lower"], "n_seeds": len(recs)}
     return out
 
 

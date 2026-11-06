@@ -11,9 +11,9 @@ with u = (g_T ⊙ a) W / pN, the gate of task T and its stored head (task
 heads) or the current shared readout, evaluated after every task T + τ.
 One figure per cell (N, κ, δ₀), ``results/stask/figures/stask_N{N}_k{κ}_d0{δ₀}_lam{λ}.png``:
 x = τ + 1 on a log axis (τ = 0, the task just learned, at x = 1), y =
-S_T(τ)/S_T(0) so every trace starts at 1, one trace per readout of §4 as the seed mean with a ±1 s.e.
-band over seeds; the half-life m½ (first crossing of S_T(0)/2) is in
-the caption.  N = 100, κ = 1, δ₀ = 0 by default; solver, λ and step-size
+S_T(τ)/S_T(0) so every trace starts at 1, one trace per readout of §4 as the seed mean of each seed's
+S_T(τ)/S_T(0) with a ±1 s.e. band over seeds; the half-life m½ (each seed's first crossing of its
+S_T(0)/2, averaged over seeds) is in the caption.  N = 100, κ = 1, δ₀ = 0 by default; solver, λ and step-size
 rule come from ``configs/stage1.yaml``.  The per-τ arrays are written
 next to the figure as ``stask_….npz``.
 
@@ -36,7 +36,7 @@ from mup import experiments as X
 from mup import plotting as P
 from mup import pool
 from mup.config import Config, READOUT_ORDER, Run, make_runs
-from run_szero import by_readout, cells, columns, groups, half_life, per_cell
+from run_szero import by_readout, cells, columns, groups, mhalf_text, per_cell, seed_signal
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -48,7 +48,7 @@ def make_jobs(groups_: dict[tuple, list[Run]], T: int, tau: int, pieces: Sequenc
     for (key, runs), k in zip(groups_.items(), pieces):
         for i, part in enumerate(X.split(runs, k)):
             jobs.append(((key, i), {"runs": part, "T_pre": T, "n_follow": tau + 1, "k": T},
-                         X.run_cost(part[0], T + tau + 1) * len(part)))
+                         X.job_cost(part, T + tau + 1)))
     return jobs
 
 
@@ -87,14 +87,12 @@ def figure(S: dict[str, np.ndarray], run0: Run, T: int, path: str) -> str:
     for ro, Y in S.items():
         n_tau, n = Y.shape
         x = np.arange(n_tau) + 1                                        # log axis: τ = 0 at x = 1
-        m = Y.mean(1)
-        se = Y.std(1, ddof=1) / np.sqrt(n) if n > 1 else np.zeros(n_tau)
-        s0 = m[0]                                                       # y is S_T(τ)/S_T(0): every trace starts at 1
-        P.band(ax, x, (m - se) / s0, (m + se) / s0, P.READOUT_COLOR[ro])
-        P.plot_readout(ax, x, m / s0, ro)
-        mh[ro] = half_life(m)
+        m, se, mh[ro] = seed_signal(Y)                                  # each seed's S_T(τ)/S_T(0) and half-life
+        P.band(ax, x, m - se, m + se, P.READOUT_COLOR[ro])
+        P.plot_readout(ax, x, m, ro)
         figdata[f"ST_{ro}"] = Y
-        figdata[f"STnorm_{ro}"] = m / s0
+        figdata[f"STnorm_{ro}"] = m
+        figdata[f"mhalf_{ro}"] = mh[ro]
     figdata["tau"] = np.arange(max(Y.shape[0] for Y in S.values()))
     P.ref_line(ax, 0.0)
     P.ref_line(ax, 0.5)
@@ -102,13 +100,13 @@ def figure(S: dict[str, np.ndarray], run0: Run, T: int, path: str) -> str:
     ax.set_xlabel(r"$\tau + 1$ (tasks after task $T$)")
     ax.set_ylabel(r"$S_T(\tau)\,/\,S_T(0)$,  $S_T(\tau) = u_{T+\tau}\cdot w_T^*/|w_T^*|^2$")
     n_seeds = max(Y.shape[1] for Y in S.values())
-    mtxt = ", ".join(f"{P.READOUT_LABEL[ro]} {mh[ro]:.1f}" if np.isfinite(mh[ro]) else f"{P.READOUT_LABEL[ro]} > τ"
-                     for ro in S)
+    n_tau_all = max(Y.shape[0] for Y in S.values())
+    mtxt = ", ".join(f"{P.READOUT_LABEL[ro]} {mhalf_text(mh[ro], n_tau_all - 1)}" for ro in S)
     P.cell_title(fig, kappa=run0.kappa_label, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta,
                  extra=f"N = {run0.N}, T = {T}")
-    P.caption(fig, f"line: seed mean of the signal of teacher T = {T} after task T + τ divided by its value at τ = 0, "
-                   f"drawn at τ + 1 so τ = 0 is at 1 ({n_seeds} seeds); band: ±1 s.e. over seeds; half-life m½ "
-                   f"(tasks) where the mean crosses ½ (grey line): {mtxt}.")
+    P.caption(fig, f"line: seed mean of each seed's signal of teacher T = {T} after task T + τ divided by its own value "
+                   f"at τ = 0, drawn at τ + 1 so τ = 0 is at 1 ({n_seeds} seeds); band: ±1 s.e. over seeds; half-life "
+                   f"m½ (tasks): each seed's first crossing of ½ (grey line), mean ± s.e. over seeds: {mtxt}.")
     P.fig_legend(fig, list(S))
     return P.save(fig, path, figdata=figdata)
 
@@ -136,6 +134,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             "seeds": args.seeds, "extra": (), "trace": False}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
+    if not runs:
+        print("no runs left after skipping κ outside [1, √N]; nothing to do", flush=True)
+        return 0
     cells_ = cells(runs)
     T_of = {key: args.T or (cell[0].T_burn + cell[0].T_meas) for key, cell in cells_.items()}
     if len(set(T_of.values())) != 1:
@@ -152,7 +153,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"cell N={N} κ={k} δ₀={d0} λ={lam}:")
         for ro, Y in S.items():
             m = Y.mean(1)
-            print(f"  {ro:15s} S_T(0) = {m[0]:.4f}  m½ = {half_life(m):.1f}  S_T(τ_max) = {m[-1]:+.4f}", flush=True)
+            print(f"  {ro:15s} S_T(0) = {m[0]:.4f}  m½ = {mhalf_text(seed_signal(Y)[2], Y.shape[0] - 1)}  "
+                  f"S_T(τ_max) = {m[-1]:+.4f}", flush=True)
         if not S:
             continue
         cell = cells_[(N, k, d0, lam)]
