@@ -30,7 +30,7 @@ PY=${PY:-python}
 PLACE=${PLACE---gpus}                    # every card of the node, planned by mup.pool
 LAM=4                                    # learning per task λ (configs/stage1.yaml: lam [4.0])
 SEEDS=20                                 # seeds 0 … SEEDS−1
-N_GRID="10 20 50 100 200 500"            # widths of Nscaling, weight_norms, imbalance_comp (D = 4N)
+N_GRID="10 20 50"            # widths of Nscaling, weight_norms, imbalance_comp (D = 4N)
 KAPPAS="1 2 4"                           # κ of the same three; the note: "different kappa values (1,2,4)"
 
 declare -A CMD

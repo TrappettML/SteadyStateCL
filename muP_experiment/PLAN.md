@@ -446,14 +446,15 @@ a warning as a bug in the figure.
   T) for ALL_KEYS, "mhalf": (n_seeds,)}}` (`mhalf_from_signal` per seed).
 - `weight_norm_by_delta/norms_vs_N_{readout}` (`fig_norms_by_delta`):
   rows `QUANT + Q_SCALED`, columns = κ, x = N (log, discrete ticks),
-  per-seed steady-state means then seed mean ± s.e. bars, traces = δ₀ as
-  `kappa_shades(i, n, readout)` (lightest = smallest δ₀); an ungated
-  readout repeats its κ-free values in every column.
+  per-seed steady-state means then seed mean ± s.e. bars, traces = δ₀ in
+  `delta0_style(d0s)` (blue ▼ below 0, grey ● at 0, red ▲ above, darker =
+  farther from 0; the same for every readout); an ungated readout repeats
+  its κ-free values in every column.
   `weight_norm_by_model/norms_vs_N_d0{δ₀}`: `run_weight_norms.fig_vs_N`
   on the slice at that δ₀.
 - `halflife_by_delta0` / `halflife_by_model` (`fig_halflife`): columns
   = κ, x = N (log), y = m½ (log) with `_stat` over uncensored seeds; rows
-  = readouts with δ₀ traces (shades), or rows = δ₀ with readout traces
+  = readouts with δ₀ traces (`delta0_style`), or rows = δ₀ with readout traces
   (`plot_readout`); dotted `N ln 2` in every panel.
 - `imbalance_comp.npz`: `N{N}_k{κ}_{readout}_d0{δ₀}_{key}` and `_mhalf`.
 
@@ -486,7 +487,10 @@ a warning as a bug in the figure.
 colours are fixed (`READOUT_COLOR`, Okabe–Ito: gated shared `#0072B2`,
 learned shared `#56B4E9`, gated frozen `#D55E00`, frozen `#E69F00`, task
 heads `#009E73`); ungated readouts dashed (`plot_readout` applies both);
-κ as shades of the readout colour (`kappa_shades`); reference lines
+κ as shades of the readout colour (`kappa_shades`); δ₀ in its own
+diverging palette, independent of the readout (`delta0_style`: blue below
+0, grey at 0, red above, darker = farther from 0, marker by sign;
+distinct by colour for up to three values per side); reference lines
 `ref_line` in grey; bands `band` at α 0.2; `logaxis`, `discrete_ticks`
 for the N grid; parameter values through `fmt` (`4`, never `4.0`).  Save
 only through `save(fig, path, figdata=...)`.  No script sets `rcParams` or

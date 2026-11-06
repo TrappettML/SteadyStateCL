@@ -17,16 +17,16 @@ Output, under ``--out`` (default ``results/imbalance_results``):
     one file per readout (method); rows = the four rows of
     ``run_weight_norms.fig_vs_N`` (mean Q_ii, mean a_i², |u_t|²/D and the
     collapse Q̄/pN or Q̄²/pN), columns = κ, x = N (log), y = steady-state
-    value (seed mean ± 1 s.e. bars), traces = δ₀ in shades of the readout's
-    colour (lightest = smallest δ₀).  An ungated readout has no κ and
-    repeats in every column.
+    value (seed mean ± 1 s.e. bars), traces = δ₀ (``plotting.delta0_style``:
+    blue ▼ below 0, grey ● at 0, red ▲ above, darker = farther from 0).  An
+    ungated readout has no κ and repeats in every column.
 ``weight_norm_by_model/norms_vs_N_d0{δ₀}.png``
     the roles flipped: one file per δ₀, traces = readouts — exactly
     ``run_weight_norms.fig_vs_N`` at that δ₀.
 ``halflife_by_delta0.png``
     rows = readouts, columns = κ, x = N (log), y = m½ (seed mean ± 1 s.e.
-    over the uncensored seeds), traces = δ₀ in shades of the row's readout
-    colour; dotted grey N ln 2.
+    over the uncensored seeds), traces = δ₀ in the colours of
+    ``plotting.delta0_style``; dotted grey N ln 2.
 ``halflife_by_model.png``
     rows = δ₀, columns = κ, traces = readouts.
 ``imbalance_comp.npz``
@@ -145,15 +145,15 @@ def _points(values_of, Ns: list[int]) -> tuple:
 
 
 def d0_handles(d0s: list[float]) -> list:
-    """Legend handles for δ₀ traces (grey shades, lightest = smallest δ₀)."""
-    return [P.Line2D([], [], color=P.kappa_shades(i, len(d0s)), lw=P.LW_TRACE, label=f"δ₀ = {P.fmt(d)}")
-            for i, d in enumerate(d0s)]
+    """Legend handles for δ₀ traces, in the colours and markers the traces use (``plotting.delta0_handles``)."""
+    return P.delta0_handles(d0s)
 
 
 def fig_norms_by_delta(res: dict, Ns: list[int], klabels: list[str], d0s: list[float], ro: str, runs: list[Run],
                        path: str) -> str:
-    """``norms_vs_N`` of one readout: rows = quantities, columns = κ, x = N, traces = δ₀ (shades)."""
+    """``norms_vs_N`` of one readout: rows = quantities, columns = κ, x = N, traces = δ₀ (``delta0_style``)."""
     P.apply_style()
+    sty = P.delta0_style(d0s)
     rows = QUANT + (Q_SCALED,)
     fig, axes = P.grid(len(rows), len(klabels), sharex="all", sharey="row", panel=(3.0, 2.4))
     figdata = {}
@@ -171,8 +171,8 @@ def fig_norms_by_delta(res: dict, Ns: list[int], klabels: list[str], d0s: list[f
                 x, m, se = _points(values, Ns)
                 if not len(x):
                     continue
-                col = P.kappa_shades(i, len(d0s), ro)
-                ax.plot(x, m, color=col, marker="o", ms=3, lw=P.LW_TRACE, ls="-" if is_gated(ro) else "--")
+                col, mk = sty[float(d0)]
+                ax.plot(x, m, color=col, marker=mk, ms=4, lw=P.LW_TRACE, ls="-" if is_gated(ro) else "--")
                 ax.errorbar(x, m, yerr=se, fmt="none", ecolor=col, elinewidth=0.8, capsize=2, zorder=3)
                 figdata[f"{q}_k{klabel}_d0{P.fmt(d0)}"] = np.stack([x, m, se])
             P.logaxis(ax, "x")
@@ -187,7 +187,7 @@ def fig_norms_by_delta(res: dict, Ns: list[int], klabels: list[str], d0s: list[f
     P.caption(fig, f"{P.READOUT_LABEL[ro]}: steady-state norms (mean over the measurement window t ≥ T_burn) of "
                    "mean_i Q_ii (top), mean_i a_i² (second) and |u_t|²/D (third), seed mean with ±1 s.e. bars; "
                    "bottom: the collapse Q̄/pN (frozen) or Q̄²/pN (learned), pN = κ√N or N when ungated; "
-                   "traces = δ₀, lightest = smallest.")
+                   "traces = δ₀: blue ▼ below 0, grey ● at 0, red ▲ above, darker = farther from 0.")
     P.fig_legend(fig, None, handles=d0_handles(d0s))
     return P.save(fig, path, figdata=figdata)
 
@@ -210,8 +210,8 @@ def fig_halflife(res: dict, Ns: list[int], klabels: list[str], d0s: list[float],
                 if not len(x):
                     continue
                 if by == "delta0":
-                    col = P.kappa_shades(i, len(d0s), ro)
-                    ax.plot(x, m, color=col, marker="o", ms=3, lw=P.LW_TRACE, ls="-" if is_gated(ro) else "--")
+                    col, mk = P.delta0_style(d0s)[float(d0)]
+                    ax.plot(x, m, color=col, marker=mk, ms=4, lw=P.LW_TRACE, ls="-" if is_gated(ro) else "--")
                 else:
                     col = P.READOUT_COLOR[ro]
                     P.plot_readout(ax, x, m, ro, marker="o", ms=3)
@@ -231,7 +231,8 @@ def fig_halflife(res: dict, Ns: list[int], klabels: list[str], d0s: list[float],
                  extra="half-life by " + ("δ₀" if by == "delta0" else "readout"))
     P.caption(fig, "steady-state half-life m½ (first age with S_T(m) ≤ S_T(0)/2 after T = T_burn + T_meas tasks, "
                    "per seed, then mean ± 1 s.e. over the uncensored seeds) against N; "
-                   + ("rows = readouts, traces = δ₀ (lightest = smallest)" if by == "delta0"
+                   + ("rows = readouts, traces = δ₀ (blue ▼ below 0, grey ● at 0, red ▲ above, darker = farther "
+                      "from 0)" if by == "delta0"
                       else "rows = δ₀, traces = readouts")
                    + "; the ungated readouts have no κ and repeat in every column; dotted grey: N ln 2.")
     if by == "delta0":

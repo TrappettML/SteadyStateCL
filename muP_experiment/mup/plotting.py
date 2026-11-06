@@ -1196,6 +1196,48 @@ def kappa_handles(kappas) -> list:
             for i, k in enumerate(kappas)]
 
 
+#: δ₀ traces, a diverging palette: the sign of the imbalance is the hue (blue: δ₀ < 0, input norms larger;
+#: red: δ₀ > 0, output norms larger; neutral grey at the balanced δ₀ = 0) and the distance from 0 is the
+#: lightness (darker = farther), evenly spaced in OKLab lightness from L 0.67 (≥ 3:1 on white) to 0.34 on
+#: each side, keyed by how many values that side holds.  Checked with the palette validator of the dataviz
+#: skill on white, every pair in a panel compared: every split with up to three values per side clears the
+#: colour-blind target (ΔE ≥ 9.4 under protan, deutan and tritan simulation) and the normal-vision floor
+#: (ΔE ≥ 15.3).  More than three on one side cannot all be told apart by lightness, so the sign also sets
+#: the marker (▼ below 0, ● at 0, ▲ above) and the legend names every value.
+DELTA0_NEG = {1: ("#1b63b8",), 2: ("#5196ef", "#003671"), 3: ("#5196ef", "#1b63b8", "#003671"),
+              4: ("#5196ef", "#2e74ca", "#0153a6", "#003671")}
+DELTA0_POS = {1: ("#b91b25",), 2: ("#f45a56", "#6e020e"), 3: ("#f45a56", "#b91b25", "#6e020e"),
+              4: ("#f45a56", "#cc3336", "#a20118", "#6e020e")}
+DELTA0_ZERO = "#5d5d5d"
+DELTA0_MARKER = {-1: "v", 0: "o", 1: "^"}
+
+
+def delta0_style(d0s) -> dict:
+    """``{δ₀: (colour, marker)}`` of a set of δ₀ values: blue below 0, grey at 0, red above, the lightest step
+    nearest 0 on each side (``DELTA0_NEG``, ``DELTA0_ZERO``, ``DELTA0_POS``); keys are floats."""
+    vals = sorted({float(d) for d in d0s})
+    out = {}
+    for side, table, sign in (([d for d in vals if d < 0][::-1], DELTA0_NEG, -1), ([d for d in vals if d > 0], DELTA0_POS, 1)):
+        n = len(side)
+        if not n:
+            continue
+        if n in table:
+            cols = table[n]
+        else:                                     # > 4 on one side: interpolate the four steps (sign marker + legend carry it)
+            cm = LinearSegmentedColormap.from_list("delta0", table[4])
+            cols = [matplotlib.colors.to_hex(cm(j / (n - 1))) for j in range(n)]
+        out.update({d: (c, DELTA0_MARKER[sign]) for d, c in zip(side, cols)})
+    if 0.0 in vals:
+        out[0.0] = (DELTA0_ZERO, DELTA0_MARKER[0])
+    return out
+
+
+def delta0_handles(d0s) -> list:
+    """Legend handles for δ₀ traces in the colours and markers of ``delta0_style``, smallest δ₀ first."""
+    st = delta0_style(d0s)
+    return [Line2D([], [], color=st[d][0], marker=st[d][1], ms=4, lw=LW_TRACE, label=f"δ₀ = {fmt(d)}") for d in sorted(st)]
+
+
 def ref_curve(ax, x, y) -> None:
     """A grey reference curve (e.g. e^{−m/N}) drawn below the data, outside the autoscale."""
     ax.plot(np.asarray(x, float), np.asarray(y, float), color=GREY_REF, lw=LW_REF, zorder=1, scalex=False, scaley=False)
