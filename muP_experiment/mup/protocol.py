@@ -3,7 +3,13 @@
 PLAN.md §3.7, §5 and §12.  ``run_task`` is written for a single run and is
 batched by ``batched_run_task`` with ``jax.vmap``; the Python loop over tasks
 lives in ``run_stream``, which accumulates the running moments and the
-per-task scalars on the host with one device-to-host copy per task.
+per-task scalars on the host.
+
+On a GPU the per-task call is latency-bound (one executable launch and one
+host sync per task at the Stage-1 sizes), so ``run_stream`` scans
+``chunk`` tasks inside one jitted call (``batched_run_tasks``) and copies
+the stacked outputs to the host once per chunk.  ``chunk = 1`` (the CPU
+default, ``device.default_chunk``) is the original one-call-per-task loop.
 """
 from __future__ import annotations
 
@@ -16,7 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import mup._x64  # noqa: F401  (enables x64)
-from mup import model
+from mup import device, model
 from mup.model import Params, State
 from mup.observe import Moments, age_schedule, evaluate_probes
 
@@ -102,8 +108,7 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
     """
     assert n_steps >= 1
     N, D = state.W.shape
-    kt = jax.random.fold_in(state.key, state.t)
-    k_teach, k_head, k_stream = jax.random.split(kt, 3)
+    k_teach, k_head, k_stream = model.task_keys(state.key, state.t)
 
     w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated)
     head = model.draw_readout(k_head, model.Q_diag(state.W), p)
@@ -150,12 +155,8 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
     dres = jnp.abs(model.imbalance(state, p) - p.Delta0)
     gauge_delta = jnp.max(jnp.where(g_t == 1.0, dres, 0.0))
 
-    # store the probe, then evaluate every probe of the age schedule
-    state = state._replace(
-        probes_w=state.probes_w.at[t].set(w_t),
-        probes_g=state.probes_g.at[t].set(g_t),
-        heads=state.heads.at[t].set(jnp.where(p.use_heads == 1.0, state.a, 0.0)),
-    )
+    # store the head (the probe's teacher and gate are regenerated from the key), then evaluate the age schedule
+    state = state._replace(heads=state.heads.at[t].set(jnp.where(p.use_heads == 1.0, state.a, 0.0)))
     s, eps, valid = evaluate_probes(state, p, ages)
     post = model.norm_stats(state.W, state.a, g_t)
     post["heads_fro2"] = model.heads_fro2(state.heads, t + 1)
@@ -202,6 +203,45 @@ def batched_run_task(n_steps: int, solver: str, traced: bool = False) -> Callabl
     return jax.jit(jax.vmap(f, in_axes=in_axes), donate_argnums=(0,))
 
 
+@functools.lru_cache(maxsize=None)
+def batched_run_tasks(n_steps: int, solver: str, traced: bool, n_tasks: int) -> Callable:
+    """``jit(scan(vmap(run_task)))`` over ``n_tasks`` consecutive tasks; cached.
+
+    One device call advances every run of the batch by ``n_tasks`` tasks and
+    returns the per-task outputs stacked on a new leading axis, so the host
+    syncs once per chunk instead of once per task.  The loop body is the
+    vmapped ``run_task`` of ``batched_run_task``, so the dynamics are the
+    same ops in the same order.
+
+    Parameters
+    ----------
+    n_steps : int
+    solver : {"pop", "sgd"}
+    traced : bool
+    n_tasks : int
+        Tasks per call, ≥ 1.
+
+    Returns
+    -------
+    callable
+        ``f(state, params, ages[, trace_idx]) -> (state, out)`` with every
+        entry of ``out`` of shape ``(n_tasks, B, ...)``.  The state is donated.
+    """
+    assert n_tasks >= 1
+    f = functools.partial(run_task, n_steps=n_steps, solver=solver)
+    in_axes = (0, 0, None, None) if traced else (0, 0, None)
+    vf = jax.vmap(f, in_axes=in_axes)
+
+    def run(state, p, ages, *rest):
+        """Scan ``vf`` over ``n_tasks`` tasks; ``rest`` is ``(trace_idx,)`` when traced."""
+        def body(s, _):
+            s, out = vf(s, p, ages, *rest)
+            return s, out
+        return jax.lax.scan(body, state, None, length=n_tasks)
+
+    return jax.jit(run, donate_argnums=(0,))
+
+
 def make_params(runs: Sequence) -> Params:
     """Stack the per-run constants of a batch of ``Run`` objects into a ``Params`` pytree.
 
@@ -241,6 +281,28 @@ def _init(runs: Sequence) -> tuple[State, Params]:
     p = make_params(runs)
     keys = jnp.stack([jax.random.PRNGKey(r.rng_seed()) for r in runs])
     return batched_init(r0.N, r0.D, r0.T_burn + r0.T_meas)(keys, p), p
+
+
+def state_bytes(run, B: int = 1) -> int:
+    """
+    Device memory of the batched ``State`` of ``B`` runs like ``run`` (float64), without XLA temporaries.
+
+    ``W`` is N × D and the stored heads P × N with P = T; the probes' teachers
+    and gates are regenerated from the key (SCALING_N10k.md §G) and take no memory.
+
+    Parameters
+    ----------
+    run : config.Run
+    B : int
+
+    Returns
+    -------
+    int
+        Bytes.
+    """
+    N, D, P = run.N, run.D, run.T_burn + run.T_meas
+    per_run = 8 * (N * D + 3 * N + D + P * N)
+    return int(B * per_run)
 
 
 def feasible(runs: Sequence) -> np.ndarray:
@@ -318,6 +380,7 @@ def run_stream(
     runs: Sequence,
     log: Optional[Callable[[str], None]] = None,
     log_every: int = 0,
+    chunk: Optional[int] = None,
 ) -> dict:
     """Run a batch of runs through the full task stream (PLAN.md §3.7, §5, §12).
 
@@ -328,7 +391,13 @@ def run_stream(
     log : callable, optional
         Receives progress strings.
     log_every : int
-        Log every this many tasks (0: only at the end).
+        Log every this many tasks (0: only at the end); rounded up to a
+        whole number of chunks.
+    chunk : int, optional
+        Tasks per device call (``device.default_chunk``: 1 on CPU, 16 on a
+        GPU, or ``MUP_CHUNK``).  The results do not depend on it beyond
+        compiler rounding; 1 is the original loop and is what the stored
+        reference hash was made with.
 
     Returns
     -------
@@ -349,28 +418,45 @@ def run_stream(
     ages_j = jnp.asarray(ages)
     state, p = init_batch(runs)
     traced = bool(r0.trace)
-    step_fn = batched_run_task(r0.n_steps, r0.solver, traced)
+    chunk = min(device.default_chunk(chunk), T)
+    extra = (jnp.asarray(trace_indices(r0.n_steps, r0.solver, r0.trace_points)),) if traced else ()
     if traced:
-        tidx = trace_indices(r0.n_steps, r0.solver, r0.trace_points)
-        tidx_j = jnp.asarray(tidx)
+        tidx = np.asarray(extra[0])
         traces = np.zeros((B, T, len(tidx), len(TRACE_QUANT)), dtype=np.float32)
+
+    def kernel(n_tasks):
+        """Device call advancing ``n_tasks`` tasks; outputs always carry a leading task axis."""
+        if n_tasks == 1 and chunk == 1:
+            f = batched_run_task(r0.n_steps, r0.solver, traced)
+            return lambda s: (lambda r: (r[0], jax.tree_util.tree_map(lambda x: x[None], r[1])))(f(s, p, ages_j, *extra))
+        f = batched_run_tasks(r0.n_steps, r0.solver, traced, n_tasks)
+        return lambda s: f(s, p, ages_j, *extra)
 
     mom = Moments(B, len(ages))
     scalars = {k: np.zeros((T, B)) for k in SCALARS}
     t0 = time.time()
-    for t in range(T):
-        state, out = step_fn(state, p, ages_j, tidx_j) if traced else step_fn(state, p, ages_j)
-        if t >= T_burn:
-            half = 0 if t < T_burn + T_meas // 2 else 1
-            mom.add(np.asarray(out["s"]), np.asarray(out["eps"]), np.asarray(out["valid"]), half)
-        for k in SCALARS:
-            scalars[k][t] = np.asarray(out[k])
+    t_log = 0
+    t = 0
+    while t < T:
+        n = min(chunk, T - t)
+        state, out = kernel(n)(state)
+        out = jax.device_get(out)                      # one host transfer per chunk
+        for j in range(n):
+            tt = t + j
+            if tt >= T_burn:
+                half = 0 if tt < T_burn + T_meas // 2 else 1
+                mom.add(out["s"][j], out["eps"][j], out["valid"][j], half)
+            for k in SCALARS:
+                scalars[k][tt] = out[k][j]
         if traced:
-            traces[:, t] = np.asarray(out["trace"], dtype=np.float32)
-        if log is not None and log_every and (t + 1) % log_every == 0:
-            log(f"task {t + 1}/{T}  {time.time() - t0:.1f}s")
+            traces[:, t:t + n] = np.swapaxes(out["trace"], 0, 1).astype(np.float32)
+        t += n
+        if log is not None and log_every and t - t_log >= log_every and t < T:
+            t_log = t
+            log(f"task {t}/{T}  {time.time() - t0:.1f}s")
     if log is not None:
-        log(f"batch of {B} runs, {T} tasks × {r0.n_steps} steps done in {time.time() - t0:.1f}s")
+        log(f"batch of {B} runs, {T} tasks × {r0.n_steps} steps done in {time.time() - t0:.1f}s "
+            f"({chunk} tasks per device call, {device.platform()})")
 
     res = {
         "ages": ages, "alpha_task": np.array([r.alpha_task for r in runs]),

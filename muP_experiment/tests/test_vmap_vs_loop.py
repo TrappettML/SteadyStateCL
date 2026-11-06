@@ -45,7 +45,7 @@ def test_batch_equals_singles(small_runs):
         sb = jax.tree_util.tree_map(lambda x: x[i], st)
         for name, a, b in zip(st1._fields, st1, sb):
             a, b = np.asarray(a), np.asarray(b)
-            if name in ("g", "w", "probes_w", "probes_g", "key", "t"):
+            if name in ("g", "w", "key", "t"):
                 assert np.array_equal(a, b), name          # draws are exact
             else:
                 np.testing.assert_allclose(a, b, atol=1e-10, rtol=0, err_msg=name)

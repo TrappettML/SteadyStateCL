@@ -51,18 +51,19 @@ class State(NamedTuple):
     g : (N,) current gate, 0/1 floats (all ones when ungated)
     w : (D,) current teacher
     heads : (P, N) stored task heads (zeros unless use_heads)
-    probes_w : (P, D) stored teachers
-    probes_g : (P, N) stored gates
     key : PRNGKey of the run
     t : int32 task index
+
+    A probe's teacher and gate are not stored: task k's draws are a pure
+    function of ``(key, k)`` (``task_keys``), so ``probe_task`` regenerates
+    them bit for bit when the probe is evaluated.  Only the heads, which
+    depend on the state at the task they were drawn, are kept.
     """
     W: jnp.ndarray         # (N, D) hidden rows
     a: jnp.ndarray         # (N,)   shared readout, or the current task head
     g: jnp.ndarray         # (N,)   current gate, 0/1 floats (all ones when ungated)
     w: jnp.ndarray         # (D,)   current teacher
     heads: jnp.ndarray     # (P, N) stored task heads (zeros unless use_heads)
-    probes_w: jnp.ndarray  # (P, D)
-    probes_g: jnp.ndarray  # (P, N)
     key: jnp.ndarray       # PRNGKey of the run
     t: jnp.ndarray         # int32 task index
 
@@ -385,16 +386,54 @@ def draw_task(key: jnp.ndarray, N: int, D: int, pN: jnp.ndarray, gated=1.0):
     return w, g
 
 
+def task_keys(key: jnp.ndarray, t) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    The three keys of task ``t`` of a run: (teacher and gate, head, input stream).
+
+    Parameters
+    ----------
+    key : PRNGKey of the run
+    t : int or 0-d int array
+        Task index.
+
+    Returns
+    -------
+    (k_teach, k_head, k_stream)
+    """
+    kt = jax.random.fold_in(key, t)
+    k_teach, k_head, k_stream = jax.random.split(kt, 3)
+    return k_teach, k_head, k_stream
+
+
+def probe_task(key: jnp.ndarray, k, N: int, D: int, pN: jnp.ndarray, gated=1.0):
+    """
+    Teacher and gate of task ``k`` of a run, regenerated from the run key (bit for bit the draws of ``run_task``).
+
+    Parameters
+    ----------
+    key : PRNGKey of the run
+    k : int or 0-d int array
+    N, D : int
+    pN, gated : see ``draw_task``
+
+    Returns
+    -------
+    (w_k, g_k)
+        (D,) teacher and (N,) 0/1 gate.
+    """
+    return draw_task(task_keys(key, k)[0], N, D, pN, gated)
+
+
 def init_state(key: jnp.ndarray, p: Params, N: int, D: int, P: int) -> State:
     """
-    Fresh run: W ~ N(0, 1), a from ``draw_readout`` at Δ_i = Δ₀, empty probes and heads.
+    Fresh run: W ~ N(0, 1), a from ``draw_readout`` at Δ_i = Δ₀, empty heads.
 
     Parameters
     ----------
     key : PRNGKey of the run
     p : Params
     N, D, P : int
-        Width, input dimension and number of probe slots (= number of tasks).
+        Width, input dimension and number of head slots (= number of tasks).
 
     Returns
     -------
@@ -410,8 +449,6 @@ def init_state(key: jnp.ndarray, p: Params, N: int, D: int, P: int) -> State:
         g=z((N,)),
         w=z((D,)),
         heads=z((P, N)),
-        probes_w=z((P, D)),
-        probes_g=z((P, N)),
         key=key,
         t=jnp.int32(0),
     )

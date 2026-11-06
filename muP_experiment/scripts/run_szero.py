@@ -31,6 +31,7 @@ import _path  # noqa: F401
 from mup import plotting as P
 from mup.config import Config, READOUT_ORDER, make_runs
 from mup.observe import age_schedule
+from mup import model
 from mup.protocol import batched_run_task, feasible, init_batch
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
@@ -40,7 +41,7 @@ _T0 = time.perf_counter()        # wall clock from after the imports to the end 
 def _signal0(state, p):
     """S₀ of every run of a batch: probe 0 (teacher, gate, head) against the current W."""
     def one(s, q):
-        w0, g0 = s.probes_w[0], s.probes_g[0]
+        w0, g0 = model.probe_task(s.key, 0, s.W.shape[0], s.W.shape[1], q.pN, q.gated)
         a0 = jnp.where(q.use_heads == 1.0, s.heads[0], s.a)
         u = (g0 * a0) @ s.W / q.pN
         return (u * w0).sum() / (w0 * w0).sum()

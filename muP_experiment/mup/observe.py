@@ -4,8 +4,10 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
+import jax
+
 import mup._x64  # noqa: F401  (enables x64)
-from mup.model import Params, State
+from mup.model import Params, State, probe_task
 
 
 # ----------------------------------------------------------------------------
@@ -45,10 +47,15 @@ def evaluate_probes(state: State, p: Params, ages: jnp.ndarray):
     """
     s_k and ε_k of the probes k = t − ages (one (n_ages, N) @ (N, D) matmul).
 
+    The probes' teachers and gates are regenerated from the run key
+    (``model.probe_task``), n_ages draws of size D + N per task; only the
+    heads are read from the state.
+
     Parameters
     ----------
     state : State
-        After the current task's probe has been stored.
+        After the current task's head has been stored (``state.t`` is the
+        index of the task just learned).
     p : Params
     ages : (n_ages,) int32 array
 
@@ -58,11 +65,11 @@ def evaluate_probes(state: State, p: Params, ages: jnp.ndarray):
         ``s = u_k·w_k/|w_k|²``, ``eps = |u_k − w_k|²/|w_k|²`` and a bool mask;
         invalid ages (k < 0) read probe 0 and must be masked out by the caller.
     """
+    N, D = state.W.shape
     k = state.t - ages
     valid = k >= 0
     idx = jnp.where(valid, k, 0)
-    wk = state.probes_w[idx]                       # (n_ages, D)
-    gk = state.probes_g[idx]                       # (n_ages, N)
+    wk, gk = jax.vmap(lambda i: probe_task(state.key, i, N, D, p.pN, p.gated))(idx)   # (n_ages, D), (n_ages, N)
     ak = jnp.where(p.use_heads == 1.0, state.heads[idx], state.a[None, :])
     U = (gk * ak) @ state.W / p.pN                 # (n_ages, D)
     wn = (wk * wk).sum(-1)

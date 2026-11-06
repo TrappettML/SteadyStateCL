@@ -45,9 +45,9 @@ def test_stored_heads_keep_stored_uk():
     st = _perturb(st, p)
     ages = jnp.asarray([0])
     st = st._replace(t=jnp.int32(0))
-    u_before = (st.probes_g[0] * st.heads[0]) @ st.W / p.pN
+    u_before = (st.g * st.heads[0]) @ st.W / p.pN            # st.g is probe 0's gate (conftest)
     new = model.project(st, p)
-    u_after = (new.probes_g[0] * new.heads[0]) @ new.W / p.pN
+    u_after = (new.g * new.heads[0]) @ new.W / p.pN
     np.testing.assert_allclose(np.asarray(u_after), np.asarray(u_before), atol=1e-13, rtol=0)
     s0, e0, _ = evaluate_probes(st, p, ages)
     s1, e1, _ = evaluate_probes(new, p, ages)

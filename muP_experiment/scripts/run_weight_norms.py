@@ -15,7 +15,11 @@ effective weight norm |u_t|²/D of the task just trained, u_t = (g ⊙ a) W / pN
 ``norms_vs_task_k{κ}_…``   rows = (mean Q_ii, mean a_i², |u_t|²/D), columns = N,
     traces = readouts at the first κ listed (ungated readouts have no κ),
     x = task; seed mean with a ±1 s.e. band, burn-in shaded.
-``norms_vs_N_…``           rows = the same three quantities, columns = κ,
+``norms_vs_N_…``           rows = the same three quantities plus the scaling
+    collapse Q̄/pN for the frozen readouts and Q̄²/pN for the learned ones
+    (Q̄ the steady-state mean_i Q_ii of the top row, pN = κ√N, or N when
+    ungated; a constant in N confirms the mechanism, and a frozen constant
+    with a drifting learned one points at extra dynamics in a), columns = κ,
     x = N (log), y = the steady-state value (mean over the measurement
     window t ≥ T_burn, then seed mean ± 1 s.e. bars), traces = readouts;
     the ungated readouts repeat in every column.
@@ -48,6 +52,20 @@ _T0 = time.perf_counter()        # wall clock from after the imports to the end 
 #: Recorded per task: (key, y-axis label)
 QUANT = (("Q_all", r"mean $Q_{ii} = |W_i|^2/D$"), ("a2_all", r"mean $a_i^2$"), ("u2", r"$|u_t|^2/D$"))
 ALL_KEYS = ("Q_all", "Q_act", "a2_all", "a2_act", "u2")
+#: Fourth row of ``norms_vs_N``: the scaling collapse of Q̄ = mean Q_ii (derived from ``Q_all`` per seed)
+Q_SCALED = ("Q_scaled", r"$\bar Q/pN$ (frozen),  $\bar Q^2/pN$ (learned)")
+
+
+def q_scaled(ss_Q: np.ndarray, run) -> np.ndarray:
+    """Collapse variable of one condition: Q̄/pN when the readout is frozen, Q̄²/pN when it learns.
+
+    Parameters
+    ----------
+    ss_Q : (n_seeds,) per-seed steady-state mean Q_ii
+    run : config.Run of the condition (supplies ``pN`` and ``learn_a``)
+    """
+    pN = float(run.pN)
+    return ss_Q / pN if run.learn_a == 0.0 else ss_Q * ss_Q / pN
 
 
 def norms_run(run) -> dict:
@@ -179,11 +197,12 @@ def fig_vs_task(res: dict, Ns: list, klabel: str, run0, path: str) -> str:
 def fig_vs_N(res: dict, Ns: list, klabels: list, run0, path: str) -> str:
     """Rows = quantities, columns = κ, x = N (log), y = steady-state value (seed mean ± 1 s.e.), traces = readouts."""
     P.apply_style()
-    fig, axes = P.grid(len(QUANT), len(klabels), sharex="all", sharey="row", panel=(3.0, 2.4))
+    rows = QUANT + (Q_SCALED,)
+    fig, axes = P.grid(len(rows), len(klabels), sharex="all", sharey="row", panel=(3.0, 2.4))
     figdata = {}
     readouts = []
     for c, klabel in enumerate(klabels):
-        for r, (q, lab) in enumerate(QUANT):
+        for r, (q, lab) in enumerate(rows):
             ax = axes[r, c]
             for ro in READOUT_ORDER:
                 k = klabel if is_gated(ro) else "sqrtN"
@@ -191,8 +210,11 @@ def fig_vs_N(res: dict, Ns: list, klabels: list, run0, path: str) -> str:
                 for N in Ns:
                     if (N, k, ro) not in res:
                         continue
-                    run = next(rr for rr in run0 if rr.N == N)
-                    ss = np.nanmean(res[(N, k, ro)][q][:, run.T_burn:], 1)     # per-seed steady-state value
+                    run = next(rr for rr in run0 if rr.N == N and rr.readout == ro and rr.kappa_label == k)
+                    if q == Q_SCALED[0]:
+                        ss = q_scaled(np.nanmean(res[(N, k, ro)]["Q_all"][:, run.T_burn:], 1), run)
+                    else:
+                        ss = np.nanmean(res[(N, k, ro)][q][:, run.T_burn:], 1)     # per-seed steady-state value
                     v = ss[np.isfinite(ss)]
                     if len(v):
                         pts.append((N, v.mean(), v.std(ddof=1) / math.sqrt(len(v)) if len(v) > 1 else 0.0))
@@ -206,17 +228,18 @@ def fig_vs_N(res: dict, Ns: list, klabels: list, run0, path: str) -> str:
                 figdata[f"{q}_k{klabel}_{ro}"] = np.stack([x, m, se])
             P.logaxis(ax, "x")
             P.discrete_ticks(ax, Ns, "x")
-            if r == len(QUANT) - 1:
+            if r == len(rows) - 1:
                 ax.set_xlabel("$N$")
         axes[0, c].set_title(f"κ = {klabel}")
-    for r, (q, lab) in enumerate(QUANT):
+    for r, (q, lab) in enumerate(rows):
         axes[r, 0].set_ylabel(lab)
     r0 = run0[0]
     P.cell_title(fig, d0=r0.delta0, lam=r0.lam, solver=r0.solver, eta=r0.eta)
     P.caption(fig, "steady-state norms: mean over the measurement window (t ≥ T_burn) of mean_i Q_ii (top), "
-                   "mean_i a_i² (middle) and the effective weight norm |u_t|²/D, u_t = (g ⊙ a) W / pN (bottom), "
-                   "then seed mean with ±1 s.e. bars; the ungated readouts have no κ and "
-                   "repeat in every column.")
+                   "mean_i a_i² (second) and the effective weight norm |u_t|²/D, u_t = (g ⊙ a) W / pN (third), "
+                   "then seed mean with ±1 s.e. bars; bottom: the scaling collapse of the top row, Q̄/pN for the "
+                   "frozen readouts and Q̄²/pN for the learned ones (pN = κ√N, or N when ungated) — flat in N "
+                   "confirms the mechanism; the ungated readouts have no κ and repeat in every column.")
     P.fig_legend(fig, readouts, marker=True)
     return P.save(fig, path, figdata=figdata)
 

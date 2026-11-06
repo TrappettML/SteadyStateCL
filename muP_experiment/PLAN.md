@@ -130,7 +130,7 @@ class State(NamedTuple):      # all float64 unless noted
     g:      (N,)              # current gate, 0/1 (all ones when ungated)
     w:      (D,)              # current teacher
     heads:  (P, N)            # stored task heads (zeros unless readout == task_heads)
-    probes_w: (P, D);  probes_g: (P, N)
+    (probes' teachers and gates are regenerated from (key, k) by `model.probe_task`, not stored — 2026-11-05)
     key:    PRNGKey
     t:      int32             # task index
     # per-run constants, passed as a separate Params pytree:
@@ -216,7 +216,7 @@ split into `vmap` batches of ≤ `batch_size` (64).
 ```
 draw (w_t, g_t[, head_t]) from fold_in(key, t);  g_t = bernoulli(p) if gated else ones(N)
 lax.fori_loop(0, n_steps, step_and_project, state)        # step = sgd or pop
-store w_t, g_t[, head_t] at probes[t]
+store head_t at heads[t] (w_t, g_t regenerate from the key)
 evaluate probes at the age schedule (§5) → (n_ages,) s and ε, plus validity mask
 per-task scalars: abar2, mean Q, mean a², mean/max |a|√Q, L_end, gauge residuals
 ```

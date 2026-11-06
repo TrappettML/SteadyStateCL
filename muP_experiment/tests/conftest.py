@@ -23,17 +23,15 @@ def params(readout="gated_shared", delta0=1.0, eta=0.1, h=0.05, pN=3.0):
 
 
 def state_with_task(seed=0, N=10, D=40, P=5, readout="gated_shared", **kw):
-    """A state with a random teacher, gate and (for heads) one stored head."""
-    from mup.model import draw_task, draw_readout, Q_diag
+    """A state with the teacher and gate of task 0 (so probe 0 regenerates to them) and, for heads, one stored head."""
+    from mup.model import draw_readout, probe_task, task_keys, Q_diag
     p = params(readout=readout, **kw)
     key = jax.random.PRNGKey(seed)
     st = init_state(key, p, N, D, P)
-    k1, k2 = jax.random.split(jax.random.fold_in(key, 7))
-    w, g = draw_task(k1, N, D, p.pN, p.gated)
+    w, g = probe_task(key, 0, N, D, p.pN, p.gated)
     st = st._replace(w=w, g=g)
     if readout == "task_heads":
-        st = st._replace(heads=st.heads.at[0].set(st.a), a=draw_readout(k2, Q_diag(st.W), p))
-        st = st._replace(probes_g=st.probes_g.at[0].set(g), probes_w=st.probes_w.at[0].set(w))
+        st = st._replace(heads=st.heads.at[0].set(st.a), a=draw_readout(task_keys(key, 0)[1], Q_diag(st.W), p))
     return st, p
 
 
