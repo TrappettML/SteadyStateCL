@@ -1439,7 +1439,15 @@ observable evaluated inside a `scan` over `chunk` tasks — and
 or on `--workers` CPU processes, or in-process.  `mup/npmodel.py` stays
 as the NumPy reference of `tests/test_npmodel.py`.  The Xeon caveat
 above (many workers compiling at once) applies to the CPU placement:
-keep `--workers` moderate there, or run these on the GPU node.
+keep `--workers` moderate there, or run these on the GPU node.  On
+the GPU node `--gpus` alone is the whole placement (2026-11-06,
+`pool.plan`): the jobs are launch-latency bound, their wall time set by
+tasks × n_steps rather than by the batch, so the plan keeps each width's
+or cell's batch whole, runs up to three processes per card to interleave
+independent streams, splits a group only when there are fewer groups
+than processes or its state exceeds a process's share of the 32 GB, and
+takes the largest chunk (64/32/16) whose stacked observable stays under
+512 MB.  `--per-gpu`, `--chunk`, `--split` remain as overrides.
 
 - **Figure 1** (`results/Nscaling/figures/mhalf_vs_N_k1_d00_lam4.png`):
   x = N (log, ticks at the grid), y = m½ in tasks (log), one trace per

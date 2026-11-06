@@ -76,22 +76,31 @@ python scripts/run_sweep.py --config configs/stage1.yaml --gpus auto --batch-siz
   probe teachers and gates are regenerated from the run key, not stored.
 - The experiment scripts (`run_szero.py`, `run_stask.py`, `run_Nscaling.py`,
   `run_weight_norms.py`, `run_gauge_comp.py`, `validate.py`) take the same
-  `--gpus auto` / `--per-gpu` / `--workers` / `--chunk` flags (`mup/pool.py`).
-  Each reduces its work to independent jobs — a cell, or one width's runs
-  (every κ, readout and seed as ONE `vmap` batch), or a sweep batch — that
-  one process per card claims largest first; inside a job the tasks are
-  scanned `--chunk` at a time with the observable evaluated on the device
-  (`mup/experiments.py`, the sweep's kernels without the probes).  `--split k`
-  cuts each width/cell into `k` pieces (default: the number of worker
-  processes) so a single large N still fills all four cards.  With no GPU
-  the same scripts run in-process (default) or over `--workers` CPU
-  processes.
+  `--gpus` flag (`mup/pool.py`).  Each reduces its work to independent
+  jobs — a cell, or one width's runs (every κ, readout and seed as ONE
+  `vmap` batch), or a sweep batch — that the worker processes claim
+  largest first; inside a job the tasks are scanned a chunk at a time with
+  the observable evaluated on the device (`mup/experiments.py`, the sweep's
+  kernels without the probes).  With no GPU the same scripts run
+  in-process (default) or over `--workers` CPU processes.
+- `--gpus` alone plans the placement (`pool.plan`), so nothing else needs
+  tuning: the cards are those `nvidia-smi` lists (else four), their memory
+  what it reports (else 32 GB).  A job's wall time is set by its sequential
+  steps (tasks × n_steps), not by how many runs it batches, so the plan
+  keeps each width's or cell's batch whole and fills the workers with
+  distinct groups: up to three processes per card (fewer when a run's
+  state would not fit a process's share of the memory, or there are fewer
+  runs than processes), a group split only when there are fewer groups
+  than processes or its batch exceeds the share, and the largest chunk
+  (64, 32, 16 tasks) whose stacked observable stays under 512 MB.  The
+  banner prints the plan.  `--per-gpu`, `--chunk` and `--split` override
+  the respective choices, and `--gpus 0 1` restricts the cards.
 
   ```bash
-  python scripts/run_weight_norms.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus auto
-  python scripts/run_Nscaling.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus auto
-  python scripts/run_szero.py --N 100 200 --kappa 1 2 --seeds 8 --gpus auto
-  python scripts/validate.py --N-max 80 --seeds 8 --gpus auto
+  python scripts/run_weight_norms.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
+  python scripts/run_Nscaling.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
+  python scripts/run_szero.py --N 100 200 --kappa 1 2 --seeds 8 --gpus
+  python scripts/validate.py --N-max 80 --seeds 8 --gpus
   ```
 
   These experiments are latency-bound at the Stage-1 sizes (N ≤ 200: the

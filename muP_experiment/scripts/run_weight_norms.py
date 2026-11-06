@@ -29,11 +29,10 @@ The per-run curves are written to ``norms_….npz`` beside the figures.
 Placement (``mup.pool``): the runs of one width — every κ, readout and
 seed, which share (N, D, n_steps, T) — form one ``vmap`` batch advanced
 ``--chunk`` tasks per device call with the norms evaluated inside the scan
-(``experiments.norms_over_tasks``, the JAX kernels of the sweep); each
-width is split into ``--split`` pieces (default: one per worker process)
-and the pieces run as jobs, largest N first, over the GPUs (``--gpus
-auto``: one process per card), over ``--workers`` CPU processes, or in
-this process.
+(``experiments.norms_over_tasks``, the JAX kernels of the sweep) and runs
+as a job, largest N first, over the GPUs (``--gpus``: the four cards,
+several processes each, a width split only as far as needed to fill them
+— ``pool.plan``), over ``--workers`` CPU processes, or in this process.
 """
 import argparse
 import math
@@ -72,23 +71,28 @@ def q_scaled(ss_Q: np.ndarray, run) -> np.ndarray:
     return ss_Q / pN if run.learn_a == 0.0 else ss_Q * ss_Q / pN
 
 
-def make_jobs(runs: list, pieces: int) -> list:
-    """One job per piece of a (N, D, n_steps, T) group: the norms after each of its T tasks."""
-    groups = {}
+def groups(runs: list) -> dict:
+    """``{(N, D, solver, n_steps, T): runs}``, largest N first."""
+    g = {}
     for r in runs:
-        groups.setdefault(X.group_key(r) + (r.T_burn + r.T_meas,), []).append(r)
+        g.setdefault(X.group_key(r) + (r.T_burn + r.T_meas,), []).append(r)
+    return {k: g[k] for k in sorted(g, key=lambda k: -k[0])}
+
+
+def make_jobs(groups_: dict, pieces) -> list:
+    """One job per piece of a (N, D, n_steps, T) group: the norms after each of its T tasks."""
     jobs = []
-    for key in sorted(groups, key=lambda k: -k[0]):                  # largest N first
+    for (key, runs), k in zip(groups_.items(), pieces):
         T = key[-1]
-        for i, part in enumerate(X.split(groups[key], pieces)):
+        for i, part in enumerate(X.split(runs, k)):
             jobs.append(((key, i), {"runs": part, "T": T}, X.run_cost(part[0], T) * len(part)))
     return jobs
 
 
-def collect(runs: list, place: dict, pieces: int, log=print) -> dict:
+def collect(runs: list, plan: pool.Plan, log=print) -> dict:
     """``{(N, kappa_label, readout): {key: (n_seeds, T) array}}`` for every condition of ``runs``."""
-    jobs = make_jobs(runs, pieces)
-    res = pool.run_jobs("mup.experiments:norms_over_tasks", jobs, log=log, **place)
+    jobs = make_jobs(groups(runs), plan.pieces)
+    res = pool.run_jobs("mup.experiments:norms_over_tasks", jobs, log=log, **plan.place)
     per_run = {}
     for (_, kw, _), d in zip(jobs, res):
         for j, r in enumerate(kw["runs"]):
@@ -234,11 +238,10 @@ def main(argv=None):
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
     run0 = runs[0]
-    place = pool.placement(args)
-    pieces = pool.pieces(args, place)
+    plan = pool.plan(args, [(g, key[-1]) for key, g in groups(runs).items()], out_per_task=8 * len(ALL_KEYS))
     print(f"weight norms: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds}  "
-          f"[{pool.describe(place)}, {pieces} piece(s) per width]", flush=True)
-    res = collect(runs, place, pieces)
+          f"[{plan.describe()}]", flush=True)
+    res = collect(runs, plan)
 
     klabels = [P.fmt(k) for k in args.kappa]
     fdir = os.path.join(args.out, "figures")

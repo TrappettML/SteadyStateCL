@@ -26,6 +26,15 @@ from mup.config import Config, make_batches, make_runs
 from mup.observe import cv_exponent
 
 
+def batches_of(cfgs: dict) -> list:
+    """``[(name, i, batch, T)]`` over every config's batches."""
+    out = []
+    for name, cfg in cfgs.items():
+        for i, batch in enumerate(make_batches(make_runs(cfg), cfg.batch_size)):
+            out.append((name, i, batch, batch[0].T_burn + batch[0].T_meas))
+    return out
+
+
 def run_all(cfgs: dict, place: dict, log) -> dict:
     """Run every batch of every config as one job pool and pool each over seeds.
 
@@ -34,7 +43,7 @@ def run_all(cfgs: dict, place: dict, log) -> dict:
     cfgs : dict
         ``{name: Config}``.
     place : dict
-        ``pool.run_jobs`` placement.
+        ``pool.run_jobs`` placement (``pool.Plan.place``).
     log : callable
         Progress sink.
 
@@ -45,11 +54,7 @@ def run_all(cfgs: dict, place: dict, log) -> dict:
         the seed-pooled curves, ``cv_s`` the pooled coefficient of variation
         of s_k and ``S_se`` the s.e.m. of ``S`` across seeds (NaN for one seed).
     """
-    jobs = []
-    for name, cfg in cfgs.items():
-        for i, batch in enumerate(make_batches(make_runs(cfg), cfg.batch_size)):
-            T = batch[0].T_burn + batch[0].T_meas
-            jobs.append(((name, i), {"runs": batch}, X.run_cost(batch[0], T) * len(batch)))
+    jobs = [((name, i), {"runs": batch}, X.run_cost(batch[0], T) * len(batch)) for name, i, batch, T in batches_of(cfgs)]
     res = pool.run_jobs("mup.experiments:stream_batch", jobs, log=log, **place)
     out = {name: {} for name in cfgs}
     for ((name, _), kw, _), r in zip(jobs, res):
@@ -214,9 +219,10 @@ def main(argv=None):
     fig_dir = os.path.join(args.out, "figures")
     os.makedirs(fig_dir, exist_ok=True)
     log = lambda m: print("  " + m, flush=True)
-    place = pool.placement(args)
-    print(f"validation parts {args.parts}: seeds={args.seeds} N_max={args.N_max}  [{pool.describe(place)}]", flush=True)
-    res = run_all(configs(args), place, log)
+    cfgs = configs(args)
+    plan = pool.plan(args, [(b, T) for _, _, b, T in batches_of(cfgs)], out_per_task=8 * 64, split=False)
+    print(f"validation parts {args.parts}: seeds={args.seeds} N_max={args.N_max}  [{plan.describe()}]", flush=True)
+    res = run_all(cfgs, plan.place, log)
     if "eta" in args.parts:
         eta_halving(args, fig_dir, res)
     if "kaczmarz" in args.parts:

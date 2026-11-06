@@ -19,8 +19,8 @@ Placement (``mup.pool``): the readouts of a cell, each listed with the
 projection off and on, are one ``vmap`` batch advanced ``--chunk`` tasks per
 device call with the per-step statistics returned from the scan
 (``experiments.imbalance_over_steps``); every cell is one job over the
-GPUs (``--gpus auto``: one process per card), ``--workers`` CPU processes
-or this process — list several ``--N``, ``--kappa``, ``--delta0`` or
+GPUs (``--gpus``: the four cards, several processes each — ``pool.plan``),
+``--workers`` CPU processes or this process — list several ``--N``, ``--kappa``, ``--delta0`` or
 ``--seed`` to fill the cards.
 """
 import argparse
@@ -59,12 +59,16 @@ def cells(runs: list) -> dict:
     return out
 
 
+def cell_runs(cell: list) -> tuple[list, list]:
+    """The runs of a cell's job (every readout with ``do_proj`` 0 then 1) and their ``do_proj`` flags."""
+    return [r for _ in ROWS for r in cell], [d for d, _ in ROWS for _ in cell]
+
+
 def make_jobs(cells_: dict, n_tasks: int) -> list:
     """One job per cell: every readout with ``do_proj`` 0 then 1 (``experiments.imbalance_over_steps``)."""
     jobs = []
     for key, cell in cells_.items():
-        runs = [r for do_proj, _ in ROWS for r in cell]
-        do_proj = [d for d, _ in ROWS for _ in cell]
+        runs, do_proj = cell_runs(cell)
         jobs.append((key, {"runs": runs, "do_proj": do_proj, "n_tasks": n_tasks}, X.run_cost(cell[0], n_tasks) * len(runs)))
     return jobs
 
@@ -83,10 +87,10 @@ def traces_of(cell: list, R: np.ndarray) -> dict:
     return out
 
 
-def collect(cells_: dict, n_tasks: int, place: dict, log=print) -> dict:
+def collect(cells_: dict, n_tasks: int, plan: pool.Plan, log=print) -> dict:
     """``{cell: traces}`` through ``pool.run_jobs``."""
     jobs = make_jobs(cells_, n_tasks)
-    res = pool.run_jobs("mup.experiments:imbalance_over_steps", jobs, log=log, **place)
+    res = pool.run_jobs("mup.experiments:imbalance_over_steps", jobs, log=log, **plan.place)
     return {key: traces_of(cells_[key], R) for (key, _, _), R in zip(jobs, res)}
 
 
@@ -159,12 +163,12 @@ def main(argv=None):
     runs = make_runs(cfg)
     run0 = runs[0]
     n_tasks = args.tasks or (run0.T_burn + run0.T_meas)
-    place = pool.placement(args)
     cells_ = cells(runs)
+    plan = pool.plan(args, [(cell_runs(cell)[0], n_tasks) for cell in cells_.values()], out_per_task=32 * run0.n_steps, split=False)
     print(f"gauge comparison: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={run0.lam} seeds={args.seed} {run0.solver} "
           f"n_steps={run0.n_steps} tasks={n_tasks} ({n_tasks * run0.n_steps} steps)  "
-          f"[{pool.describe(place)}, {len(cells_)} cell(s)]", flush=True)
-    res = collect(cells_, n_tasks, place)
+          f"[{plan.describe()}, {len(cells_)} cell(s)]", flush=True)
+    res = collect(cells_, n_tasks, plan)
 
     for (N, k, d0, lam, seed), traces in res.items():
         cell = cells_[(N, k, d0, lam, seed)]

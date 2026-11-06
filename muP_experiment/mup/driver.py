@@ -76,6 +76,25 @@ def visible_gpus() -> list[int]:
     return []
 
 
+def gpu_memory_gb() -> float:
+    """
+    Smallest device memory of the host's GPUs in GB from ``nvidia-smi`` (0.0 when it cannot be asked).
+
+    Returns
+    -------
+    float
+    """
+    if shutil.which("nvidia-smi"):
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                                 capture_output=True, text=True, timeout=30).stdout
+            mib = [float(x) for x in out.split() if x.strip().replace(".", "").isdigit()]
+            return min(mib) / 1024.0 if mib else 0.0
+        except (subprocess.SubprocessError, ValueError):
+            return 0.0
+    return 0.0
+
+
 def _command(config_path: str, out_dir: str, batch_id: int, numa_node: Optional[int]) -> list[str]:
     """
     Command line of one batch subprocess, optionally bound to a NUMA node.

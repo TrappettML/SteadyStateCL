@@ -19,10 +19,10 @@ per-task arrays are written next to the figure as ``szero_….npz``.
 
 Placement (``mup.pool``): every readout and seed of a cell is one ``vmap``
 batch advanced ``--chunk`` tasks per device call with S₀ evaluated inside
-the scan (``experiments.signal_after_tasks``); each cell is split into
-``--split`` pieces (default: one per worker process) and the pieces run as
-jobs over the GPUs (``--gpus auto``: one process per card), over
-``--workers`` CPU processes, or in this process.
+the scan (``experiments.signal_after_tasks``) and runs as a job over the GPUs
+(``--gpus``: the four cards, several processes each, the cells split only
+as far as needed to fill them — ``pool.plan``), over ``--workers`` CPU
+processes, or in this process.
 """
 import argparse
 import os
@@ -61,11 +61,11 @@ def cells(runs: list) -> dict:
     return out
 
 
-def make_jobs(cells_: dict, T: int, pieces: int) -> list:
-    """One job per piece of a cell: ``(key, kwargs of experiments.signal_after_tasks, cost)``."""
+def make_jobs(cells_: dict, T: int, pieces) -> list:
+    """One job per piece of a cell: ``(key, kwargs of experiments.signal_after_tasks, cost)``; ``pieces`` per cell."""
     jobs = []
-    for key, cell in cells_.items():
-        for i, part in enumerate(X.split(cell, pieces)):
+    for (key, cell), k in zip(cells_.items(), pieces):
+        for i, part in enumerate(X.split(cell, k)):
             jobs.append(((key, i), {"runs": part, "T_pre": 0, "n_follow": T, "k": 0}, X.run_cost(part[0], T) * len(part)))
     return jobs
 
@@ -86,10 +86,10 @@ def by_readout(cell: list, S: np.ndarray) -> dict:
     return out
 
 
-def collect(cells_: dict, T: int, place: dict, pieces: int, log=print) -> dict:
+def collect(cells_: dict, T: int, plan: pool.Plan, log=print) -> dict:
     """Run every cell's jobs through ``pool.run_jobs`` and return ``{cell: {readout: (T, n_seeds)}}``."""
-    jobs = make_jobs(cells_, T, pieces)
-    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **place)
+    jobs = make_jobs(cells_, T, plan.pieces)
+    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
     parts = {}
     for (key, i), r in zip([j[0] for j in jobs], res):
         parts.setdefault(key, []).append((i, r))
@@ -184,17 +184,16 @@ def main(argv=None):
             "seeds": args.seeds, "extra": (), "trace": False}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
-    place = pool.placement(args)
-    pieces = pool.pieces(args, place)
     cells_ = cells(runs)
     T_of = {key: args.tasks or (cell[0].T_burn + cell[0].T_meas) for key, cell in cells_.items()}
     if len(set(T_of.values())) != 1:
         raise SystemExit("cells differ in T; pass --tasks")
     T = next(iter(T_of.values()))
+    plan = pool.plan(args, [(cell, T) for cell in cells_.values()])
     r0 = runs[0]
     print(f"S₀(t) vs task: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={r0.lam} {r0.solver} n_steps={r0.n_steps} "
-          f"T={T} seeds={args.seeds}  [{pool.describe(place)}, {pieces} piece(s) per cell]", flush=True)
-    res = collect(cells_, T, place, pieces)
+          f"T={T} seeds={args.seeds}  [{plan.describe()}]", flush=True)
+    res = collect(cells_, T, plan)
 
     outs = []
     for (N, k, d0, lam), S0 in res.items():

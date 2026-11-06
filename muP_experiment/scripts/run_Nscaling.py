@@ -28,10 +28,10 @@ The per-condition values are written to ``mhalf_….npz`` beside the figures.
 Placement (``mup.pool``): the runs of one width — every κ, readout and
 seed, which share (N, D, n_steps, T) — form one ``vmap`` batch advanced
 ``--chunk`` tasks per device call with S_T evaluated inside the scan
-(``experiments.signal_after_tasks``); each width is split into ``--split``
-pieces (default: one per worker process) and the pieces run as jobs,
-largest N first, over the GPUs (``--gpus auto``: one process per card),
-over ``--workers`` CPU processes, or in this process.
+(``experiments.signal_after_tasks``) and runs as a job, largest N first,
+over the GPUs (``--gpus``: the four cards, several processes each, a width
+split only as far as needed to fill them — ``pool.plan``), over
+``--workers`` CPU processes, or in this process.
 """
 import argparse
 import math
@@ -69,15 +69,20 @@ def theory(N: float, kappa: float, kind: str) -> float:
     return N * math.log(2) / (kappa ** 2 if kind == "nk2" else 1.0)
 
 
-def make_jobs(runs: list, pieces: int) -> list:
-    """One job per piece of a (N, D, n_steps, T) group: train T tasks, follow probe T for T + 1 more."""
-    groups = {}
+def groups(runs: list) -> dict:
+    """``{(N, D, solver, n_steps, T): runs}``, largest N first."""
+    g = {}
     for r in runs:
-        groups.setdefault(X.group_key(r) + (r.T_burn + r.T_meas,), []).append(r)
+        g.setdefault(X.group_key(r) + (r.T_burn + r.T_meas,), []).append(r)
+    return {k: g[k] for k in sorted(g, key=lambda k: -k[0])}
+
+
+def make_jobs(groups_: dict, pieces) -> list:
+    """One job per piece of a (N, D, n_steps, T) group: train T tasks, follow probe T for T + 1 more."""
     jobs = []
-    for key in sorted(groups, key=lambda k: -k[0]):                  # largest N first
+    for (key, runs), k in zip(groups_.items(), pieces):
         T = key[-1]
-        for i, part in enumerate(X.split(groups[key], pieces)):
+        for i, part in enumerate(X.split(runs, k)):
             jobs.append(((key, i), {"runs": part, "T_pre": T, "n_follow": T + 1, "k": T},
                          X.run_cost(part[0], 2 * T + 1) * len(part)))
     return jobs
@@ -98,19 +103,17 @@ def _report(key, mh, T):
           f"  censored or infeasible {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
 
 
-def collect(runs: list, place: dict, pieces: int, log=print) -> dict:
+def collect(runs: list, plan: pool.Plan, log=print) -> dict:
     """``{(N, kappa_label, readout): (n_seeds,) m½ array}`` for every condition of ``runs``.
 
     Parameters
     ----------
     runs : list of config.Run
-    place : dict
-        ``pool.run_jobs`` placement (``pool.placement``).
-    pieces : int
-        Pieces each width's batch is split into.
+    plan : pool.Plan
+        Placement and pieces per width (``pool.plan`` over ``groups(runs)``).
     """
-    jobs = make_jobs(runs, pieces)
-    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **place)
+    jobs = make_jobs(groups(runs), plan.pieces)
+    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
     mh = {}
     for (_, kw, _), S in zip(jobs, res):
         for r, v in zip(kw["runs"], mhalf_from_signal(S)):
@@ -229,11 +232,10 @@ def main(argv=None):
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
     run0 = runs[0]
-    place = pool.placement(args)
-    pieces = pool.pieces(args, place)
+    plan = pool.plan(args, [(g, 2 * key[-1] + 1) for key, g in groups(runs).items()])
     print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds}  "
-          f"[{pool.describe(place)}, {pieces} piece(s) per width]", flush=True)
-    res = collect(runs, place, pieces)
+          f"[{plan.describe()}]", flush=True)
+    res = collect(runs, plan)
 
     klabels = [P.fmt(k) for k in args.kappa]
     fdir = os.path.join(args.out, "figures")

@@ -125,3 +125,67 @@ def test_pool_reports_failures():
         pool.run_jobs("mup.experiments:stream_batch", jobs, workers=2, log=lambda m: None)
     with pytest.raises(IndexError):
         pool.run_jobs("mup.experiments:stream_batch", jobs, workers=1)
+
+
+# ----------------------------------------------------------------------------
+# pool.plan: placement from --gpus alone
+# ----------------------------------------------------------------------------
+def _runs(N=10, seeds=2):
+    """``seeds`` frozen-readout runs of width ``N`` (one run per seed)."""
+    return make_runs(Config(N=[N], readout=["frozen"], delta0=[0.0], lam=[1.0], seeds=seeds, T_factor=0.5, T_min=6))
+
+
+def _args(**kw):
+    import argparse
+    base = {"gpus": None, "per_gpu": None, "workers": 0, "chunk": None, "split": None}
+    return argparse.Namespace(**{**base, **kw})
+
+
+def test_plan_cpu_in_process_keeps_groups_whole():
+    from mup import pool
+    groups = [(_runs(N=10, seeds=3), 20), (_runs(N=20, seeds=3), 40)]
+    pl = pool.plan(_args(), groups)
+    assert pl.gpus is None and pl.slots == 1 and pl.pieces == [1, 1] and pl.chunk == 1
+    assert pl.describe() == "in-process"
+
+
+def test_plan_gpu_fills_cards_without_overcutting(monkeypatch):
+    from mup import driver, pool
+    monkeypatch.setattr(driver, "gpu_memory_gb", lambda: 32.0)
+    monkeypatch.setattr(driver, "visible_gpus", lambda: [])
+    one = [(_runs(N=10, seeds=12), 20)]                       # 12 runs, 1 group
+    pl = pool.plan(_args(gpus=[]), one)
+    assert pl.gpus == [0, 1, 2, 3] and pl.per_gpu == 3 and pl.slots == 12
+    assert pl.pieces == [12]                                  # one group: cut to fill every process
+    assert pl.chunk == 16                                     # 64 and 32 exceed T = 20
+    many = [(_runs(N=10, seeds=1), 2000) for _ in range(20)]  # 20 groups ≥ 12 slots
+    pl = pool.plan(_args(gpus=["0", "1"]), many)
+    assert pl.gpus == [0, 1] and pl.per_gpu == 3 and pl.pieces == [1] * 20 and pl.chunk == 64
+    pl = pool.plan(_args(gpus=["auto"], per_gpu=1, chunk=8, split=2), many)
+    assert pl.per_gpu == 1 and pl.chunk == 8 and pl.pieces == [1] * 20   # split capped by the group size
+    pl = pool.plan(_args(gpus=[], split=2), [(_runs(N=10, seeds=2), 20)] * 20)
+    assert pl.pieces == [2] * 20
+
+
+def test_plan_gpu_respects_memory(monkeypatch):
+    from mup import driver, pool
+    monkeypatch.setattr(driver, "gpu_memory_gb", lambda: 0.001)   # ~1 MB cards
+    monkeypatch.setattr(driver, "visible_gpus", lambda: [0, 1, 2, 3])
+    runs = _runs(N=10, seeds=12)
+    r = runs[0]
+    need = pool.job_bytes(runs[:1], 20, 16, 8.0)
+    big = _args(gpus=[])
+    monkeypatch.setattr(driver, "gpu_memory_gb", lambda: need * 4 / driver.GPU_MEM_SHARE / 2 ** 30)
+    pl = pool.plan(big, [(runs, 20)])                          # 4 runs per card, so 3 processes hold ≤ 1 run each
+    assert pl.per_gpu == 3 and pl.pieces == [12]
+    monkeypatch.setattr(driver, "gpu_memory_gb", lambda: need * 1.5 / driver.GPU_MEM_SHARE / 2 ** 30)
+    pl = pool.plan(big, [(runs, 20)])                          # only one run per card fits: one process each
+    assert pl.per_gpu == 1 and pl.pieces == [12]
+    pl = pool.plan(big, [(runs[i:i + 1], 20) for i in range(12)], split=False)
+    assert pl.pieces == [1] * 12 and pl.per_gpu == 1
+    with pytest.raises(SystemExit):
+        pool.plan(big, [(runs[:4], 20)] * 3, split=False)        # 4 runs per batch, 1 fits
+    monkeypatch.setattr(driver, "gpu_memory_gb", lambda: need * 0.5 / driver.GPU_MEM_SHARE / 2 ** 30)
+    with pytest.raises(SystemExit):
+        pool.plan(big, [(runs, 20)])
+    assert r.N == 10

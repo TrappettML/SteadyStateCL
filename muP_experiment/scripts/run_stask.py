@@ -19,8 +19,8 @@ next to the figure as ``stask_….npz``.
 
 Placement as ``run_szero.py``: every readout and seed of a cell is one
 ``vmap`` batch (``experiments.signal_after_tasks`` with ``T_pre = T, k = T``),
-split into ``--split`` pieces that run as jobs over the GPUs, CPU processes
-or in this process (``mup.pool``).
+run as jobs over the GPUs (``--gpus``, planned by ``pool.plan``), CPU
+processes or in this process (``mup.pool``).
 """
 import argparse
 import os
@@ -40,20 +40,20 @@ from run_szero import by_readout, cells, half_life
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 
-def make_jobs(cells_: dict, T: int, tau: int, pieces: int) -> list:
-    """One job per piece of a cell: train ``T`` tasks, follow probe ``T`` for ``tau + 1`` more."""
+def make_jobs(cells_: dict, T: int, tau: int, pieces) -> list:
+    """One job per piece of a cell: train ``T`` tasks, follow probe ``T`` for ``tau + 1`` more; ``pieces`` per cell."""
     jobs = []
-    for key, cell in cells_.items():
-        for i, part in enumerate(X.split(cell, pieces)):
+    for (key, cell), k in zip(cells_.items(), pieces):
+        for i, part in enumerate(X.split(cell, k)):
             jobs.append(((key, i), {"runs": part, "T_pre": T, "n_follow": tau + 1, "k": T},
                          X.run_cost(part[0], T + tau + 1) * len(part)))
     return jobs
 
 
-def collect(cells_: dict, T: int, tau: int, place: dict, pieces: int, log=print) -> dict:
+def collect(cells_: dict, T: int, tau: int, plan: pool.Plan, log=print) -> dict:
     """``{cell: {readout: (tau + 1, n_seeds) array}}``; row τ is S_T after task T + τ."""
-    jobs = make_jobs(cells_, T, tau, pieces)
-    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **place)
+    jobs = make_jobs(cells_, T, tau, plan.pieces)
+    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
     parts = {}
     for (key, i), r in zip([j[0] for j in jobs], res):
         parts.setdefault(key, []).append((i, r))
@@ -135,17 +135,16 @@ def main(argv=None):
             "seeds": args.seeds, "extra": (), "trace": False}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
-    place = pool.placement(args)
-    pieces = pool.pieces(args, place)
     cells_ = cells(runs)
     T_of = {key: args.T or (cell[0].T_burn + cell[0].T_meas) for key, cell in cells_.items()}
     if len(set(T_of.values())) != 1:
         raise SystemExit("cells differ in T; pass --T")
     T = next(iter(T_of.values()))
+    plan = pool.plan(args, [(cell, T + args.tau + 1) for cell in cells_.values()])
     r0 = runs[0]
     print(f"S_T(τ) vs τ: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={r0.lam} {r0.solver} n_steps={r0.n_steps} "
-          f"T={T} τ≤{args.tau} seeds={args.seeds}  [{pool.describe(place)}, {pieces} piece(s) per cell]", flush=True)
-    res = collect(cells_, T, args.tau, place, pieces)
+          f"T={T} τ≤{args.tau} seeds={args.seeds}  [{plan.describe()}]", flush=True)
+    res = collect(cells_, T, args.tau, plan)
 
     outs = []
     for (N, k, d0, lam), S in res.items():
