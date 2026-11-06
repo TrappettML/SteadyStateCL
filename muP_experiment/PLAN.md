@@ -1428,6 +1428,18 @@ learned shared (the one full-matrix case), i.e. 4–55 min per
 half-life run. `scripts/run_weight_norms.py` (mean Q_ii and mean a_i²
 against task and against N, §12.1 keys `Q_all`, `a2_all`) uses the
 same kernel and pool.
+**Back to JAX for the GPU node (2026-11-05):**
+both scripts (and `run_szero.py`, `run_stask.py`, `run_gauge_comp.py`,
+`validate.py`) now run through `mup/experiments.py` — the sweep's
+`run_task` without the probes (`train_task`, checked bit-for-bit
+against it in `tests/test_experiments.py`) with the experiment's
+observable evaluated inside a `scan` over `chunk` tasks — and
+`mup/pool.py`, which places independent jobs (one width's runs as one
+`vmap` batch, split into pieces; or one cell) on one process per GPU,
+or on `--workers` CPU processes, or in-process.  `mup/npmodel.py` stays
+as the NumPy reference of `tests/test_npmodel.py`.  The Xeon caveat
+above (many workers compiling at once) applies to the CPU placement:
+keep `--workers` moderate there, or run these on the GPU node.
 
 - **Figure 1** (`results/Nscaling/figures/mhalf_vs_N_k1_d00_lam4.png`):
   x = N (log, ticks at the grid), y = m½ in tasks (log), one trace per

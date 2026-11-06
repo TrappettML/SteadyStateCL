@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Steady-state half-life against width (PLAN.md §12.13): m½ from S_T(m)/S_T(0) vs N.
 
-    python scripts/run_Nscaling.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0] [--lam 4] [--seeds 4] [--workers W]
+    python scripts/run_Nscaling.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0] [--lam 4] [--seeds 4] [--gpus auto]
 
 For every (N, κ, readout, seed) the network trains the Stage-1 stream of
 T = T_burn + T_meas tasks (14N under ``configs/stage1.yaml``), then T
@@ -25,30 +25,27 @@ figures in ``results/Nscaling/figures/``:
 
 The per-condition values are written to ``mhalf_….npz`` beside the figures.
 
-This experiment does not use JAX: the dynamics run through the float64
-NumPy port ``mup.npmodel`` (one run, a plain Python loop over tasks, no
-compilation; seeds reproduce the JAX sweep in distribution, not bit for bit).
-
-Every run (N, κ, readout, seed) is independent, so each is one job of
-a ``ProcessPoolExecutor`` of ``--workers`` processes (default:
-``psutil.cpu_count(logical=False)``, the physical cores; 1 runs
-everything in this process); scheduling is left to the OS.  Largest N
-first, so the long runs do not trail at the end.
+Placement (``mup.pool``): the runs of one width — every κ, readout and
+seed, which share (N, D, n_steps, T) — form one ``vmap`` batch advanced
+``--chunk`` tasks per device call with S_T evaluated inside the scan
+(``experiments.signal_after_tasks``); each width is split into ``--split``
+pieces (default: one per worker process) and the pieces run as jobs,
+largest N first, over the GPUs (``--gpus auto``: one process per card),
+over ``--workers`` CPU processes, or in this process.
 """
 import argparse
 import math
 import os
-import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
 import _path  # noqa: F401
 
+from mup import experiments as X
 from mup import plotting as P
-from mup import npmodel
+from mup import pool
 from mup.config import Config, READOUT_ORDER, is_gated, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
@@ -56,7 +53,7 @@ _T0 = time.perf_counter()        # wall clock from after the imports to the end 
 GATED = tuple(ro for ro in READOUT_ORDER if is_gated(ro))
 
 def half_life(m: np.ndarray) -> float:
-    """First task at which ``m`` falls to ``m[0]/2``, linearly interpolated; NaN if never (as ``run_szero.half_life``, which imports JAX)."""
+    """First task at which ``m`` falls to ``m[0]/2``, linearly interpolated; NaN if never (as ``run_szero.half_life``)."""
     half = m[0] / 2
     below = np.nonzero(m <= half)[0]
     if len(below) == 0:
@@ -72,59 +69,23 @@ def theory(N: float, kappa: float, kind: str) -> float:
     return N * math.log(2) / (kappa ** 2 if kind == "nk2" else 1.0)
 
 
-def mhalf_run(run) -> float:
-    """Half-life m½ of one run: train T tasks, follow the teacher of task T for T more.
-
-    Parameters
-    ----------
-    run : config.Run
-
-    Returns
-    -------
-    float
-        m½ in tasks; NaN when censored (no crossing within T tasks) or
-        infeasible (δ₀ ≤ −min_i Q0_i, so the initial readout is not real).
-    """
-    T = run.T_burn + run.T_meas
-    use_heads = run.use_heads == 1.0
-    rng, W, a = npmodel.init_run(run)
-    if not np.isfinite(a).all():
-        return float("nan")                                   # protocol.feasible
-    S = np.empty(T + 1)
-    for t, W, a, g, w, fcum, _Q, _u in npmodel.tasks(run, rng, W, a, 2 * T + 1):
-        if t < T:
-            continue
-        if t == T:
-            w_T, act_T, head_T = w, np.flatnonzero(g == 1.0), (a.copy() if use_heads else None)
-            w_T2 = w_T @ w_T
-        elif use_heads:
-            head_T = head_T / fcum                            # model.rescale_heads for the stored probe
-        a_T = head_T if use_heads else a
-        u = a_T[act_T] @ W[act_T] / float(run.pN)             # run_stask._signal_k: (g_T ⊙ a_T) @ W / pN
-        S[t - T] = (u @ w_T) / w_T2
-    return float(half_life(S))
+def make_jobs(runs: list, pieces: int) -> list:
+    """One job per piece of a (N, D, n_steps, T) group: train T tasks, follow probe T for T + 1 more."""
+    groups = {}
+    for r in runs:
+        groups.setdefault(X.group_key(r) + (r.T_burn + r.T_meas,), []).append(r)
+    jobs = []
+    for key in sorted(groups, key=lambda k: -k[0]):                  # largest N first
+        T = key[-1]
+        for i, part in enumerate(X.split(groups[key], pieces)):
+            jobs.append(((key, i), {"runs": part, "T_pre": T, "n_follow": T + 1, "k": T},
+                         X.run_cost(part[0], 2 * T + 1) * len(part)))
+    return jobs
 
 
-def physical_cores() -> int:
-    """Physical (not logical) core count: ``psutil.cpu_count(logical=False)``, else ``sysctl`` on macOS, else ``os.cpu_count()``."""
-    try:
-        import psutil
-        n = psutil.cpu_count(logical=False)
-        if n:
-            return int(n)
-    except ImportError:
-        pass
-    if sys.platform == "darwin":
-        try:
-            return int(subprocess.check_output(["sysctl", "-n", "hw.physicalcpu"]).decode().strip())
-        except (OSError, ValueError, subprocess.CalledProcessError):
-            pass
-    return os.cpu_count() or 1
-
-
-def _job(key: tuple, run) -> tuple:
-    """One run (one seed) in a worker process: ``(key, m½)``; NaN when censored or infeasible."""
-    return key, mhalf_run(run)
+def mhalf_from_signal(S: np.ndarray) -> np.ndarray:
+    """m½ of every column of ``S`` (T + 1, B); NaN when censored or infeasible (NaN column)."""
+    return np.array([half_life(S[:, j]) if np.isfinite(S[:, j]).all() else float("nan") for j in range(S.shape[1])])
 
 
 def _report(key, mh, T):
@@ -137,41 +98,35 @@ def _report(key, mh, T):
           f"  censored or infeasible {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
 
 
-def collect(runs: list, workers: int = 1) -> dict:
+def collect(runs: list, place: dict, pieces: int, log=print) -> dict:
     """``{(N, kappa_label, readout): (n_seeds,) m½ array}`` for every condition of ``runs``.
 
     Parameters
     ----------
     runs : list of config.Run
-    workers : int
-        Processes in the pool, one run (seed) per job; 1 runs the jobs
-        here, in order.
+    place : dict
+        ``pool.run_jobs`` placement (``pool.placement``).
+    pieces : int
+        Pieces each width's batch is split into.
     """
-    cond = {}                                             # condition → runs, in seed order
+    jobs = make_jobs(runs, pieces)
+    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **place)
+    mh = {}
+    for (_, kw, _), S in zip(jobs, res):
+        for r, v in zip(kw["runs"], mhalf_from_signal(S)):
+            mh[(r.N, r.kappa_label, r.readout, r.seed)] = v
+    cond = {}
     for r in runs:
         cond.setdefault((r.N, r.kappa_label, r.readout), []).append(r)
-    T_of = {k: b[0].T_burn + b[0].T_meas for k, b in cond.items()}
-    jobs = [((r.N, r.kappa_label, r.readout, r.seed), r) for r in runs]
-    jobs.sort(key=lambda j: (-j[0][0], READOUT_ORDER.index(j[0][2]), j[0][1], j[0][3]))   # largest N first
-    per_seed = {}
-    if workers <= 1:
-        for k, r in jobs:
-            _, mh = _job(k, r)
-            per_seed.setdefault(k[:3], {})[k[3]] = mh
-    else:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            futs = [ex.submit(_job, k, r) for k, r in jobs]
-            for f in as_completed(futs):
-                (N, k, ro, seed), mh = f.result()
-                per_seed.setdefault((N, k, ro), {})[seed] = mh
     out = {}
     for key in sorted(cond, key=lambda k: (k[0], READOUT_ORDER.index(k[2]), k[1])):
-        mh = np.array([per_seed[key][r.seed] for r in cond[key]])
-        if not np.isfinite(mh).any():
-            _report(key, None, T_of[key])
+        v = np.array([mh[key + (r.seed,)] for r in cond[key]])
+        T = cond[key][0].T_burn + cond[key][0].T_meas
+        if not np.isfinite(v).any():
+            _report(key, None, T)
             continue
-        out[key] = mh
-        _report(key, mh, T_of[key])
+        out[key] = v
+        _report(key, v, T)
     return out
 
 
@@ -263,9 +218,8 @@ def main(argv=None):
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--theory", choices=["nln2", "nk2"], default="nln2")
-    ap.add_argument("--workers", type=int, default=None,
-                    help="processes in the pool, one run each (default: psutil physical cores; 1: in-process)")
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "Nscaling"))
+    pool.add_args(ap)
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
@@ -275,10 +229,11 @@ def main(argv=None):
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
     run0 = runs[0]
-    workers = args.workers or physical_cores()
-    print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds} "
-          f"workers={workers}", flush=True)
-    res = collect(runs, workers)
+    place = pool.placement(args)
+    pieces = pool.pieces(args, place)
+    print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds}  "
+          f"[{pool.describe(place)}, {pieces} piece(s) per width]", flush=True)
+    res = collect(runs, place, pieces)
 
     klabels = [P.fmt(k) for k in args.kappa]
     fdir = os.path.join(args.out, "figures")

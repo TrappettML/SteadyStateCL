@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""First-teacher signal against task (PLAN.md §12.11): S₀(t) = u_t·w₀*/|w₀*|², one trace per readout, one cell.
+"""First-teacher signal against task (PLAN.md §12.11): S₀(t) = u_t·w₀*/|w₀*|², one trace per readout, one figure per cell.
 
-    python scripts/run_szero.py [--N 100] [--kappa 1] [--delta0 0] [--lam 4] [--seeds 4] [--tasks T]
+    python scripts/run_szero.py [--N 100 200] [--kappa 1 2] [--delta0 0] [--lam 4] [--seeds 4] [--tasks T] [--gpus auto]
 
-One figure, ``results/szero/figures/szero_N{N}_k{κ}_d0{δ₀}_lam{λ}.png``:
+One figure per cell (N, κ, δ₀), ``results/szero/figures/szero_N{N}_k{κ}_d0{δ₀}_lam{λ}.png``:
 x = t + 1 on a log axis (task 0 at x = 1), y = S₀(t)/S₀(0) (every trace starts at 1), with S₀(t) how well the student after task t
 still aligns with the FIRST teacher w₀*: u_t = (g₀ ⊙ a) W_t / pN with the
 gate g₀ of task 0 and its stored head (task heads) or the current shared
@@ -16,74 +16,84 @@ N = 100, κ = 1, δ₀ = 0 by default; solver, λ and step-size rule come from
 ``configs/stage1.yaml``; the stream is the
 Stage-1 one, T_burn + T_meas tasks (1400 at N = 100), unless ``--tasks``.  The
 per-task arrays are written next to the figure as ``szero_….npz``.
+
+Placement (``mup.pool``): every readout and seed of a cell is one ``vmap``
+batch advanced ``--chunk`` tasks per device call with S₀ evaluated inside
+the scan (``experiments.signal_after_tasks``); each cell is split into
+``--split`` pieces (default: one per worker process) and the pieces run as
+jobs over the GPUs (``--gpus auto``: one process per card), over
+``--workers`` CPU processes, or in this process.
 """
 import argparse
 import os
 import sys
 import time
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
 import _path  # noqa: F401
 
+from mup import experiments as X
 from mup import plotting as P
+from mup import pool
 from mup.config import Config, READOUT_ORDER, make_runs
-from mup.observe import age_schedule
-from mup import model
-from mup.protocol import batched_run_task, feasible, init_batch
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 
-@jax.jit
-def _signal0(state, p):
-    """S₀ of every run of a batch: probe 0 (teacher, gate, head) against the current W."""
-    def one(s, q):
-        w0, g0 = model.probe_task(s.key, 0, s.W.shape[0], s.W.shape[1], q.pN, q.gated)
-        a0 = jnp.where(q.use_heads == 1.0, s.heads[0], s.a)
-        u = (g0 * a0) @ s.W / q.pN
-        return (u * w0).sum() / (w0 * w0).sum()
-    return jax.vmap(one)(state, p)
+def cell_key(r) -> tuple:
+    """(N, κ label, δ₀, λ) of a run: one figure per cell."""
+    return (r.N, r.kappa_label if r.gated == 1.0 else None, r.delta0, r.lam)
 
 
-def szero_by_readout(runs: list, T: int) -> dict:
-    """Run every readout's seeds as one batch for ``T`` tasks and collect S₀(t) after each task.
+def cells(runs: list) -> dict:
+    """``{(N, κ label, δ₀, λ): runs}``; the ungated readouts (no κ) are listed in every κ cell."""
+    out = {}
+    kappas = sorted({r.kappa_label for r in runs if r.gated == 1.0}, key=float) or [None]
+    for N in sorted({r.N for r in runs}):
+        for k in kappas:
+            for d0 in sorted({r.delta0 for r in runs}):
+                for lam in sorted({r.lam for r in runs}):
+                    cell = [r for r in runs if r.N == N and r.delta0 == d0 and r.lam == lam
+                            and (r.kappa_label == k if r.gated == 1.0 else True)]
+                    if cell:
+                        out[(N, k, d0, lam)] = cell
+    return out
 
-    Parameters
-    ----------
-    runs : list of config.Run
-        One cell (N, κ, δ₀, λ), every readout, every seed.
-    T : int
-        Tasks to run (task 0 is the probed one).
 
-    Returns
-    -------
-    dict
-        ``{readout: (T, n_seeds) array}``; row t is S₀ after task t.
-    """
+def make_jobs(cells_: dict, T: int, pieces: int) -> list:
+    """One job per piece of a cell: ``(key, kwargs of experiments.signal_after_tasks, cost)``."""
+    jobs = []
+    for key, cell in cells_.items():
+        for i, part in enumerate(X.split(cell, pieces)):
+            jobs.append(((key, i), {"runs": part, "T_pre": 0, "n_follow": T, "k": 0}, X.run_cost(part[0], T) * len(part)))
+    return jobs
+
+
+def by_readout(cell: list, S: np.ndarray) -> dict:
+    """``{readout: (T, n_seeds) array}`` of a cell from its stacked job results, infeasible seeds dropped."""
     out = {}
     for ro in READOUT_ORDER:
-        batch = [r for r in runs if r.readout == ro]
-        if not batch:
+        cols = [j for j, r in enumerate(cell) if r.readout == ro]
+        if not cols:
             continue
-        ok = feasible(batch)
-        batch = [r for r, f in zip(batch, ok) if f]
-        if not batch:
+        Y = S[:, cols]
+        Y = Y[:, np.isfinite(Y).all(0)]
+        if Y.shape[1] == 0:
             print(f"  {ro}: every seed infeasible (δ₀ ≤ −min_i Q0_i), skipped", flush=True)
             continue
-        r0 = batch[0]
-        state, p = init_batch(batch)
-        ages = jnp.asarray(age_schedule(r0.N, r0.kappa_s, r0.T_burn + r0.T_meas, r0.n_ages_geom, r0.m_max_factor))
-        step = batched_run_task(r0.n_steps, r0.solver)
-        S = np.zeros((T, len(batch)))
-        for t in range(T):
-            state, _ = step(state, p, ages)
-            S[t] = np.asarray(_signal0(state, p))
-        out[ro] = S
-        print(f"  {ro}: {len(batch)} seeds × {T} tasks done", flush=True)
+        out[ro] = Y
     return out
+
+
+def collect(cells_: dict, T: int, place: dict, pieces: int, log=print) -> dict:
+    """Run every cell's jobs through ``pool.run_jobs`` and return ``{cell: {readout: (T, n_seeds)}}``."""
+    jobs = make_jobs(cells_, T, pieces)
+    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **place)
+    parts = {}
+    for (key, i), r in zip([j[0] for j in jobs], res):
+        parts.setdefault(key, []).append((i, r))
+    return {key: by_readout(cells_[key], np.concatenate([r for _, r in sorted(parts[key])], 1)) for key in cells_}
 
 
 def figure(S0: dict, run0, path: str) -> str:
@@ -157,34 +167,48 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=os.path.join(_path.ROOT, "configs", "stage1.yaml"),
                     help="config supplying the solver, λ, step-size and stream-length rules (default: Stage 1)")
-    ap.add_argument("--N", type=int, default=100)
-    ap.add_argument("--kappa", default="1.0")
-    ap.add_argument("--delta0", type=float, default=0.0)
+    ap.add_argument("--N", type=int, nargs="+", default=[100])
+    ap.add_argument("--kappa", nargs="+", default=["1.0"])
+    ap.add_argument("--delta0", type=float, nargs="+", default=[0.0])
     ap.add_argument("--lam", type=float, default=None, help="default: the config's first λ")
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--tasks", type=int, default=None, help="tasks to run (default: the config's T_burn + T_meas)")
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "szero"))
+    pool.add_args(ap)
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
-    over = {"name": "szero", "N": [args.N], "kappa": [args.kappa], "readout": list(args.readout),
-            "delta0": [args.delta0], "lam": [args.lam if args.lam is not None else cfg.lam[0]],
+    over = {"name": "szero", "N": list(args.N), "kappa": list(args.kappa), "readout": list(args.readout),
+            "delta0": list(args.delta0), "lam": [args.lam if args.lam is not None else cfg.lam[0]],
             "seeds": args.seeds, "extra": (), "trace": False}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
-    run0 = runs[0]
-    T = args.tasks or (run0.T_burn + run0.T_meas)
-    print(f"S₀(t) vs task: N={run0.N} κ={run0.kappa_label} δ₀={run0.delta0} λ={run0.lam} {run0.solver} "
-          f"n_steps={run0.n_steps} T={T} seeds={args.seeds}", flush=True)
-    S0 = szero_by_readout(runs, T)
-    for ro, Y in S0.items():
-        m = Y.mean(1)
-        print(f"  {ro:15s} S₀(0) = {m[0]:.4f}  m½ = {half_life(m):.1f}  S₀(T−1) = {m[-1]:+.4f}", flush=True)
+    place = pool.placement(args)
+    pieces = pool.pieces(args, place)
+    cells_ = cells(runs)
+    T_of = {key: args.tasks or (cell[0].T_burn + cell[0].T_meas) for key, cell in cells_.items()}
+    if len(set(T_of.values())) != 1:
+        raise SystemExit("cells differ in T; pass --tasks")
+    T = next(iter(T_of.values()))
+    r0 = runs[0]
+    print(f"S₀(t) vs task: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={r0.lam} {r0.solver} n_steps={r0.n_steps} "
+          f"T={T} seeds={args.seeds}  [{pool.describe(place)}, {pieces} piece(s) per cell]", flush=True)
+    res = collect(cells_, T, place, pieces)
 
-    stem = os.path.join(args.out, "figures", f"szero_N{run0.N}_k{P.fmt(run0.kappa_label)}_d0{P.fmt(run0.delta0)}_lam{P.fmt(run0.lam)}")
-    out = figure(S0, run0, stem)
-    print(f"wrote {out} and {stem}.npz")
+    outs = []
+    for (N, k, d0, lam), S0 in res.items():
+        print(f"cell N={N} κ={k} δ₀={d0} λ={lam}:")
+        for ro, Y in S0.items():
+            m = Y.mean(1)
+            print(f"  {ro:15s} S₀(0) = {m[0]:.4f}  m½ = {half_life(m):.1f}  S₀(T−1) = {m[-1]:+.4f}", flush=True)
+        if not S0:
+            continue
+        cell = cells_[(N, k, d0, lam)]
+        run0 = next((r for r in cell if r.gated == 1.0), cell[0])
+        stem = os.path.join(args.out, "figures", f"szero_N{N}_k{P.fmt(k)}_d0{P.fmt(d0)}_lam{P.fmt(lam)}")
+        outs.append(figure(S0, run0, stem))
+        print(f"wrote {outs[-1]} and {stem}.npz")
     return 0
 
 

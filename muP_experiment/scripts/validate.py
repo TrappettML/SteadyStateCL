@@ -1,9 +1,13 @@
 #!/usr/bin/env python
 """Validation runs (PLAN.md §7.7): η-halving, Kaczmarz collapse, CV exponent.
 
-    python scripts/validate.py [--N-max 40] [--seeds 4] [--out results/validate] [--parts eta kaczmarz cv]
+    python scripts/validate.py [--N-max 40] [--seeds 4] [--out results/validate] [--parts eta kaczmarz cv] [--gpus auto]
 
-Each part runs its own small sweep in-process, prints a verdict and writes
+Each part is a small sweep; the batches of every requested part are run
+together as jobs over the GPUs (``--gpus auto``: one process per card),
+``--workers`` CPU processes or this process (``mup.pool``,
+``experiments.stream_batch`` = ``protocol.run_stream``), largest first.
+Then each part prints a verdict and writes
 ``<out>/figures/{eta_halving,kaczmarz_collapse,cv_exponent}.png`` in
 the style of PLAN.md §12.0.  Nothing here is needed by the Stage-1 sweep.
 """
@@ -15,46 +19,67 @@ import numpy as np
 
 import _path  # noqa: F401
 
+from mup import experiments as X
 from mup import plotting as P
+from mup import pool
 from mup.config import Config, make_batches, make_runs
-from mup.observe import Moments, curves, cv_exponent
-from mup.protocol import run_stream
+from mup.observe import cv_exponent
 
 
-def pooled(cfg, log):
-    """Run a config in-process and pool each (N, readout, η) over seeds.
+def run_all(cfgs: dict, place: dict, log) -> dict:
+    """Run every batch of every config as one job pool and pool each over seeds.
 
     Parameters
     ----------
-    cfg : Config
+    cfgs : dict
+        ``{name: Config}``.
+    place : dict
+        ``pool.run_jobs`` placement.
     log : callable
         Progress sink.
 
     Returns
     -------
     dict
-        ``{(N, readout, eta): (ages, S, E, cv_s, S_se)}`` with ``S``, ``E`` the
-        seed-pooled curves, ``cv_s`` the pooled coefficient of variation of
-        s_k and ``S_se`` the s.e.m. of ``S`` across seeds (NaN for one seed).
+        ``{name: {(N, readout, eta): (ages, S, E, cv_s, S_se)}}`` with ``S``, ``E``
+        the seed-pooled curves, ``cv_s`` the pooled coefficient of variation
+        of s_k and ``S_se`` the s.e.m. of ``S`` across seeds (NaN for one seed).
     """
-    out = {}
-    for batch in make_batches(make_runs(cfg), cfg.batch_size):
-        res = run_stream(batch, log=log)
-        mom = {f: res[f] for f in Moments.FIELDS}
-        per_seed = curves(mom)["S"]
-        for key in {(r.N, r.readout, r.eta) for r in batch}:
-            idx = [i for i, r in enumerate(batch) if (r.N, r.readout, r.eta) == key]
-            s = {f: mom[f][idx].sum((0, 2)) for f in Moments.FIELDS}
-            n = s["count"]
-            with np.errstate(invalid="ignore", divide="ignore"):
-                S, E = s["sum_s"] / n, s["sum_e"] / n
-                cv = np.sqrt(np.maximum(s["sum_s2"] / n - S**2, 0)) / np.abs(S)
-            se = per_seed[idx].std(0, ddof=1) / np.sqrt(len(idx)) if len(idx) > 1 else np.full_like(S, np.nan)
-            out[key] = (res["ages"], S, E, cv, se)
+    jobs = []
+    for name, cfg in cfgs.items():
+        for i, batch in enumerate(make_batches(make_runs(cfg), cfg.batch_size)):
+            T = batch[0].T_burn + batch[0].T_meas
+            jobs.append(((name, i), {"runs": batch}, X.run_cost(batch[0], T) * len(batch)))
+    res = pool.run_jobs("mup.experiments:stream_batch", jobs, log=log, **place)
+    out = {name: {} for name in cfgs}
+    for ((name, _), kw, _), r in zip(jobs, res):
+        out[name].update(X.pooled_curves(kw["runs"], r))
     return out
 
 
-def eta_halving(args, fig_dir, log):
+ETA_READOUTS = ["gated_shared", "gated_frozen"]
+CONTRACTIONS = [0.1, 0.01]
+ETAS = [0.05, 0.025, 0.0125]
+
+
+def configs(args) -> dict:
+    """``{name: Config}`` of every sweep the requested parts need."""
+    N, lam, d0 = 10, 1.0, 0.0
+    Ns = [n for n in (10, 20, 40, 80) if n <= args.N_max]
+    cfgs = {}
+    if "eta" in args.parts:
+        cfgs["eta_ref"] = Config(N=[N], readout=ETA_READOUTS, delta0=[d0], lam=[lam], seeds=args.seeds, solver="pop", pop_contraction=0.001)
+        for c in CONTRACTIONS:
+            cfgs[f"eta_pop{c}"] = Config(N=[N], readout=ETA_READOUTS, delta0=[d0], lam=[lam], seeds=args.seeds, solver="pop", pop_contraction=c)
+        cfgs["eta_sgd"] = Config(N=[N], readout=ETA_READOUTS, delta0=[d0], lam=[lam], seeds=args.seeds, solver="sgd", eta=ETAS)
+    if "kaczmarz" in args.parts:
+        cfgs["kaczmarz"] = Config(N=Ns, readout=["gated_frozen"], delta0=[0.0], lam=[1.0], seeds=args.seeds, solver="pop")
+    if "cv" in args.parts:
+        cfgs["cv"] = Config(N=Ns, readout=["gated_shared", "gated_frozen", "task_heads"], delta0=[0.0], lam=[1.0], seeds=args.seeds, solver="pop")
+    return cfgs
+
+
+def eta_halving(args, fig_dir, res):
     """SGD at η, η/2, η/4 and the population scheme at h ā² = 0.1, 0.01 against a fine-step reference.
 
     At fixed λ the η² term in dQ/dα acts over α_task ∝ 1/η, so the SGD gap
@@ -66,16 +91,14 @@ def eta_halving(args, fig_dir, log):
     args : argparse.Namespace
         ``seeds``.
     fig_dir : str
-    log : callable
+    res : dict
+        From ``run_all``.
     """
     N, lam, d0 = 10, 1.0, 0.0
-    readouts = ["gated_shared", "gated_frozen"]
-    contractions = [0.1, 0.01]
-    ref = pooled(Config(N=[N], readout=readouts, delta0=[d0], lam=[lam], seeds=args.seeds, solver="pop", pop_contraction=0.001), log)
-    pops = {c: pooled(Config(N=[N], readout=readouts, delta0=[d0], lam=[lam], seeds=args.seeds, solver="pop", pop_contraction=c), log)
-            for c in contractions}
-    etas = [0.05, 0.025, 0.0125]
-    sgd = pooled(Config(N=[N], readout=readouts, delta0=[d0], lam=[lam], seeds=args.seeds, solver="sgd", eta=etas), log)
+    readouts, contractions, etas = ETA_READOUTS, CONTRACTIONS, ETAS
+    ref = res["eta_ref"]
+    pops = {c: res[f"eta_pop{c}"] for c in contractions}
+    sgd = res["eta_sgd"]
     fig, axes = P.grid(1, 2, sharey=True)
     from matplotlib.lines import Line2D
     handles = [Line2D([], [], color="k", lw=P.LW_MEAN, label="population (fine h)")]
@@ -109,7 +132,7 @@ def eta_halving(args, fig_dir, log):
     P.save(fig, os.path.join(fig_dir, "eta_halving"))
 
 
-def kaczmarz(args, fig_dir, log):
+def kaczmarz(args, fig_dir, res):
     """Gated frozen readout: S(m)/S(0) vs κ²m/N across N should collapse (check 4).
 
     Parameters
@@ -117,10 +140,11 @@ def kaczmarz(args, fig_dir, log):
     args : argparse.Namespace
         ``seeds``, ``N_max``.
     fig_dir : str
-    log : callable
+    res : dict
+        From ``run_all``.
     """
     Ns = [n for n in (10, 20, 40, 80) if n <= args.N_max]
-    res = pooled(Config(N=Ns, readout=["gated_frozen"], delta0=[0.0], lam=[1.0], seeds=args.seeds, solver="pop"), log)
+    res = res["kaczmarz"]
     fig, axes = P.grid(1, 1)
     ax = axes[0, 0]
     print("\n[Kaczmarz]  gated frozen readout, S/S0 at κ²m/N ≈ 0.5 for each N (collapse ⇒ equal):")
@@ -137,7 +161,7 @@ def kaczmarz(args, fig_dir, log):
     P.save(fig, os.path.join(fig_dir, "kaczmarz_collapse"))
 
 
-def cv_scaling(args, fig_dir, log):
+def cv_scaling(args, fig_dir, res):
     """CV of s_k at a fixed age vs N; fit the exponent (gated-frozen prediction: −1/2; check 3).
 
     Parameters
@@ -145,11 +169,12 @@ def cv_scaling(args, fig_dir, log):
     args : argparse.Namespace
         ``seeds``, ``N_max``.
     fig_dir : str
-    log : callable
+    res : dict
+        From ``run_all``.
     """
     Ns = [n for n in (10, 20, 40, 80) if n <= args.N_max]
     readouts = ["gated_shared", "gated_frozen", "task_heads"]
-    res = pooled(Config(N=Ns, readout=readouts, delta0=[0.0], lam=[1.0], seeds=args.seeds, solver="pop"), log)
+    res = res["cv"]
     fig, axes = P.grid(1, 1)
     ax = axes[0, 0]
     print("\n[self-averaging]  CV(s_k) at age m=1 ∝ N^γ:")
@@ -184,16 +209,20 @@ def main(argv=None):
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--N-max", type=int, default=40)
     ap.add_argument("--parts", nargs="+", default=["eta", "kaczmarz", "cv"])
+    pool.add_args(ap)
     args = ap.parse_args(argv)
     fig_dir = os.path.join(args.out, "figures")
     os.makedirs(fig_dir, exist_ok=True)
     log = lambda m: print("  " + m, flush=True)
+    place = pool.placement(args)
+    print(f"validation parts {args.parts}: seeds={args.seeds} N_max={args.N_max}  [{pool.describe(place)}]", flush=True)
+    res = run_all(configs(args), place, log)
     if "eta" in args.parts:
-        eta_halving(args, fig_dir, log)
+        eta_halving(args, fig_dir, res)
     if "kaczmarz" in args.parts:
-        kaczmarz(args, fig_dir, log)
+        kaczmarz(args, fig_dir, res)
     if "cv" in args.parts:
-        cv_scaling(args, fig_dir, log)
+        cv_scaling(args, fig_dir, res)
     print(f"figures → {fig_dir}")
     return 0
 

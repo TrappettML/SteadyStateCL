@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Gauge comparison (PLAN.md §12.10): Δ_i per step with and without the projection, one cell.
+"""Gauge comparison (PLAN.md §12.10): Δ_i per step with and without the projection, one figure per cell.
 
-    python scripts/run_gauge_comp.py [--N 100] [--kappa 1] [--delta0 0] [--lam 4] [--seed 0] [--tasks T]
+    python scripts/run_gauge_comp.py [--N 100] [--kappa 1] [--delta0 0] [--lam 4] [--seed 0] [--tasks T] [--gpus auto]
 
-One figure, ``results/gauge_comp/figures/gauge_comp_N{N}_k{κ}_d0{δ₀}_lam{λ}.png``:
+One figure per cell (N, κ, δ₀, seed), ``results/gauge_comp/figures/gauge_comp_N{N}_k{κ}_d0{δ₀}_lam{λ}[_s{seed}].png``:
 two rows × one column, x = global training step (log), y = the per-unit
 imbalance Δ_i = (a_i² − Q_ii)/η averaged over the active units of the
 current task (min–max over active units as a band).  Row 1 runs every
@@ -14,22 +14,28 @@ readout, one seed, N = 100 and κ = 1 by default; the task stream is the
 Stage-1 one (``configs/stage1.yaml``: λ = 4, population solver, T_burn =
 T_meas = 7N) unless ``--tasks`` shortens it.  The per-step arrays are
 written next to the figure as ``gauge_comp_….npz``.
+
+Placement (``mup.pool``): the readouts of a cell, each listed with the
+projection off and on, are one ``vmap`` batch advanced ``--chunk`` tasks per
+device call with the per-step statistics returned from the scan
+(``experiments.imbalance_over_steps``); every cell is one job over the
+GPUs (``--gpus auto``: one process per card), ``--workers`` CPU processes
+or this process — list several ``--N``, ``--kappa``, ``--delta0`` or
+``--seed`` to fill the cards.
 """
 import argparse
 import os
 import sys
 import time
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
 import _path  # noqa: F401
 
-from mup import model
+from mup import experiments as X
 from mup import plotting as P
+from mup import pool
 from mup.config import Config, READOUT_ORDER, make_runs
-from mup.protocol import _step_fn, make_params
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -37,62 +43,51 @@ _T0 = time.perf_counter()        # wall clock from after the imports to the end 
 ROWS = ((0.0, "no gauge projection"), (1.0, "gauge projection after every step"))
 
 
-def trace_imbalance(run, do_proj: float, n_tasks: int) -> dict:
-    """Train one run for ``n_tasks`` tasks and return per-step statistics of Δ_i over the active units.
+def cells(runs: list) -> dict:
+    """``{(N, κ label, δ₀, λ, seed): [run per readout]}``; the ungated readouts join every κ cell."""
+    out = {}
+    kappas = sorted({r.kappa_label for r in runs if r.gated == 1.0}, key=float) or [None]
+    for N in sorted({r.N for r in runs}):
+        for k in kappas:
+            for d0 in sorted({r.delta0 for r in runs}):
+                for lam in sorted({r.lam for r in runs}):
+                    for seed in sorted({r.seed for r in runs}):
+                        cell = [r for r in runs if (r.N, r.delta0, r.lam, r.seed) == (N, d0, lam, seed)
+                                and (r.kappa_label == k if r.gated == 1.0 else True)]
+                        if cell:
+                            out[(N, k, d0, lam, seed)] = cell
+    return out
 
-    The loop is the one of ``protocol.run_task`` (task draw, head draw,
-    ``n_steps`` of step + ``project_rows``) without the probes, and with
-    ``Params.do_proj`` forced to ``do_proj`` so that the same readout can be
-    run both ways.
 
-    Parameters
-    ----------
-    run : config.Run
-    do_proj : float
-        0 or 1.
-    n_tasks : int
+def make_jobs(cells_: dict, n_tasks: int) -> list:
+    """One job per cell: every readout with ``do_proj`` 0 then 1 (``experiments.imbalance_over_steps``)."""
+    jobs = []
+    for key, cell in cells_.items():
+        runs = [r for do_proj, _ in ROWS for r in cell]
+        do_proj = [d for d, _ in ROWS for _ in cell]
+        jobs.append((key, {"runs": runs, "do_proj": do_proj, "n_tasks": n_tasks}, X.run_cost(cell[0], n_tasks) * len(runs)))
+    return jobs
 
-    Returns
-    -------
-    dict
-        ``mean``, ``min``, ``max`` of Δ_i over the active units after every
-        step, each (n_tasks · n_steps,); ``abs_max`` the max |Δ_i − Δ₀|.
-    """
-    p = make_params([run])
-    p = p._replace(do_proj=jnp.full_like(p.do_proj, do_proj))
-    p = jax.tree_util.tree_map(lambda x: x[0], p)                      # one run: drop the batch axis
-    N, D = run.N, run.D
-    state = model.init_state(jax.random.PRNGKey(run.rng_seed()), p, N, D, 1)
-    n_steps = run.n_steps
 
-    def stats(s):
-        g = s.g
-        d = model.imbalance(s, p)
-        n = jnp.maximum(g.sum(), 1.0)
-        big = jnp.where(g == 1.0, d, -jnp.inf)
-        small = jnp.where(g == 1.0, d, jnp.inf)
-        return jnp.stack([(g * d).sum() / n, small.min(), big.max(), jnp.abs(jnp.where(g == 1.0, d - p.Delta0, 0.0)).max()])
+def traces_of(cell: list, R: np.ndarray) -> dict:
+    """``{(do_proj, readout): {"mean", "min", "max", "abs_max"}}`` of a cell from its job result."""
+    out = {}
+    i = 0
+    for do_proj, _ in ROWS:
+        for r in cell:
+            rows = R[i]
+            i += 1
+            if not np.isfinite(rows).any():
+                continue                                             # infeasible run
+            out[(do_proj, r.readout)] = {"mean": rows[:, 0], "min": rows[:, 1], "max": rows[:, 2], "abs_max": rows[:, 3]}
+    return out
 
-    def task(s, _):
-        kt = jax.random.fold_in(s.key, s.t)
-        k_teach, k_head, k_stream = jax.random.split(kt, 3)
-        w, g = model.draw_task(k_teach, N, D, p.pN, p.gated)
-        head = model.draw_readout(k_head, model.Q_diag(s.W), p)
-        a = jnp.where(p.use_heads == 1.0, head, s.a)
-        s = s._replace(w=w, g=g, a=a)
-        step = _step_fn(p, run.solver, k_stream)
 
-        def body(s, i):
-            s = step(s, i)
-            s, _ = model.project_rows(s, p)
-            return s, stats(s)
-
-        s, rows = jax.lax.scan(body, s, jnp.arange(n_steps, dtype=jnp.int32))
-        return s._replace(t=s.t + 1), rows
-
-    _, rows = jax.jit(lambda s: jax.lax.scan(task, s, None, length=n_tasks))(state)
-    rows = np.asarray(rows).reshape(-1, 4)
-    return {"mean": rows[:, 0], "min": rows[:, 1], "max": rows[:, 2], "abs_max": rows[:, 3]}
+def collect(cells_: dict, n_tasks: int, place: dict, log=print) -> dict:
+    """``{cell: traces}`` through ``pool.run_jobs``."""
+    jobs = make_jobs(cells_, n_tasks)
+    res = pool.run_jobs("mup.experiments:imbalance_over_steps", jobs, log=log, **place)
+    return {key: traces_of(cells_[key], R) for (key, _, _), R in zip(jobs, res)}
 
 
 def figure(traces: dict, run0, n_tasks: int, path: str) -> str:
@@ -145,37 +140,49 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=os.path.join(_path.ROOT, "configs", "stage1.yaml"),
                     help="config supplying the solver, λ and step-size rules (default: Stage 1)")
-    ap.add_argument("--N", type=int, default=100)
-    ap.add_argument("--kappa", default="1.0")
-    ap.add_argument("--delta0", type=float, default=0.0)
+    ap.add_argument("--N", type=int, nargs="+", default=[100])
+    ap.add_argument("--kappa", nargs="+", default=["1.0"])
+    ap.add_argument("--delta0", type=float, nargs="+", default=[0.0])
     ap.add_argument("--lam", type=float, default=None, help="default: the config's first λ")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, nargs="+", default=[0])
     ap.add_argument("--tasks", type=int, default=None, help="tasks to run (default: the config's T_burn + T_meas)")
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "gauge_comp"))
+    pool.add_args(ap)
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
-    cfg = Config(**{**cfg.__dict__, "name": "gauge_comp", "N": [args.N], "kappa": [args.kappa],
-                    "readout": list(args.readout), "delta0": [args.delta0],
-                    "lam": [args.lam if args.lam is not None else cfg.lam[0]], "seeds": [args.seed],
+    cfg = Config(**{**cfg.__dict__, "name": "gauge_comp", "N": list(args.N), "kappa": list(args.kappa),
+                    "readout": list(args.readout), "delta0": list(args.delta0),
+                    "lam": [args.lam if args.lam is not None else cfg.lam[0]], "seeds": list(args.seed),
                     "extra": (), "trace": False})
-    runs = {r.readout: r for r in make_runs(cfg)}
-    run0 = next(iter(runs.values()))
+    runs = make_runs(cfg)
+    run0 = runs[0]
     n_tasks = args.tasks or (run0.T_burn + run0.T_meas)
-    print(f"gauge comparison: N={run0.N} κ={run0.kappa_label} δ₀={run0.delta0} λ={run0.lam} {run0.solver} "
-          f"n_steps={run0.n_steps} tasks={n_tasks} ({n_tasks * run0.n_steps} steps)", flush=True)
+    place = pool.placement(args)
+    cells_ = cells(runs)
+    print(f"gauge comparison: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={run0.lam} seeds={args.seed} {run0.solver} "
+          f"n_steps={run0.n_steps} tasks={n_tasks} ({n_tasks * run0.n_steps} steps)  "
+          f"[{pool.describe(place)}, {len(cells_)} cell(s)]", flush=True)
+    res = collect(cells_, n_tasks, place)
 
-    traces = {}
-    for do_proj, title in ROWS:
-        for ro, run in runs.items():
-            traces[(do_proj, ro)] = trace_imbalance(run, do_proj, n_tasks)
-            tr = traces[(do_proj, ro)]
-            print(f"  {title:36s} {ro:15s} final mean Δ = {tr['mean'][-1]:+.3e}  max|Δ−Δ₀| = {tr['abs_max'].max():.3e}", flush=True)
-
-    stem = os.path.join(args.out, "figures", f"gauge_comp_N{run0.N}_k{P.fmt(run0.kappa_label)}_d0{P.fmt(run0.delta0)}_lam{P.fmt(run0.lam)}")
-    out = figure(traces, run0, n_tasks, stem)
-    print(f"wrote {out} and {stem}.npz")
+    for (N, k, d0, lam, seed), traces in res.items():
+        cell = cells_[(N, k, d0, lam, seed)]
+        run0 = next((r for r in cell if r.gated == 1.0), cell[0])
+        print(f"cell N={N} κ={k} δ₀={d0} λ={lam} seed={seed}:")
+        for do_proj, title in ROWS:
+            for ro in [r.readout for r in cell]:
+                if (do_proj, ro) not in traces:
+                    print(f"  {title:36s} {ro:15s} infeasible, skipped", flush=True)
+                    continue
+                tr = traces[(do_proj, ro)]
+                print(f"  {title:36s} {ro:15s} final mean Δ = {tr['mean'][-1]:+.3e}  max|Δ−Δ₀| = {tr['abs_max'].max():.3e}", flush=True)
+        if not traces:
+            continue
+        tag = f"gauge_comp_N{N}_k{P.fmt(k)}_d0{P.fmt(d0)}_lam{P.fmt(lam)}" + (f"_s{seed}" if len(args.seed) > 1 else "")
+        stem = os.path.join(args.out, "figures", tag)
+        out = figure(traces, run0, n_tasks, stem)
+        print(f"wrote {out} and {stem}.npz")
     return 0
 
 

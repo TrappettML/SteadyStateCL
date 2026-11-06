@@ -1,8 +1,10 @@
 # Scaling the weight-norm experiment to N = 10,000 — audit and plan (2026-11-05)
 
-Scope: `scripts/run_weight_norms.py` and the NumPy kernels it runs on
-(`mup/npmodel.py`); `run_Nscaling.py` shares the same kernels and gets the
-same gains.  No code changes are made here except the start-to-end timing
+Scope: `scripts/run_weight_norms.py` and the NumPy kernels it ran on
+(`mup/npmodel.py`); `run_Nscaling.py` shared the same kernels.  *(2026-11-05:
+both scripts now run the JAX kernels of `mup/experiments.py` through the
+multi-GPU pool `mup/pool.py`; the NumPy audit below describes the CPU path
+they replaced, and `npmodel.py` remains as a test reference.)*  No code changes are made here except the start-to-end timing
 line added to every `scripts/run_*.py`.  All measurements below are on the
 laptop (Apple M2, one BLAS thread per process), population solver, Stage-1
 settings (λ = 4 → `n_steps = 40`, D = 4N, T = T_burn + T_meas = 14N), κ = 1.

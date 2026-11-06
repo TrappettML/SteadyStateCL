@@ -74,5 +74,31 @@ python scripts/run_sweep.py --config configs/stage1.yaml --gpus auto --batch-siz
   `--chunk` from the `--bench` table (run-steps/s).
 - Device memory per run is `W` (N × D) plus the stored heads (T × N);
   probe teachers and gates are regenerated from the run key, not stored.
+- The experiment scripts (`run_szero.py`, `run_stask.py`, `run_Nscaling.py`,
+  `run_weight_norms.py`, `run_gauge_comp.py`, `validate.py`) take the same
+  `--gpus auto` / `--per-gpu` / `--workers` / `--chunk` flags (`mup/pool.py`).
+  Each reduces its work to independent jobs — a cell, or one width's runs
+  (every κ, readout and seed as ONE `vmap` batch), or a sweep batch — that
+  one process per card claims largest first; inside a job the tasks are
+  scanned `--chunk` at a time with the observable evaluated on the device
+  (`mup/experiments.py`, the sweep's kernels without the probes).  `--split k`
+  cuts each width/cell into `k` pieces (default: the number of worker
+  processes) so a single large N still fills all four cards.  With no GPU
+  the same scripts run in-process (default) or over `--workers` CPU
+  processes.
+
+  ```bash
+  python scripts/run_weight_norms.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus auto
+  python scripts/run_Nscaling.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus auto
+  python scripts/run_szero.py --N 100 200 --kappa 1 2 --seeds 8 --gpus auto
+  python scripts/validate.py --N-max 80 --seeds 8 --gpus auto
+  ```
+
+  These experiments are latency-bound at the Stage-1 sizes (N ≤ 200: the
+  per-step matrices are small), so a V100 is not much faster than a core
+  per run; the gain is from the four cards running four pieces at once and
+  from the batching.  `tests/test_experiments.py` checks the kernels
+  against `protocol.run_task` and the pool against in-process runs;
+  `tests/test_gpu.py` checks the pool places one job per card.
 - The GPU build pins numpy 1.26 and jax 0.4.28: `requirements.txt` is for
   the laptop and the Xeon only; do not `pip install -r` it there.

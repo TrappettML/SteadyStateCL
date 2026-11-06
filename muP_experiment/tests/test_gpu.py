@@ -14,6 +14,8 @@ What is checked, in order:
    process's CPU run).
 5. ``driver.launch`` over every GPU runs the pilot sweep end to end: every batch
    file is written, each log names its GPU, and the batches are spread over the cards.
+6. ``pool.run_jobs`` (the experiment scripts) places one job per card and the
+   jobs' results match the same jobs run in this process.
 
 The subprocesses of 4 and 5 get ``GPU_MEM_SHARE = 0.2`` instead of the driver's 0.9:
 this pytest process already holds memory on every card (``tests/conftest.py`` turns
@@ -165,3 +167,19 @@ def test_driver_spreads_batches_over_gpus(tmp_path, small_share):
     assert len(used) == min(len(gpus), len(batches)), used
     man = json.load(open(io.manifest_path(out)))
     assert all(b["status"] == "done" for b in man["batches"])
+
+
+def test_pool_places_one_job_per_gpu(small_share):
+    """``pool.run_jobs`` with ``gpus``: every card gets a job, results match in-process."""
+    from mup import experiments as X
+    from mup import pool
+    gpus = driver.visible_gpus() or list(range(len(GPUS)))
+    runs = _runs(N=10, seeds=2)
+    jobs = [((i,), {"runs": runs, "T_pre": 0, "n_follow": 4, "k": 0}, 1.0) for i in range(2 * len(gpus))]
+    lines = []
+    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, gpus=gpus, per_gpu=1, log=lines.append)
+    used = {ln.split("done on GPU ")[1].split()[0] for ln in lines if "done on GPU " in ln}
+    assert len(used) == len(gpus), lines
+    want = X.signal_after_tasks(runs, 0, 4, 0)
+    for r in res:
+        np.testing.assert_allclose(r, want, atol=1e-8, rtol=0)

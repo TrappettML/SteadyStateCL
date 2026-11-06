@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Weight norms against tasks and against width (PLAN.md §12.1, §12.3), NumPy, one run per process.
+"""Weight norms against tasks and against width (PLAN.md §12.1, §12.3).
 
-    python scripts/run_weight_norms.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0] [--lam 4] [--seeds 4] [--workers W]
+    python scripts/run_weight_norms.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0] [--lam 4] [--seeds 4] [--gpus auto]
 
 For every (N, κ, readout, seed) the network trains the Stage-1 stream of
 T = T_burn + T_meas tasks (14N under ``configs/stage1.yaml``) and, after
@@ -25,33 +25,37 @@ effective weight norm |u_t|²/D of the task just trained, u_t = (g ⊙ a) W / pN
     the ungated readouts repeat in every column.
 
 The per-run curves are written to ``norms_….npz`` beside the figures.
-The dynamics run through ``mup.npmodel`` (no JAX); every run is one job
-of a ``ProcessPoolExecutor`` of ``--workers`` processes (default:
-``psutil.cpu_count(logical=False)``; 1 runs everything in this process),
-largest N first.
+
+Placement (``mup.pool``): the runs of one width — every κ, readout and
+seed, which share (N, D, n_steps, T) — form one ``vmap`` batch advanced
+``--chunk`` tasks per device call with the norms evaluated inside the scan
+(``experiments.norms_over_tasks``, the JAX kernels of the sweep); each
+width is split into ``--split`` pieces (default: one per worker process)
+and the pieces run as jobs, largest N first, over the GPUs (``--gpus
+auto``: one process per card), over ``--workers`` CPU processes, or in
+this process.
 """
 import argparse
 import math
 import warnings
 import os
-import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
 import _path  # noqa: F401
 
+from mup import experiments as X
 from mup import plotting as P
-from mup import npmodel
+from mup import pool
 from mup.config import Config, READOUT_ORDER, is_gated, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 #: Recorded per task: (key, y-axis label)
 QUANT = (("Q_all", r"mean $Q_{ii} = |W_i|^2/D$"), ("a2_all", r"mean $a_i^2$"), ("u2", r"$|u_t|^2/D$"))
-ALL_KEYS = ("Q_all", "Q_act", "a2_all", "a2_act", "u2")
+ALL_KEYS = X.NORM_KEYS                      # ("Q_all", "Q_act", "a2_all", "a2_act", "u2")
 #: Fourth row of ``norms_vs_N``: the scaling collapse of Q̄ = mean Q_ii (derived from ``Q_all`` per seed)
 Q_SCALED = ("Q_scaled", r"$\bar Q/pN$ (frozen),  $\bar Q^2/pN$ (learned)")
 
@@ -68,69 +72,34 @@ def q_scaled(ss_Q: np.ndarray, run) -> np.ndarray:
     return ss_Q / pN if run.learn_a == 0.0 else ss_Q * ss_Q / pN
 
 
-def norms_run(run) -> dict:
-    """Per-task norms of one run: ``{key: (T,) array}`` for ``ALL_KEYS``; NaN arrays when infeasible."""
-    T = run.T_burn + run.T_meas
-    out = {k: np.full(T, np.nan) for k in ALL_KEYS}
-    rng, W, a = npmodel.init_run(run)
-    if not np.isfinite(a).all():
-        return out                                            # protocol.feasible: δ₀ ≤ −min_i Q0_i
-    for t, W, a, g, w, fcum, Q, u in npmodel.tasks(run, rng, W, a, T):
-        # Q and u come tracked from the active block: nothing here reads W (PLAN: SCALING_N10k.md step A)
-        a2 = a * a
-        n_act = g.sum()
-        out["Q_all"][t] = Q.mean()
-        out["a2_all"][t] = a2.mean()
-        out["Q_act"][t] = (g * Q).sum() / n_act if n_act > 0 else np.nan
-        out["a2_act"][t] = (g * a2).sum() / n_act if n_act > 0 else np.nan
-        out["u2"][t] = (u @ u) / W.shape[1]                   # effective weight of the task just trained
-    return out
+def make_jobs(runs: list, pieces: int) -> list:
+    """One job per piece of a (N, D, n_steps, T) group: the norms after each of its T tasks."""
+    groups = {}
+    for r in runs:
+        groups.setdefault(X.group_key(r) + (r.T_burn + r.T_meas,), []).append(r)
+    jobs = []
+    for key in sorted(groups, key=lambda k: -k[0]):                  # largest N first
+        T = key[-1]
+        for i, part in enumerate(X.split(groups[key], pieces)):
+            jobs.append(((key, i), {"runs": part, "T": T}, X.run_cost(part[0], T) * len(part)))
+    return jobs
 
 
-def physical_cores() -> int:
-    """Physical (not logical) core count: ``psutil.cpu_count(logical=False)``, else ``sysctl`` on macOS, else ``os.cpu_count()``."""
-    try:
-        import psutil
-        n = psutil.cpu_count(logical=False)
-        if n:
-            return int(n)
-    except ImportError:
-        pass
-    if sys.platform == "darwin":
-        try:
-            return int(subprocess.check_output(["sysctl", "-n", "hw.physicalcpu"]).decode().strip())
-        except (OSError, ValueError, subprocess.CalledProcessError):
-            pass
-    return os.cpu_count() or 1
-
-
-def _job(key: tuple, run) -> tuple:
-    """One run in a worker process: ``(key, norms)``."""
-    return key, norms_run(run)
-
-
-def collect(runs: list, workers: int = 1) -> dict:
+def collect(runs: list, place: dict, pieces: int, log=print) -> dict:
     """``{(N, kappa_label, readout): {key: (n_seeds, T) array}}`` for every condition of ``runs``."""
+    jobs = make_jobs(runs, pieces)
+    res = pool.run_jobs("mup.experiments:norms_over_tasks", jobs, log=log, **place)
+    per_run = {}
+    for (_, kw, _), d in zip(jobs, res):
+        for j, r in enumerate(kw["runs"]):
+            per_run[(r.N, r.kappa_label, r.readout, r.seed)] = {q: d[q][j] for q in ALL_KEYS}
     cond = {}
     for r in runs:
         cond.setdefault((r.N, r.kappa_label, r.readout), []).append(r)
-    jobs = [((r.N, r.kappa_label, r.readout, r.seed), r) for r in runs]
-    jobs.sort(key=lambda j: (-j[0][0], READOUT_ORDER.index(j[0][2]), j[0][1], j[0][3]))   # largest N first
-    per_seed = {}
-    if workers <= 1:
-        for k, r in jobs:
-            _, v = _job(k, r)
-            per_seed.setdefault(k[:3], {})[k[3]] = v
-    else:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            futs = [ex.submit(_job, k, r) for k, r in jobs]
-            for f in as_completed(futs):
-                (N, k, ro, seed), v = f.result()
-                per_seed.setdefault((N, k, ro), {})[seed] = v
     out = {}
     for key in sorted(cond, key=lambda k: (k[0], READOUT_ORDER.index(k[2]), k[1])):
         b = cond[key]
-        out[key] = {q: np.stack([per_seed[key][r.seed][q] for r in b]) for q in ALL_KEYS}
+        out[key] = {q: np.stack([per_run[key + (r.seed,)][q] for r in b]) for q in ALL_KEYS}
         T_burn = b[0].T_burn
         ss = {q: np.nanmean(out[key][q][:, T_burn:], 1) for q, _ in QUANT}
         n_ok = int(np.isfinite(ss["Q_all"]).sum())
@@ -254,9 +223,8 @@ def main(argv=None):
     ap.add_argument("--lam", type=float, default=None, help="default: the config's first λ")
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
-    ap.add_argument("--workers", type=int, default=None,
-                    help="processes in the pool, one run each (default: psutil physical cores; 1: in-process)")
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "weight_norms"))
+    pool.add_args(ap)
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
@@ -266,10 +234,11 @@ def main(argv=None):
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
     run0 = runs[0]
-    workers = args.workers or physical_cores()
-    print(f"weight norms: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds} "
-          f"workers={workers}", flush=True)
-    res = collect(runs, workers)
+    place = pool.placement(args)
+    pieces = pool.pieces(args, place)
+    print(f"weight norms: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds}  "
+          f"[{pool.describe(place)}, {pieces} piece(s) per width]", flush=True)
+    res = collect(runs, place, pieces)
 
     klabels = [P.fmt(k) for k in args.kappa]
     fdir = os.path.join(args.out, "figures")
