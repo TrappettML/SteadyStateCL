@@ -31,12 +31,17 @@ def draw_readout(rng: np.random.Generator, Q: np.ndarray, eta: float, Delta0: fl
 
 
 def init_run(run: Run) -> tuple:
-    """Fresh run: ``(rng, W, a)`` with W ~ N(0, 1) and a from ``draw_readout`` at Δ_i = Δ₀.
+    """Fresh run: ``(rng, W, a)`` with W ~ N(0, σ₀²), infeasible rows redrawn, and a from ``draw_readout`` at Δ_i = Δ₀.
 
-    ``a`` holds NaN when the run is infeasible (δ₀ ≤ −min_i Q0_i, ``protocol.feasible``).
+    ``a`` holds NaN only when a row is still infeasible after 32 redraws (``protocol.feasible``).
     """
     rng = np.random.default_rng(run.rng_seed())
-    W = rng.standard_normal((run.N, run.D))
+    W = run.sigma0 * rng.standard_normal((run.N, run.D))
+    for _ in range(32):                                       # redraw the infeasible rows (model.draw_W0)
+        bad = float(run.Delta0) + Q_diag(W) / float(run.eta) < 0.0
+        if not bad.any():
+            break
+        W[bad] = run.sigma0 * rng.standard_normal((int(bad.sum()), run.D))
     a = draw_readout(rng, Q_diag(W), float(run.eta), float(run.Delta0))
     return rng, W, a
 

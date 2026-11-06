@@ -5,7 +5,7 @@
 
 S1, the default (``slices/norms_{readout}_…``): one file per readout and
 κ; rows = quantity (rows constant by construction for that readout
-dropped), columns = δ₀, traces = N, x = t κ_s²/N (lifetimes).
+dropped), columns = δ₀, traces = N, x = t/(N ln 2) (lifetimes).
 M8 (``slices/norms_lt2_{readout}_…``, PLAN.md §12.3): S1 on the measured
 time scale, x = t/m½ with the condition's own half-life and y divided by
 its second-half mean, so 1 is the steady level; burn-in end marked per N.
@@ -132,7 +132,7 @@ def fig_S1(records, fig_dir, index, figdata):
                     if all((key, ro, N) in missing for N in Ns if any(r.run.N == N and r.run.delta0 == d0 for r in members)):
                         P.na_slot(axes[i, j], "not recorded\n(older batch file)")
                 axes[0, j].set_title(rf"$\delta_0$ = {P.fmt(d0)}")
-                axes[-1, j].set_xlabel(r"$t\kappa_s^2/N$ (lifetimes)")
+                axes[-1, j].set_xlabel(r"$t/(N\ln 2)$ (lifetimes)")
             for i, (key, _) in enumerate(rows):
                 axes[i, 0].set_ylabel(P.qlabel(key))
             keys = [k for k, _ in rows]
@@ -235,7 +235,7 @@ def fig_F1(records, fig_dir, index, figdata):
                 col = [r for r in members if r.run.N == N]
                 gated = [r for r in col if is_gated(r.run.readout)]
                 ref = gated[0] if gated else col[0]
-                scale = ref.kappa_sched(kmin) ** 2 / N
+                scale = 1.0 / (N * np.log(2.0))
                 for ro in P.READOUT_COLOR:
                     recs = [r for r in col if r.run.readout == ro]
                     if not recs:
@@ -261,7 +261,7 @@ def fig_F1(records, fig_dir, index, figdata):
                     for i in range(len(rows)):
                         P.event_line(axes[i, j], half)
                 top = axes[0, j].secondary_xaxis("top", functions=(lambda u, s=scale: u * s, lambda v, s=scale: v / s))
-                top.set_xlabel(r"$t\kappa_s^2/N$ (lifetimes)"); top.xaxis.set_major_locator(P.MaxNLocator(4))
+                top.set_xlabel(r"$t/(N\ln 2)$ (lifetimes)"); top.xaxis.set_major_locator(P.MaxNLocator(4))
                 axes[-1, j].set_xlabel("task t")
             for i, (key, _) in enumerate(rows):
                 axes[i, 0].set_ylabel(P.qlabel(key))
@@ -315,7 +315,7 @@ def fig_F2(records, fig_dir, index, figdata):
                         if (key, ro) not in na and all((key, ro, N) in missing for N in Ns if any(r.run.N == N and r.run.readout == ro for r in members)):
                             P.na_slot(axes[i, j], "not recorded\n(older batch file)")
                     axes[0, j].set_title(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro])
-                    axes[-1, j].set_xlabel(r"$t\kappa_s^2/N$ (lifetimes)" if lt else "task t")
+                    axes[-1, j].set_xlabel(r"$t/(N\ln 2)$ (lifetimes)" if lt else "task t")
                 for i, (key, _) in enumerate(rows):
                     axes[i, 0].set_ylabel(P.qlabel(key))
                 P.ref_line(axes[[k for k, _ in rows].index("logf_sum"), 0], 0.0)

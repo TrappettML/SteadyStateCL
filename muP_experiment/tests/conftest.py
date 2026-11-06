@@ -23,7 +23,7 @@ def params(readout="gated_shared", delta0=1.0, eta=0.1, h=0.05, pN=3.0):
     gt, la, pr, uh = READOUTS[readout]
     f = lambda v: jnp.asarray(v, dtype=jnp.float64)
     return Params(Delta0=f(delta0 / eta), eta=f(eta), h=f(h), pN=f(pN), lam=f(1.0),
-                  gated=f(gt), learn_a=f(la), do_proj=f(pr), use_heads=f(uh))
+                  gated=f(gt), learn_a=f(la), do_proj=f(pr), use_heads=f(uh), sigma0=f(1.0))
 
 
 def state_with_task(seed=0, N=10, D=40, P=5, readout="gated_shared", **kw):

@@ -69,8 +69,10 @@ class RunRecord:
         return float(self.run.kappa) if is_gated(self.run.readout) else float(kappa_min)
 
     def lifetimes(self, kappa_min: float = 1.0) -> np.ndarray:
-        """Task index in lifetimes, ``t κ_s²/N`` with κ_s the schedule κ (``kappa_sched``)."""
-        return np.arange(self.T) * self.kappa_sched(kappa_min) ** 2 / self.run.N
+        """Task index in lifetimes, ``t / (N ln 2)``: the half-life of every gated readout is ≈ N ln 2 at every κ
+        (write-up eq. mhalf_heads), so this unit is comparable across κ (until 2026-11-06 it was ``t κ_s²/N``,
+        the N/κ² axis the write-up drops; ``kappa_min`` is unused since)."""
+        return np.arange(self.T) / (self.run.N * np.log(2.0))
 
     def curve(self, halves=(0, 1)) -> dict:
         """``S``, ``E``, ``cv_s``, ``cv_e``, ``n`` of this run as (n_ages,) arrays."""
@@ -98,6 +100,7 @@ def load_runs(out_dir: str) -> tuple[list[RunRecord], list[str]]:
     (``run_sweep.py``) regenerates exactly those batches.
     """
     records, skipped, stale, n_batches = [], [], [], 0
+    seen: dict = {}
     for res, runs, meta in io.load_sweep(out_dir):
         n_batches += 1
         skipped += meta.get("skipped", [])
@@ -110,12 +113,20 @@ def load_runs(out_dir: str) -> tuple[list[RunRecord], list[str]]:
         T = T_burn + T_meas
         scalar_names = [k for k, v in res.items() if getattr(v, "ndim", 0) == 2 and v.shape[0] == T and k not in Moments.FIELDS]
         for i, r in enumerate(runs):
+            seen.setdefault(r.label(), []).append(int(meta.get("batch_id", -1)))
             sc = {k: np.asarray(res[k][:, i]) for k in scalar_names}
             for old, new in LEGACY.items():
                 if new not in sc and old in sc:
                     sc[new] = sc[old]
             mom = {f: np.asarray(res[f][i]) for f in Moments.FIELDS}
             records.append(RunRecord(r, sc, mom, np.asarray(res["ages"]), T_burn, T_meas, float(res["alpha_task"][i]), schema))
+    dup = {lab: ids for lab, ids in seen.items() if len(ids) > 1}
+    if dup:
+        lab, ids = next(iter(dup.items()))
+        warnings.warn(f"{len(dup)} runs appear in more than one batch file of {out_dir} (e.g. {lab} in batches {ids}): "
+                      f"the sweep's config changed after some batches were written, so they count twice as extra seeds. "
+                      f"Rerun run_sweep.py on this sweep: batches holding other runs than planned are pending again.",
+                      stacklevel=2)
     if stale:
         Ns = sorted({r.run.N for r in records if r.schema < io.SCHEMA_VERSION})
         warnings.warn(f"{len(stale)} of {n_batches} batch files in {out_dir} "
@@ -256,7 +267,7 @@ def drift_rate(x: np.ndarray, lifetimes: np.ndarray, T_burn: int, T_meas: int) -
     ----------
     x : (T,) array, positive
     lifetimes : (T,) array
-        ``t κ²/N``.
+        ``t / (N ln 2)`` (``RunRecord.lifetimes``).
     T_burn, T_meas : int
 
     Returns

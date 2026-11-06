@@ -38,6 +38,7 @@ import math
 import os
 import sys
 import time
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 
@@ -46,11 +47,13 @@ import _path  # noqa: F401
 from mup import experiments as X
 from mup import plotting as P
 from mup import pool
-from mup.config import Config, READOUT_ORDER, is_gated, make_runs
+from mup.config import Config, READOUT_ORDER, Run, is_gated, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
+#: The gated readouts in display order (the only ones with a κ axis).
 GATED = tuple(ro for ro in READOUT_ORDER if is_gated(ro))
+
 
 def half_life(m: np.ndarray) -> float:
     """First task at which ``m`` falls to ``m[0]/2``, linearly interpolated; NaN if never (as ``run_szero.half_life``)."""
@@ -69,7 +72,7 @@ def theory(N: float, kappa: float, kind: str) -> float:
     return N * math.log(2) / (kappa ** 2 if kind == "nk2" else 1.0)
 
 
-def groups(runs: list) -> dict:
+def groups(runs: list[Run]) -> dict[tuple, list[Run]]:
     """``{(N, D, solver, n_steps, T): runs}``, largest N first."""
     g = {}
     for r in runs:
@@ -77,7 +80,7 @@ def groups(runs: list) -> dict:
     return {k: g[k] for k in sorted(g, key=lambda k: -k[0])}
 
 
-def make_jobs(groups_: dict, pieces) -> list:
+def make_jobs(groups_: dict[tuple, list[Run]], pieces: Sequence[int]) -> list[tuple]:
     """One job per piece of a (N, D, n_steps, T) group: train T tasks, follow probe T for T + 1 more."""
     jobs = []
     for (key, runs), k in zip(groups_.items(), pieces):
@@ -93,7 +96,8 @@ def mhalf_from_signal(S: np.ndarray) -> np.ndarray:
     return np.array([half_life(S[:, j]) if np.isfinite(S[:, j]).all() else float("nan") for j in range(S.shape[1])])
 
 
-def _report(key, mh, T):
+def _report(key: tuple, mh: Optional[np.ndarray], T: int) -> None:
+    """Print one condition's line: seed mean ± s.e. of m½ and the censored count, or that every seed was infeasible."""
     if mh is None:
         print(f"  N={key[0]} κ={key[1]} {key[2]}: every seed infeasible, skipped", flush=True)
         return
@@ -103,7 +107,7 @@ def _report(key, mh, T):
           f"  censored or infeasible {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
 
 
-def collect(runs: list, plan: pool.Plan, log=print) -> dict:
+def collect(runs: list[Run], plan: pool.Plan, log: Callable[[str], None] = print) -> dict[tuple, np.ndarray]:
     """``{(N, kappa_label, readout): (n_seeds,) m½ array}`` for every condition of ``runs``.
 
     Parameters
@@ -111,6 +115,13 @@ def collect(runs: list, plan: pool.Plan, log=print) -> dict:
     runs : list of config.Run
     plan : pool.Plan
         Placement and pieces per width (``pool.plan`` over ``groups(runs)``).
+    log : callable
+        Progress sink.
+
+    Returns
+    -------
+    dict
+        Conditions with at least one feasible seed, in (N, readout, κ) order.
     """
     jobs = make_jobs(groups(runs), plan.pieces)
     res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
@@ -133,7 +144,7 @@ def collect(runs: list, plan: pool.Plan, log=print) -> dict:
     return out
 
 
-def _stat(mh: np.ndarray) -> tuple:
+def _stat(mh: np.ndarray) -> tuple[float, float]:
     """(mean, s.e.) over the uncensored seeds."""
     v = mh[np.isfinite(mh)]
     if len(v) == 0:
@@ -141,7 +152,7 @@ def _stat(mh: np.ndarray) -> tuple:
     return float(v.mean()), float(v.std(ddof=1) / math.sqrt(len(v))) if len(v) > 1 else 0.0
 
 
-def fig_readouts(res: dict, Ns: list, klabel: str, run0, path: str) -> str:
+def fig_readouts(res: dict[tuple, np.ndarray], Ns: list[int], klabel: str, run0: Run, path: str) -> str:
     """m½ vs N, one trace per readout at κ = ``klabel`` (ungated readouts at their κ-free value)."""
     P.apply_style()
     fig, axes = P.grid(1, 1, panel=(4.0, 2.8))
@@ -174,7 +185,7 @@ def fig_readouts(res: dict, Ns: list, klabel: str, run0, path: str) -> str:
     return P.save(fig, path, figdata=figdata)
 
 
-def fig_theory(res: dict, Ns: list, klabels: list, run0, kind: str, path: str) -> str:
+def fig_theory(res: dict[tuple, np.ndarray], Ns: list[int], klabels: list[str], run0: Run, kind: str, path: str) -> str:
     """One panel per gated readout; traces = κ (shades); solid = simulation, dotted = equation."""
     P.apply_style()
     ros = [ro for ro in GATED if any(k[2] == ro for k in res)]
@@ -210,7 +221,7 @@ def fig_theory(res: dict, Ns: list, klabels: list, run0, kind: str, path: str) -
     return P.save(fig, path, figdata=figdata)
 
 
-def main(argv=None):
+def main(argv: Optional[list[str]] = None) -> int:
     """Command-line entry point (see the module docstring)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=os.path.join(_path.ROOT, "configs", "stage1.yaml"))
@@ -237,10 +248,10 @@ def main(argv=None):
           f"[{plan.describe()}]", flush=True)
     res = collect(runs, plan)
 
-    klabels = [P.fmt(k) for k in args.kappa]
+    klabels = [str(k) for k in args.kappa]              # the runs' kappa_label is the argument as typed
     fdir = os.path.join(args.out, "figures")
     tag = f"d0{P.fmt(run0.delta0)}_lam{P.fmt(run0.lam)}"
-    f1 = fig_readouts(res, list(args.N), klabels[0], run0, os.path.join(fdir, f"mhalf_vs_N_k{klabels[0]}_{tag}"))
+    f1 = fig_readouts(res, list(args.N), klabels[0], run0, os.path.join(fdir, f"mhalf_vs_N_k{P.fmt(klabels[0])}_{tag}"))
     f2 = fig_theory(res, list(args.N), klabels, run0, args.theory, os.path.join(fdir, f"mhalf_theory_{args.theory}_{tag}"))
     np.savez_compressed(os.path.join(fdir, f"mhalf_{tag}.npz"),
                         **{f"N{N}_k{k}_{ro}": v for (N, k, ro), v in res.items()})

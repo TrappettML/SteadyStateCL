@@ -89,8 +89,13 @@ def collect(records):
             "m_half_se": float(sem(mh[np.isfinite(mh)])) if np.isfinite(mh).sum() > 1 else np.nan,
             "m_half_0": condition_mhalf(recs, (0,))[0], "m_half_1": condition_mhalf(recs, (1,))[0],
             "E0": float(E_seeds[:, 0].mean()), "E0_se": float(sem(E_seeds[:, 0])),
-            "abar2": float(np.nanmean([r.scalars["abar2"][0] for r in recs])),
-            "lam_real": float(np.nanmean([r.run.eta * r.alpha_task * r.scalars["abar2"][0] for r in recs])),
+            "abar2": float(np.nanmean([r.scalars["abar2"][r.T_burn:] for r in recs])),
+            "abar2_0": float(np.nanmean([r.scalars["abar2"][0] for r in recs])),
+            # λ = η α_task ā² with ā² over the measurement window: the learning per task the steady state
+            # actually sees (task 0 has ā² = 1 + δ₀ by construction; the settled ā² is several times larger
+            # for the gated learned readouts, so λ_real there is 8–26, not the nominal 4)
+            "lam_real": float(np.nanmean([r.run.eta * r.alpha_task * np.nanmean(r.scalars["abar2"][r.T_burn:]) for r in recs])),
+            "lam_0": float(np.nanmean([r.run.eta * r.alpha_task * r.scalars["abar2"][0] for r in recs])),
             "gauge_delta": float(max(np.nanmax(r.scalars["gauge_delta"]) for r in recs)),
             "gauge_uc": float(max(np.nanmax(r.scalars["gauge_uc"]) for r in recs)),
             "flags": flags,
@@ -120,7 +125,7 @@ def write_summary(conds, out_dir):
             n_seeds=d["n_seeds"], S0=d["S"][0], S0_se=d["S_se"][0], E0=d["E0"], E0_se=d["E0_se"],
             m_half=d["m_half"], m_half_se=d["m_half_se"], censored=d["censored"],
             m_half_0=d["m_half_0"], m_half_1=d["m_half_1"], dm_half=d["m_half_1"] - d["m_half_0"],
-            lam_real=d["lam_real"], abar2=d["abar2"], gauge_delta_max=d["gauge_delta"], gauge_uc_max=d["gauge_uc"],
+            lam_real=d["lam_real"], lam_0=d["lam_0"], abar2=d["abar2"], abar2_0=d["abar2_0"], gauge_delta_max=d["gauge_delta"], gauge_uc_max=d["gauge_uc"],
             cv_s_age1=float(d["cv_pooled"][1]) if len(d["ages"]) > 1 else np.nan,
             **{f"flag_{k}": v for k, v in d["flags"].items()},
         )

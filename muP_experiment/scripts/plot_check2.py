@@ -158,7 +158,7 @@ def _group_rows(rows, fields):
 # C2-A
 # ---------------------------------------------------------------------------
 def fig_traj(records, fig_dir, index, figdata):
-    """C2-A: block-mean trajectories vs task in lifetimes (t κ_s²/N), one figure per (κ, δ₀, λ, solver, η)."""
+    """C2-A: block-mean trajectories vs task in lifetimes (t/(N ln 2)), one figure per (κ, δ₀, λ, solver, η)."""
     kmin = kappa_min(records)
     for kappa, kmembers in by_kappa(records).items():
         for cell, members in group_by(kmembers, ("delta0", "lam", "solver", "eta")).items():
@@ -200,7 +200,7 @@ def fig_traj(records, fig_dir, index, figdata):
                         data[f"{ro}_N{N}_{key}"] = np.stack([xb, mb, sb])
                 top = axes[0, j].secondary_xaxis("top", functions=(lambda u, s=scale: u / s, lambda t, s=scale: t * s))
                 top.set_xlabel("task"); top.xaxis.set_major_locator(P.MaxNLocator(4))
-                axes[-1, j].set_xlabel(r"$t\kappa_s^2/N$ (lifetimes)")
+                axes[-1, j].set_xlabel(r"$t/(N\ln 2)$ (lifetimes)")
             for i, (key, _) in enumerate(ROWS):
                 axes[i, 0].set_ylabel(P.qlabel(key))
             P.ref_line(axes[QUANTS.index("logf_sum"), 0], 0.0)

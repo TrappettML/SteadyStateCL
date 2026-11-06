@@ -66,6 +66,7 @@ class Config:
     batch_size : max runs per vmap batch
     n_ages_geom, m_max_factor : probe-age schedule (§5)
     trace, trace_points : per-step traces (§12.2), separate configs only
+    sigma0 : initial scales W⁽⁰⁾_ij ~ N(0, σ₀²) (check 5; (1.0,) in every sweep)
     """
     name: str = "pilot"
     N: Sequence[int] = (10, 20)
@@ -90,6 +91,7 @@ class Config:
     trace_points: int = 200                 # stored steps per task in a trace run
     #: extra gated (N, κ) cells off the N × κ product, e.g. ``[{N: 100, kappa: 4.0}]``; an N not in ``N`` gets no ungated runs
     extra: Sequence[dict] = ()
+    sigma0: Sequence[float] = (1.0,)        # initial scale of W (check 5 of the write-up sweeps it)
 
     @classmethod
     def from_yaml(cls, path: str) -> "Config":
@@ -158,6 +160,7 @@ class Run:
     m_max_factor: float = 4.0
     trace: bool = False
     trace_points: int = 200
+    sigma0: float = 1.0                     # W⁽⁰⁾_ij ~ N(0, σ₀²); 1 unless check 5 sweeps it
 
     @property
     def pN(self) -> float:
@@ -194,6 +197,17 @@ class Run:
         """1.0 for task-specific heads."""
         return READOUTS[self.readout][3]
 
+    @property
+    def closed(self) -> bool:
+        """Whether the task's steps have a closed form: population solver with a frozen, unprojected readout
+        (``model._closed_form``); such runs batch apart from the others (``batch_key``)."""
+        return self.solver == "pop" and self.learn_a == 0.0 and self.do_proj == 0.0
+
+    def block_rows(self) -> int:
+        """Rows of the active block the steps run on (``model.block_rows``)."""
+        from mup.model import block_rows
+        return block_rows(self.N, self.pN, self.gated == 1.0)
+
     def rng_seed(self) -> int:
         """Seed of the run's PRNGKey: a hash of (seed, N, κ, readout, δ₀, λ).
 
@@ -201,7 +215,8 @@ class Run:
         inputs; nothing is shared across seeds or across conditions.  The
         solver, step size and η are left out so that η-halving and the
         population-vs-SGD validation (scripts/validate.py) compare the same
-        task streams.
+        task streams, and so is σ₀ (check 5 compares initial scales on the
+        same streams).
         """
         tag = f"{self.seed}|{self.N}|{self.kappa_label or self.kappa}|{self.readout}|{self.delta0}|{self.lam}"
         return int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "little")
@@ -212,13 +227,17 @@ class Run:
         κ, not the schedule κ_s: ungated runs (κ = √N) keep their own batches, so
         their batch ids in a manifest do not move when their length changes
         (PLAN.md §5; the Stage-1 gated batch files stay valid across that change).
+        ``make_batches`` further keeps the closed-form runs (``closed``) in
+        batches of their own, so their tasks take the one-line update; a batch
+        that mixes them with stepped runs is allowed and steps every run.
         """
         return (self.N, self.D, self.kappa, self.solver, self.n_steps, self.T_burn, self.T_meas, self.trace)
 
     def label(self) -> str:
         """Short human-readable identifier (used in messages and trace manifests)."""
         return (f"N={self.N} k={self.kappa_label or self.kappa} {self.readout} "
-                f"d0={self.delta0} lam={self.lam} eta={self.eta} seed={self.seed}")
+                f"d0={self.delta0} lam={self.lam} eta={self.eta} seed={self.seed}"
+                + (f" sigma0={self.sigma0}" if self.sigma0 != 1.0 else ""))
 
     def to_dict(self) -> dict:
         """Fields plus the derived properties, JSON-serialisable (stored in every batch file)."""
@@ -361,7 +380,7 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
                     T_half = max(cfg.T_min, int(round(cfg.T_per_N * N)))
                 else:
                     T_half = max(cfg.T_min, int(round(cfg.T_factor * N / kappa_s**2)))
-                for delta0, lam, eta, seed in itertools.product(cfg.delta0, cfg.lam, cfg.eta, cfg.seed_list()):
+                for delta0, lam, eta, seed, sigma0 in itertools.product(cfg.delta0, cfg.lam, cfg.eta, cfg.seed_list(), cfg.sigma0):
                     if delta0 <= -1.0:
                         raise ValueError(f"δ₀ = {delta0} ≤ −1 makes the initial readout imaginary")
                     n_steps, h, alpha = task_duration(cfg.solver, lam, eta, delta0, cfg, D)
@@ -370,14 +389,14 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
                         seed=int(seed), solver=cfg.solver, eta=float(eta), h=float(h), n_steps=int(n_steps),
                         alpha_task=float(alpha), T_burn=T_half, T_meas=T_half, kappa_label=klabel, kappa_sched=float(kappa_s),
                         n_ages_geom=int(cfg.n_ages_geom), m_max_factor=float(cfg.m_max_factor),
-                        trace=bool(cfg.trace), trace_points=int(cfg.trace_points),
+                        trace=bool(cfg.trace), trace_points=int(cfg.trace_points), sigma0=float(sigma0),
                     ))
     return runs
 
 
 def make_batches(runs: Sequence[Run], batch_size: int) -> list[list[Run]]:
     """
-    Bucket runs by ``batch_key`` and split each bucket into chunks of ≤ ``batch_size``.
+    Bucket runs by ``batch_key`` (and ``closed``) and split each bucket into chunks of ≤ ``batch_size``.
 
     Parameters
     ----------
@@ -391,7 +410,7 @@ def make_batches(runs: Sequence[Run], batch_size: int) -> list[list[Run]]:
     """
     buckets: dict[tuple, list[Run]] = {}
     for r in runs:
-        buckets.setdefault(r.batch_key(), []).append(r)
+        buckets.setdefault(r.batch_key() + (r.closed,), []).append(r)
     batches = []
     for key in sorted(buckets):
         b = buckets[key]

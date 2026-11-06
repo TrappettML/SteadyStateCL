@@ -26,6 +26,7 @@ import argparse
 import os
 import sys
 import time
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 
@@ -34,42 +35,42 @@ import _path  # noqa: F401
 from mup import experiments as X
 from mup import plotting as P
 from mup import pool
-from mup.config import Config, READOUT_ORDER, make_runs
-from run_szero import by_readout, cells, half_life
+from mup.config import Config, READOUT_ORDER, Run, make_runs
+from run_szero import by_readout, cells, columns, groups, half_life, per_cell
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 
-def make_jobs(cells_: dict, T: int, tau: int, pieces) -> list:
-    """One job per piece of a cell: train ``T`` tasks, follow probe ``T`` for ``tau + 1`` more; ``pieces`` per cell."""
+def make_jobs(groups_: dict[tuple, list[Run]], T: int, tau: int, pieces: Sequence[int]) -> list[tuple]:
+    """One job per piece of a group of distinct runs (``run_szero.groups``): train ``T`` tasks, follow probe ``T``
+    for ``tau + 1`` more; ``pieces`` per group."""
     jobs = []
-    for (key, cell), k in zip(cells_.items(), pieces):
-        for i, part in enumerate(X.split(cell, k)):
+    for (key, runs), k in zip(groups_.items(), pieces):
+        for i, part in enumerate(X.split(runs, k)):
             jobs.append(((key, i), {"runs": part, "T_pre": T, "n_follow": tau + 1, "k": T},
                          X.run_cost(part[0], T + tau + 1) * len(part)))
     return jobs
 
 
-def collect(cells_: dict, T: int, tau: int, plan: pool.Plan, log=print) -> dict:
+def collect(cells_: dict[tuple, list[Run]], T: int, tau: int, plan: pool.Plan,
+            log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
     """``{cell: {readout: (tau + 1, n_seeds) array}}``; row τ is S_T after task T + τ."""
-    jobs = make_jobs(cells_, T, tau, plan.pieces)
+    jobs = make_jobs(groups(cells_), T, tau, plan.pieces)
     res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
-    parts = {}
-    for (key, i), r in zip([j[0] for j in jobs], res):
-        parts.setdefault(key, []).append((i, r))
-    return {key: by_readout(cells_[key], np.concatenate([r for _, r in sorted(parts[key])], 1)) for key in cells_}
+    return per_cell(cells_, columns(jobs, res))
 
 
-def figure(S: dict, run0, T: int, path: str) -> str:
+def figure(S: dict[str, np.ndarray], run0: Run, T: int, path: str) -> str:
     """S_T(τ) vs τ + 1 (log), one trace per readout (seed mean ± 1 s.e.), half-life in the caption.
 
     Parameters
     ----------
     S : dict
-        From ``stask_by_readout``.
+        ``{readout: (tau + 1, n_seeds)}`` from ``run_szero.by_readout``.
     run0 : config.Run
         Any run of the cell.
     T : int
+        Tasks trained before the probed one (printed in the title).
     path : str
         Figure stem.
 
@@ -112,7 +113,7 @@ def figure(S: dict, run0, T: int, path: str) -> str:
     return P.save(fig, path, figdata=figdata)
 
 
-def main(argv=None):
+def main(argv: Optional[list[str]] = None) -> int:
     """Command-line entry point (see the module docstring)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=os.path.join(_path.ROOT, "configs", "stage1.yaml"),
@@ -140,7 +141,7 @@ def main(argv=None):
     if len(set(T_of.values())) != 1:
         raise SystemExit("cells differ in T; pass --T")
     T = next(iter(T_of.values()))
-    plan = pool.plan(args, [(cell, T + args.tau + 1) for cell in cells_.values()])
+    plan = pool.plan(args, [(g, T + args.tau + 1) for g in groups(cells_).values()])
     r0 = runs[0]
     print(f"S_T(τ) vs τ: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={r0.lam} {r0.solver} n_steps={r0.n_steps} "
           f"T={T} τ≤{args.tau} seeds={args.seeds}  [{plan.describe()}]", flush=True)

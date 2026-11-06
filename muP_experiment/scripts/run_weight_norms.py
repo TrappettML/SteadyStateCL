@@ -9,10 +9,11 @@ every task, records the hidden-layer norm mean_i Q_ii = mean_i |W_i|²/D
 (= tr(WWᵀ)/(N D)) and the output-layer norm mean_i a_i², both over all
 N units (``_all``) and over the task's active units (``_act``), and the
 effective weight norm |u_t|²/D of the task just trained, u_t = (g ⊙ a) W / pN
-(the gate g of that task; for task heads ``a`` is its head, as in
-``run_Nscaling.mhalf_run``).  Figures in ``results/weight_norms/figures/``:
+(the gate g of that task; for task heads ``a`` is its head;
+``experiments.task_norms``).  Figures in ``results/weight_norms/figures/``:
 
-``norms_vs_task_k{κ}_…``   rows = (mean Q_ii, mean a_i², |u_t|²/D), columns = N,
+``norms_vs_task_k{κ}_…``   rows = (mean Q_ii, mean a_i², |u_t|²/D, the scaled Q̄
+    of the bottom row of ``norms_vs_N``, per task), columns = N,
     traces = readouts at the first κ listed (ungated readouts have no κ),
     x = task; seed mean with a ±1 s.e. band, burn-in shaded.
 ``norms_vs_N_…``           rows = the same three quantities plus the scaling
@@ -36,10 +37,11 @@ several processes each, a width split only as far as needed to fill them
 """
 import argparse
 import math
-import warnings
 import os
 import sys
 import time
+import warnings
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 
@@ -48,7 +50,7 @@ import _path  # noqa: F401
 from mup import experiments as X
 from mup import plotting as P
 from mup import pool
-from mup.config import Config, READOUT_ORDER, is_gated, make_runs
+from mup.config import Config, READOUT_ORDER, Run, is_gated, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -59,19 +61,24 @@ ALL_KEYS = X.NORM_KEYS                      # ("Q_all", "Q_act", "a2_all", "a2_a
 Q_SCALED = ("Q_scaled", r"$\bar Q/pN$ (frozen),  $\bar Q^2/pN$ (learned)")
 
 
-def q_scaled(ss_Q: np.ndarray, run) -> np.ndarray:
+def q_scaled(ss_Q: np.ndarray, run: Run) -> np.ndarray:
     """Collapse variable of one condition: Q̄/pN when the readout is frozen, Q̄²/pN when it learns.
 
     Parameters
     ----------
     ss_Q : (n_seeds,) per-seed steady-state mean Q_ii
     run : config.Run of the condition (supplies ``pN`` and ``learn_a``)
+
+    Returns
+    -------
+    np.ndarray
+        Same shape as ``ss_Q``.
     """
     pN = float(run.pN)
     return ss_Q / pN if run.learn_a == 0.0 else ss_Q * ss_Q / pN
 
 
-def groups(runs: list) -> dict:
+def groups(runs: list[Run]) -> dict[tuple, list[Run]]:
     """``{(N, D, solver, n_steps, T): runs}``, largest N first."""
     g = {}
     for r in runs:
@@ -79,7 +86,7 @@ def groups(runs: list) -> dict:
     return {k: g[k] for k in sorted(g, key=lambda k: -k[0])}
 
 
-def make_jobs(groups_: dict, pieces) -> list:
+def make_jobs(groups_: dict[tuple, list[Run]], pieces: Sequence[int]) -> list[tuple]:
     """One job per piece of a (N, D, n_steps, T) group: the norms after each of its T tasks."""
     jobs = []
     for (key, runs), k in zip(groups_.items(), pieces):
@@ -89,7 +96,7 @@ def make_jobs(groups_: dict, pieces) -> list:
     return jobs
 
 
-def collect(runs: list, plan: pool.Plan, log=print) -> dict:
+def collect(runs: list[Run], plan: pool.Plan, log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
     """``{(N, kappa_label, readout): {key: (n_seeds, T) array}}`` for every condition of ``runs``."""
     jobs = make_jobs(groups(runs), plan.pieces)
     res = pool.run_jobs("mup.experiments:norms_over_tasks", jobs, log=log, **plan.place)
@@ -114,7 +121,7 @@ def collect(runs: list, plan: pool.Plan, log=print) -> dict:
     return out
 
 
-def _mean_se(Y: np.ndarray) -> tuple:
+def _mean_se(Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Seed mean and s.e. along axis 0 over the finite entries (NaN where none, s.e. 0 where one)."""
     n = np.isfinite(Y).sum(0)
     with np.errstate(invalid="ignore"), warnings.catch_warnings():
@@ -125,16 +132,19 @@ def _mean_se(Y: np.ndarray) -> tuple:
     return m, se
 
 
-def fig_vs_task(res: dict, Ns: list, klabel: str, run0, path: str) -> str:
-    """Rows = quantities, columns = N, traces = readouts at κ = ``klabel``; seed mean ± 1 s.e. band."""
+def fig_vs_task(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabel: str, run0: list[Run], path: str) -> str:
+    """Rows = quantities, columns = N, traces = readouts at κ = ``klabel``; seed mean ± 1 s.e. band.
+
+    ``run0`` is the full run list (a run per condition is looked up for ``pN``, ``learn_a``, ``T_burn``)."""
     P.apply_style()
     Ns = [N for N in Ns if any(k[0] == N for k in res)]
-    fig, axes = P.grid(len(QUANT), len(Ns), sharex="col", sharey="row", panel=(2.6, 2.0))
+    rows = QUANT + (Q_SCALED,)
+    fig, axes = P.grid(len(rows), len(Ns), sharex="col", sharey="row", panel=(2.6, 2.0))
     figdata = {}
     readouts = []
     n_inf = 0
     for c, N in enumerate(Ns):
-        for r, (q, lab) in enumerate(QUANT):
+        for r, (q, lab) in enumerate(rows):
             ax = axes[r, c]
             for ro in READOUT_ORDER:
                 k = klabel if is_gated(ro) else "sqrtN"
@@ -142,7 +152,11 @@ def fig_vs_task(res: dict, Ns: list, klabel: str, run0, path: str) -> str:
                     continue
                 if ro not in readouts:
                     readouts.append(ro)
-                Y = res[(N, k, ro)][q]
+                if q == Q_SCALED[0]:                                  # per task, per seed: the collapse variable of Q̄(t)
+                    run = next(rr for rr in run0 if rr.N == N and rr.readout == ro and rr.kappa_label == k)
+                    Y = q_scaled(res[(N, k, ro)]["Q_all"], run)
+                else:
+                    Y = res[(N, k, ro)][q]
                 if r == 0:
                     n_inf += int((~np.isfinite(Y).any(1)).sum())
                 m, se = _mean_se(Y)
@@ -152,23 +166,27 @@ def fig_vs_task(res: dict, Ns: list, klabel: str, run0, path: str) -> str:
                 figdata[f"{q}_N{N}_{ro}"] = np.stack([x, m, se])
             run = next(rr for rr in run0 if rr.N == N)
             P.shade_burnin(ax, run.T_burn, run.T_meas)
-            if r == len(QUANT) - 1:
+            if r == len(rows) - 1:
                 ax.set_xlabel("task")
         axes[0, c].set_title(f"N = {N}")
-    for r, (q, lab) in enumerate(QUANT):
+    for r, (q, lab) in enumerate(rows):
         axes[r, 0].set_ylabel(lab)
     r0 = run0[0]
     P.cell_title(fig, kappa=klabel, d0=r0.delta0, lam=r0.lam, solver=r0.solver, eta=r0.eta)
     P.caption(fig, f"after each task: mean over all N units of Q_ii = |W_i|²/D (top) and of a_i² (middle; the head "
                    f"just trained for task heads), and the effective weight norm |u_t|²/D of the task just trained, "
-                   f"u_t = (g ⊙ a) W / pN (bottom); seed mean, band ±1 s.e. over seeds; grey: burn-in, dotted: half of "
+                   f"u_t = (g ⊙ a) W / pN (third), and the scaling collapse of the top row, Q̄/pN for the frozen "
+                   f"readouts and Q̄²/pN for the learned ones, pN = κ√N or N when ungated (bottom; flat across the "
+                   f"columns confirms the mechanism); seed mean, band ±1 s.e. over seeds; grey: burn-in, dotted: half of "
                    f"the measurement window; the ungated readouts have no κ; {n_inf} infeasible seeds dropped.")
     P.fig_legend(fig, readouts)
     return P.save(fig, path, figdata=figdata)
 
 
-def fig_vs_N(res: dict, Ns: list, klabels: list, run0, path: str) -> str:
-    """Rows = quantities, columns = κ, x = N (log), y = steady-state value (seed mean ± 1 s.e.), traces = readouts."""
+def fig_vs_N(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabels: list[str], run0: list[Run], path: str) -> str:
+    """Rows = quantities, columns = κ, x = N (log), y = steady-state value (seed mean ± 1 s.e.), traces = readouts.
+
+    ``run0`` is the full run list, as in ``fig_vs_task``."""
     P.apply_style()
     rows = QUANT + (Q_SCALED,)
     fig, axes = P.grid(len(rows), len(klabels), sharex="all", sharey="row", panel=(3.0, 2.4))
@@ -217,7 +235,7 @@ def fig_vs_N(res: dict, Ns: list, klabels: list, run0, path: str) -> str:
     return P.save(fig, path, figdata=figdata)
 
 
-def main(argv=None):
+def main(argv: Optional[list[str]] = None) -> int:
     """Command-line entry point (see the module docstring)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=os.path.join(_path.ROOT, "configs", "stage1.yaml"))
@@ -243,10 +261,10 @@ def main(argv=None):
           f"[{plan.describe()}]", flush=True)
     res = collect(runs, plan)
 
-    klabels = [P.fmt(k) for k in args.kappa]
+    klabels = [str(k) for k in args.kappa]              # the runs' kappa_label is the argument as typed
     fdir = os.path.join(args.out, "figures")
     tag = f"d0{P.fmt(run0.delta0)}_lam{P.fmt(run0.lam)}"
-    f1 = fig_vs_task(res, list(args.N), klabels[0], runs, os.path.join(fdir, f"norms_vs_task_k{klabels[0]}_{tag}"))
+    f1 = fig_vs_task(res, list(args.N), klabels[0], runs, os.path.join(fdir, f"norms_vs_task_k{P.fmt(klabels[0])}_{tag}"))
     f2 = fig_vs_N(res, list(args.N), klabels, runs, os.path.join(fdir, f"norms_vs_N_{tag}"))
     np.savez_compressed(os.path.join(fdir, f"norms_{tag}.npz"),
                         **{f"N{N}_k{k}_{ro}_{q}": v for (N, k, ro), d in res.items() for q, v in d.items()})

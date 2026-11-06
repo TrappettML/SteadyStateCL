@@ -47,6 +47,7 @@ GPU_ENV = {
     "MKL_NUM_THREADS": "1",
     "JAX_PLATFORMS": "cuda,cpu",
     "XLA_PYTHON_CLIENT_PREALLOCATE": "true",
+    "CUDA_DEVICE_ORDER": "PCI_BUS_ID",          # ids as nvidia-smi lists them
 }
 #: Share of a GPU's memory the ``per_gpu`` processes may preallocate between them.
 GPU_MEM_SHARE = 0.9

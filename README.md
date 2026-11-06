@@ -8,14 +8,14 @@ unbounded stream of tasks without weight decay.
 
 | path | what |
 |---|---|
-| `muP_experiment/` | First experiment: a two-layer linear student in mean-field (μP) scaling, trained on a stream of teacher–student tasks with context-dependent gating, for three readout conditions. `muP_experiment/PLAN.md` is the implementation plan; the mathematical specification lives in the (separate) writing repository as `writing/derivations/muP_experiment/muP_experiment.tex`. |
-| `requirements.txt` | Pinned Python dependencies (JAX on CPU, float64). |
+| `muP_experiment/` | First experiment: a two-layer linear student in mean-field (μP) scaling, trained on a stream of teacher–student tasks with context-dependent gating, for five readout conditions. `muP_experiment/README.md` says how to run the experiment scripts and what each produces; `muP_experiment/PLAN.md` holds the maintenance notes for the code. The mathematical specification is in the (separate) writing folder as `writing/Derivations/muP_experiment/muP_experiment.tex`. |
+| `requirements.txt` | Pinned Python dependencies (JAX on CPU, float64) for the laptop and the Xeon. |
 | `../../jax-cuda-power9.md` | Build notes for JAX with CUDA on the POWER9 node (cyclops, 4× V100 32 GB). |
 
 ## Setup
 
 Python 3.12. JAX runs in double precision on every machine: on the CPU on
-the laptop and the Xeon, on the 4 GPUs of the POWER9 node (see below).
+the laptop and the Xeon, on the 4 GPUs of the POWER9 node.
 
 ```bash
 python3.12 -m venv sscl_env
@@ -24,90 +24,20 @@ pip install -r requirements.txt
 ```
 
 Keep the environment outside the repo or rely on the `.gitignore` entry for
-`sscl_env/`.
+`sscl_env/`.  On the GPU node use the environment of `../../jax-cuda-power9.md`
+(`source ~/opt/jax-env.sh`; jax 0.4.28, numpy 1.26) and do not
+`pip install -r requirements.txt` there.
 
 ## Running
-
-Develop and test on the laptop:
 
 ```bash
 cd muP_experiment
 pytest tests
-python scripts/run_sweep.py --config configs/pilot.yaml --N 20
+python scripts/run_szero.py --N 20 --seeds 2          # a laptop-sized example
 ```
 
-Full sweeps run on the 96-core Xeon node through `scripts/run_sweep.py`
-driven by `mup/driver.py` (one process per batch, thread-pinned; see
-`PLAN.md` §8). Results go to `muP_experiment/results/` (ignored by git);
-`scripts/analyze.py` produces the figures.
-
-### GPU node (cyclops, 4× V100 32 GB, float64)
-
-The JAX environment is the one of `../../jax-cuda-power9.md`
-(`source ~/opt/jax-env.sh`; jax 0.4.28 built for the node). The sweep
-code is unchanged between CPU and GPU; what changes is how it is driven:
-
-```bash
-cd muP_experiment
-python -m pytest tests/test_gpu.py -v            # GPU backend, each card vs CPU, all cards at once, driver placement
-python scripts/gpu_check.py                      # devices, x64, fp64 matmul, kernel chunk per GPU vs CPU
-python scripts/gpu_check.py --bench --N 100 200 --B 64 256 1024 --chunk 1 16   # all 4 GPUs at once
-python scripts/run_sweep.py --config configs/stage1.yaml --dry-run --batch-size 256
-python scripts/run_sweep.py --config configs/stage1.yaml --gpus auto --batch-size 256
-```
-
-- `--gpus auto` (or `--gpus 0 1 2 3`) starts one batch process per GPU
-  (`--per-gpu 2` for two per card, sharing its memory); each process sees
-  one device through `CUDA_VISIBLE_DEVICES`, so no collectives are needed
-  and the manifest keeps the sweep resumable exactly as on the Xeon.
-  Batches are launched largest first.
-- A GPU wants large `vmap` batches: `--batch-size 256` (or more) puts a
-  whole `(N, κ)` cell of Stage 1 in one batch. The batch size is recorded
-  in the manifest, so keep it fixed for a results directory (or use
-  `--out` / `--fresh`). `--dry-run` prints the device memory of each
-  batch's state.
-- Inside a process the task loop scans `--chunk` tasks (default 16 on a
-  GPU, 1 on the CPU, env `MUP_CHUNK`) per jitted call with one
-  device-to-host copy per chunk instead of ~40 per task; `chunk = 1` is the
-  CPU loop that `tests/reference_hash.txt` was made with, and
-  `tests/test_chunk.py` checks the two agree. Pick `--batch-size` and
-  `--chunk` from the `--bench` table (run-steps/s).
-- Device memory per run is `W` (N × D) plus the stored heads (T × N);
-  probe teachers and gates are regenerated from the run key, not stored.
-- The experiment scripts (`run_szero.py`, `run_stask.py`, `run_Nscaling.py`,
-  `run_weight_norms.py`, `run_gauge_comp.py`, `validate.py`) take the same
-  `--gpus` flag (`mup/pool.py`).  Each reduces its work to independent
-  jobs — a cell, or one width's runs (every κ, readout and seed as ONE
-  `vmap` batch), or a sweep batch — that the worker processes claim
-  largest first; inside a job the tasks are scanned a chunk at a time with
-  the observable evaluated on the device (`mup/experiments.py`, the sweep's
-  kernels without the probes).  With no GPU the same scripts run
-  in-process (default) or over `--workers` CPU processes.
-- `--gpus` alone plans the placement (`pool.plan`), so nothing else needs
-  tuning: the cards are those `nvidia-smi` lists (else four), their memory
-  what it reports (else 32 GB).  A job's wall time is set by its sequential
-  steps (tasks × n_steps), not by how many runs it batches, so the plan
-  keeps each width's or cell's batch whole and fills the workers with
-  distinct groups: up to three processes per card (fewer when a run's
-  state would not fit a process's share of the memory, or there are fewer
-  runs than processes), a group split only when there are fewer groups
-  than processes or its batch exceeds the share, and the largest chunk
-  (64, 32, 16 tasks) whose stacked observable stays under 512 MB.  The
-  banner prints the plan.  `--per-gpu`, `--chunk` and `--split` override
-  the respective choices, and `--gpus 0 1` restricts the cards.
-
-  ```bash
-  python scripts/run_weight_norms.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
-  python scripts/run_Nscaling.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
-  python scripts/run_szero.py --N 100 200 --kappa 1 2 --seeds 8 --gpus
-  python scripts/validate.py --N-max 80 --seeds 8 --gpus
-  ```
-
-  These experiments are latency-bound at the Stage-1 sizes (N ≤ 200: the
-  per-step matrices are small), so a V100 is not much faster than a core
-  per run; the gain is from the four cards running four pieces at once and
-  from the batching.  `tests/test_experiments.py` checks the kernels
-  against `protocol.run_task` and the pool against in-process runs;
-  `tests/test_gpu.py` checks the pool places one job per card.
-- The GPU build pins numpy 1.26 and jax 0.4.28: `requirements.txt` is for
-  the laptop and the Xeon only; do not `pip install -r` it there.
+The five experiment scripts (`scripts/run_gauge_comp.py`, `run_szero.py`,
+`run_stask.py`, `run_Nscaling.py`, `run_weight_norms.py`) take the same grid
+and placement flags; `--gpus` alone places a run on the GPU node, `--workers K`
+on CPU processes, nothing runs in-process.  See `muP_experiment/README.md`.
+Results go to `muP_experiment/results/` (ignored by git).

@@ -1,6 +1,7 @@
 """Result schema: one .npz per batch plus a JSON manifest for resumable sweeps."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -11,7 +12,16 @@ import numpy as np
 
 from mup.config import Config, Run, make_batches, make_runs
 
-SCHEMA_VERSION = 2   # 2: PLAN.md §12.1 norm scalars (pre/post, logf, quantiles); 1: the original set
+SCHEMA_VERSION = 3   # 3: masked stored heads, κ-free age schedule, σ₀ (2026-11-06); 2: §12.1 norm scalars; 1: the original set
+
+
+def runs_hash(runs) -> str:
+    """Hash of the sorted labels of a batch's runs: which runs the batch holds, independent of their order."""
+    h = hashlib.sha256()
+    for lab in sorted(r.label() for r in runs):
+        h.update(lab.encode())
+        h.update(b"\n")
+    return h.hexdigest()[:16]
 
 
 def batches_dir(out_dir: str) -> str:
@@ -72,20 +82,32 @@ def batch_T(path: str) -> int:
         return int(z["T_burn"]) + int(z["T_meas"])
 
 
-def is_stale(path: str, T: Optional[int] = None) -> bool:
+def batch_runs_hash(path: str) -> str:
+    """``runs_hash`` of the runs recorded in a batch file."""
+    with np.load(path, allow_pickle=False) as z:
+        meta = json.loads(str(z["meta_json"]))
+    return runs_hash([Run.from_dict(d) for d in meta["runs"]])
+
+
+def is_stale(path: str, T: Optional[int] = None, runs: Optional[str] = None) -> bool:
     """Whether a batch file was written under an older result schema than ``SCHEMA_VERSION``,
-    or (when ``T`` is given) with a stream length other than the ``T`` tasks the manifest now plans.
+    with a stream length other than the ``T`` tasks the manifest now plans, or (``runs``, a
+    ``runs_hash``) holding other runs than the batch now planned under its id.
 
     Such a batch lacks scalars the figure scripts expect (e.g. the §12.1
-    norms), or was run under an older schedule (the ungated runs before
-    PLAN.md §5's schedule κ), so a resumed sweep must rerun it rather than
-    keep it.
+    norms), was run under an older schedule (the ungated runs before
+    PLAN.md §5's schedule κ), or belongs to a different expansion of the
+    config (seeds or δ₀ values added after the sweep started reshuffle which
+    runs each batch number holds), so a resumed sweep must rerun it rather
+    than keep it.
     """
     if not os.path.exists(path):
         return False
     if batch_schema(path) < SCHEMA_VERSION:
         return True
-    return T is not None and batch_T(path) != int(T)
+    if T is not None and batch_T(path) != int(T):
+        return True
+    return runs is not None and batch_runs_hash(path) != runs
 
 
 def load_batch(path: str) -> tuple[dict, list[Run], dict]:
@@ -225,9 +247,11 @@ def write_manifest(out_dir: str, cfg: Config, batches: list[list[Run]], config_p
     """
     Write the sweep manifest listing every batch and its status.
 
-    A batch is "done" when its file exists with the current schema, "stale"
-    when its file was written under an older schema (rerun on resume), else
-    "pending"; the driver sets "running"/"failed" while it works.
+    A batch is "done" when its file exists with the current schema, the
+    planned stream length and exactly the planned runs (``runs_hash``),
+    "stale" when its file was written under an older schema or for other
+    runs (rerun on resume), else "pending"; the driver sets
+    "running"/"failed" while it works.
 
     Parameters
     ----------
@@ -257,8 +281,8 @@ def write_manifest(out_dir: str, cfg: Config, batches: list[list[Run]], config_p
                 "id": i,
                 "n_runs": len(b),
                 "N": b[0].N, "kappa": b[0].kappa, "solver": b[0].solver,
-                "n_steps": b[0].n_steps, "T": b[0].T_burn + b[0].T_meas,
-                "status": _file_status(batch_path(out_dir, i), b[0].T_burn + b[0].T_meas),
+                "n_steps": b[0].n_steps, "T": b[0].T_burn + b[0].T_meas, "runs_hash": runs_hash(b),
+                "status": _file_status(batch_path(out_dir, i), b[0].T_burn + b[0].T_meas, runs_hash(b)),
             }
             for i, b in enumerate(batches)
         ],
@@ -267,11 +291,11 @@ def write_manifest(out_dir: str, cfg: Config, batches: list[list[Run]], config_p
     return man
 
 
-def _file_status(path: str, T: Optional[int] = None) -> str:
-    """``done`` / ``stale`` / ``pending`` from a batch file's presence, schema and (with ``T``) stream length."""
+def _file_status(path: str, T: Optional[int] = None, runs: Optional[str] = None) -> str:
+    """``done`` / ``stale`` / ``pending`` from a batch file's presence, schema, stream length and runs."""
     if not os.path.exists(path):
         return "pending"
-    return "stale" if is_stale(path, T) else "done"
+    return "stale" if is_stale(path, T, runs) else "done"
 
 
 def _write_json(path: str, obj: dict) -> None:
@@ -341,8 +365,9 @@ def pending_batches(out_dir: str) -> list[int]:
     """
     Ids of batches not marked done and without a current-schema batch file.
 
-    A batch file written under an older schema (``is_stale``) counts as
-    pending, so resuming a sweep after a schema change reruns it.
+    A batch file written under an older schema, or holding other runs than
+    the manifest plans under its id (``is_stale``), counts as pending, so
+    resuming a sweep after a schema or config change reruns it.
 
     Parameters
     ----------
@@ -356,6 +381,6 @@ def pending_batches(out_dir: str) -> list[int]:
     out = []
     for b in man["batches"]:
         path = batch_path(out_dir, b["id"])
-        if is_stale(path, b.get("T")) or (b["status"] != "done" and not os.path.exists(path)):
+        if is_stale(path, b.get("T"), b.get("runs_hash")) or (b["status"] != "done" and not os.path.exists(path)):
             out.append(b["id"])
     return out

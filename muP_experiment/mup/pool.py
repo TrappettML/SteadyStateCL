@@ -13,8 +13,10 @@ CPU (``gpus=None, workers > 1``)
 in-process (``gpus=None, workers <= 1``)
     The jobs run here, in order.
 
-Jobs are claimed dynamically, largest first (``cost``), through a directory
-of claim files, so a long job never trails behind short ones and a card that
+The largest jobs, one per worker slot, are pinned to the slots in order —
+slot ``s`` sits on card ``s % len(gpus)``, so the pieces of the longest
+group land on different cards; the rest are claimed dynamically, largest
+first (``cost``), through a directory of claim files, so a card that
 finishes early takes the next job.  Arguments and results travel as pickles;
 a job function is named ``"module:function"`` and must be importable in the
 worker (``mup.experiments`` holds the ones of the scripts).  Workers are
@@ -37,6 +39,36 @@ from mup import driver
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+
+
+# ----------------------------------------------------------------------------
+# progress of the running job: tenths of its tasks, relayed to the script's console
+# ----------------------------------------------------------------------------
+_REPORT: Optional[Callable[[str], None]] = None     # set per job by run_jobs (in-process) or _worker (a file)
+
+
+def report(msg: str) -> None:
+    """Send a progress line of the running job to the console (in-process) or to the parent through the spool."""
+    if _REPORT is not None:
+        _REPORT(msg)
+
+
+class Progress:
+    """Reports a job's advance through ``total`` tasks at every tenth (and at the end), with the elapsed time.
+
+    The runs of a job advance together in one ``vmap``, so a block of tasks
+    is the unit that completes; ``add(n)`` after every device call of ``n``
+    tasks is enough.
+    """
+
+    def __init__(self, total: int, label: str = "task", tenths: int = 10):
+        self.total, self.label, self.tenths, self.done, self.next, self.t0 = max(int(total), 1), label, tenths, 0, 1, time.time()
+
+    def add(self, n: int) -> None:
+        self.done += int(n)
+        while self.next <= self.tenths and self.done * self.tenths >= self.next * self.total:
+            report(f"{self.label} {self.done}/{self.total} ({100 * self.next // self.tenths}%) {time.time() - self.t0:.0f}s")
+            self.next += 1
 
 
 def resolve_func(name: str) -> Callable:
@@ -91,24 +123,32 @@ def run_jobs(func: str, jobs: Sequence[tuple], gpus: Optional[list[int]] = None,
     if not jobs:
         return []
     slots = n_slots(gpus, per_gpu, workers)
+    global _REPORT
     if not gpus and slots <= 1:
         if chunk:
             os.environ["MUP_CHUNK"] = str(int(chunk))
         f = resolve_func(func)
         out = []
         t0 = time.time()
+        if log:
+            log(f"{len(jobs)} jobs in-process, largest first")
         for i, (key, kw, _) in enumerate(jobs):
             t1 = time.time()
-            out.append(f(**kw))
+            _REPORT = (lambda m, key=key: log(f"  {key}: {m}")) if log else None
+            try:
+                out.append(f(**kw))
+            finally:
+                _REPORT = None
             if log:
-                log(f"job {i + 1}/{len(jobs)} {key} done in {time.time() - t1:.1f}s (in-process, {time.time() - t0:.0f}s total)")
+                log(f"job {i + 1}/{len(jobs)} {key} done in {time.time() - t1:.1f}s ({time.time() - t0:.0f}s total)")
         return out
 
     order = sorted(range(len(jobs)), key=lambda i: -float(jobs[i][2]))
+    pinned = {order[s]: s for s in range(min(slots, len(order)))}      # the largest jobs, one per slot
     tmp = keep_dir or tempfile.mkdtemp(prefix="mup_pool_")
     os.makedirs(tmp, exist_ok=True)
     with open(os.path.join(tmp, "spec.pkl"), "wb") as fh:
-        pickle.dump({"func": func, "order": order, "keys": [str(j[0]) for j in jobs]}, fh)
+        pickle.dump({"func": func, "order": order, "keys": [str(j[0]) for j in jobs], "pinned": pinned}, fh)
     for i, (_, kw, _) in enumerate(jobs):
         with open(os.path.join(tmp, f"job_{i}.pkl"), "wb") as fh:
             pickle.dump(kw, fh)
@@ -118,20 +158,34 @@ def run_jobs(func: str, jobs: Sequence[tuple], gpus: Optional[list[int]] = None,
         env = driver.worker_env(s, gpus, per_gpu, 1, chunk)
         where = f"GPU {gpus[s % len(gpus)]}" if gpus else f"slot {s}"
         env["MUP_POOL_WHERE"] = where
+        env["MUP_POOL_SLOT"] = str(s)
         logf = open(os.path.join(tmp, f"worker_{s}.log"), "w")
         procs.append((subprocess.Popen([sys.executable, "-m", "mup.pool", tmp], env=env, cwd=ROOT,
                                        stdout=logf, stderr=subprocess.STDOUT), logf, where))
     if log:
         log(f"{len(jobs)} jobs on {slots} worker{'s' if slots != 1 else ''} "
-            f"({'GPUs ' + ','.join(map(str, gpus)) if gpus else 'CPU'}), largest first")
+            f"({'GPUs ' + ','.join(map(str, gpus)) if gpus else 'CPU'}): the {len(pinned)} largest pinned "
+            f"{'one per slot' if len(pinned) == slots else 'to slots in order'}, the rest claimed largest first")
+        for i, s in pinned.items():
+            log(f"  {jobs[i][0]} -> {procs[s][2]}")
 
     seen = set()
+    shown: dict[int, str] = {}
     t0 = time.time()
     while True:
         alive = any(p.poll() is None for p, _, _ in procs)
         for i in range(len(jobs)):
             if i in seen:
                 continue
+            prog = os.path.join(tmp, f"prog_{i}.txt")
+            if log and os.path.exists(prog):                 # the worker's latest progress line, once per change
+                try:
+                    msg = open(prog).read().strip()
+                except OSError:
+                    msg = ""
+                if msg and msg != shown.get(i):
+                    shown[i] = msg
+                    log(f"  {jobs[i][0]}: {msg}")
             done = os.path.join(tmp, f"done_{i}.txt")
             if os.path.exists(done):
                 seen.add(i)
@@ -174,8 +228,13 @@ def _worker(tmp: str) -> int:
     with open(os.path.join(tmp, "spec.pkl"), "rb") as fh:
         spec = pickle.load(fh)
     where = os.environ.get("MUP_POOL_WHERE", "worker")
+    slot = int(os.environ.get("MUP_POOL_SLOT", "-1"))
+    pinned = spec.get("pinned", {})
+    mine = [i for i, s in pinned.items() if s == slot]
+    free = [i for i in spec["order"] if i not in pinned]
+    left = [i for i in spec["order"] if i in pinned and i not in mine]     # another slot's, only if it died
     f = resolve_func(spec["func"])
-    for i in spec["order"]:
+    for i in mine + free + left:
         try:
             fd = os.open(os.path.join(tmp, f"claim_{i}"), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
@@ -184,6 +243,17 @@ def _worker(tmp: str) -> int:
         t0 = time.time()
         with open(os.path.join(tmp, f"job_{i}.pkl"), "rb") as fh:
             kw = pickle.load(fh)
+
+        def to_parent(msg, i=i):
+            """Latest progress line of this job, for the parent to relay (atomic replace)."""
+            part = os.path.join(tmp, f"prog_{i}.txt.part")
+            with open(part, "w") as fh:
+                fh.write(f"{msg} on {where}")
+            os.replace(part, os.path.join(tmp, f"prog_{i}.txt"))
+            print(f"{spec['keys'][i]}: {msg}", flush=True)
+
+        global _REPORT
+        _REPORT = to_parent
         try:
             out = f(**kw)
             part = os.path.join(tmp, f"res_{i}.pkl.part")
@@ -195,6 +265,7 @@ def _worker(tmp: str) -> int:
             with open(os.path.join(tmp, f"err_{i}.txt"), "w") as fh:
                 fh.write(traceback.format_exc())
             status = f"FAILED on {where} after {time.time() - t0:.1f}s"
+        _REPORT = None
         with open(os.path.join(tmp, f"done_{i}.txt"), "w") as fh:
             fh.write(status)
         print(f"{spec['keys'][i]}: {status}", flush=True)
@@ -291,13 +362,17 @@ def plan(args: argparse.Namespace, groups: Sequence[tuple], out_per_task: float 
 
     With ``--gpus`` the cards are the ids given, else ``driver.visible_gpus()``,
     else ``GPU_COUNT``; their memory comes from ``nvidia-smi`` or ``GPU_MEM_GB``.
-    A job's wall time is set by its sequential steps (tasks × n_steps), not by
-    how many runs it batches, so the plan keeps batches whole and fills the
-    workers with distinct groups: ``per_gpu`` processes per card (as many as
-    ``MAX_PER_GPU`` and the memory allow, no more than there are runs to
-    occupy them), a group split only when there are fewer groups than workers
-    or its batch does not fit a process's share of the memory, and the largest
-    chunk whose stacked observable stays under ``OUT_BUDGET``.  ``--per-gpu``,
+    A job's wall time is its sequential chain (tasks × n_steps) and the run
+    ends when the longest chain does, so the plan cuts each group into one
+    piece per card times its share of the longest chain (the widest group:
+    one piece per card, which ``run_jobs`` pins to different cards; a group
+    with half the chain: half as many), never more than its runs, and more
+    only when a batch does not fit a process's share of the memory.  ``per_gpu``
+    processes per card (as many as ``MAX_PER_GPU`` and the memory allow, no
+    more than there are runs to occupy them) interleave the shorter chains
+    with the long ones.  The chunk is the largest whose stacked observable
+    stays under ``OUT_BUDGET``.  On CPU workers (compute-bound) the groups are
+    instead split to fill the workers by run count.  ``--per-gpu``,
     ``--chunk`` and ``--split`` override the respective choices.
 
     Parameters
@@ -338,8 +413,9 @@ def plan(args: argparse.Namespace, groups: Sequence[tuple], out_per_task: float 
                              f"{mem_slot / 2**30:.1f} GB share of a {mem_gb:.0f} GB card")
         workers, slots = 0, len(gpus) * per_gpu
         chunk = int(args.chunk) if args.chunk else 0
+    chain = [T * runs[0].n_steps for runs, T in groups]
     pieces = []
-    for (runs, T), b in zip(groups, B):
+    for (runs, T), b, c in zip(groups, B, chain):
         need = 1
         while job_bytes(runs[: -(-b // need)], T, CHUNKS[-1], out_per_task) > mem_slot:
             need += 1
@@ -349,7 +425,10 @@ def plan(args: argparse.Namespace, groups: Sequence[tuple], out_per_task: float 
                                  f"on the device, more than a process's {mem_slot / 2**30:.1f} GB share; use a smaller batch")
             pieces.append(1)
             continue
-        fill = -(-slots * b // B_tot) if len(groups) < slots else 1
+        if gpus:
+            fill = -(-len(gpus) * c // max(chain))
+        else:
+            fill = -(-slots * b // B_tot) if len(groups) < slots else 1
         want = max(need, int(args.split) if args.split else fill)
         pieces.append(min(b, want))
     if gpus and not chunk:
@@ -360,4 +439,7 @@ def plan(args: argparse.Namespace, groups: Sequence[tuple], out_per_task: float 
 
 
 if __name__ == "__main__":
-    sys.exit(_worker(sys.argv[1]))
+    # run the worker of the imported module, not of this ``__main__`` copy: ``report`` in the job functions
+    # reads ``mup.pool._REPORT``, which the worker sets
+    from mup import pool as _pool
+    sys.exit(_pool._worker(sys.argv[1]))

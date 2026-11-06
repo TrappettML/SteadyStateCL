@@ -28,6 +28,7 @@ import argparse
 import os
 import sys
 import time
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 
@@ -36,17 +37,17 @@ import _path  # noqa: F401
 from mup import experiments as X
 from mup import plotting as P
 from mup import pool
-from mup.config import Config, READOUT_ORDER, make_runs
+from mup.config import Config, READOUT_ORDER, Run, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 
-def cell_key(r) -> tuple:
+def cell_key(r: Run) -> tuple:
     """(N, κ label, δ₀, λ) of a run: one figure per cell."""
     return (r.N, r.kappa_label if r.gated == 1.0 else None, r.delta0, r.lam)
 
 
-def cells(runs: list) -> dict:
+def cells(runs: list[Run]) -> dict[tuple, list[Run]]:
     """``{(N, κ label, δ₀, λ): runs}``; the ungated readouts (no κ) are listed in every κ cell."""
     out = {}
     kappas = sorted({r.kappa_label for r in runs if r.gated == 1.0}, key=float) or [None]
@@ -61,16 +62,42 @@ def cells(runs: list) -> dict:
     return out
 
 
-def make_jobs(cells_: dict, T: int, pieces) -> list:
-    """One job per piece of a cell: ``(key, kwargs of experiments.signal_after_tasks, cost)``; ``pieces`` per cell."""
+def groups(cells_: dict[tuple, list[Run]]) -> dict[tuple, list[Run]]:
+    """``{group_key: distinct runs}`` over every cell: a run listed in several cells (the ungated readouts, which
+    join every κ cell) is trained once and its column is read by each of them."""
+    seen, out = set(), {}
+    for cell in cells_.values():
+        for r in cell:
+            if r.label() not in seen:
+                seen.add(r.label())
+                out.setdefault(X.group_key(r), []).append(r)
+    return out
+
+
+def make_jobs(groups_: dict[tuple, list[Run]], T: int, pieces: Sequence[int]) -> list[tuple]:
+    """One job per piece of a group: ``(key, kwargs of experiments.signal_after_tasks, cost)``; ``pieces`` per group."""
     jobs = []
-    for (key, cell), k in zip(cells_.items(), pieces):
-        for i, part in enumerate(X.split(cell, k)):
+    for (key, runs), k in zip(groups_.items(), pieces):
+        for i, part in enumerate(X.split(runs, k)):
             jobs.append(((key, i), {"runs": part, "T_pre": 0, "n_follow": T, "k": 0}, X.run_cost(part[0], T) * len(part)))
     return jobs
 
 
-def by_readout(cell: list, S: np.ndarray) -> dict:
+def columns(jobs: list[tuple], res: list[np.ndarray]) -> dict[str, np.ndarray]:
+    """``{run label: (n_follow,) signal column}`` from the job results."""
+    out = {}
+    for (_, kw, _), S in zip(jobs, res):
+        for j, r in enumerate(kw["runs"]):
+            out[r.label()] = S[:, j]
+    return out
+
+
+def per_cell(cells_: dict[tuple, list[Run]], cols: dict[str, np.ndarray]) -> dict[tuple, dict[str, np.ndarray]]:
+    """``{cell: {readout: (n, n_seeds)}}``: each cell's runs' columns, by readout."""
+    return {key: by_readout(cell, np.stack([cols[r.label()] for r in cell], 1)) for key, cell in cells_.items()}
+
+
+def by_readout(cell: list[Run], S: np.ndarray) -> dict[str, np.ndarray]:
     """``{readout: (T, n_seeds) array}`` of a cell from its stacked job results, infeasible seeds dropped."""
     out = {}
     for ro in READOUT_ORDER:
@@ -86,23 +113,21 @@ def by_readout(cell: list, S: np.ndarray) -> dict:
     return out
 
 
-def collect(cells_: dict, T: int, plan: pool.Plan, log=print) -> dict:
-    """Run every cell's jobs through ``pool.run_jobs`` and return ``{cell: {readout: (T, n_seeds)}}``."""
-    jobs = make_jobs(cells_, T, plan.pieces)
+def collect(cells_: dict[tuple, list[Run]], T: int, plan: pool.Plan,
+            log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
+    """Run the distinct runs of every cell through ``pool.run_jobs`` and return ``{cell: {readout: (T, n_seeds)}}``."""
+    jobs = make_jobs(groups(cells_), T, plan.pieces)
     res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
-    parts = {}
-    for (key, i), r in zip([j[0] for j in jobs], res):
-        parts.setdefault(key, []).append((i, r))
-    return {key: by_readout(cells_[key], np.concatenate([r for _, r in sorted(parts[key])], 1)) for key in cells_}
+    return per_cell(cells_, columns(jobs, res))
 
 
-def figure(S0: dict, run0, path: str) -> str:
+def figure(S0: dict[str, np.ndarray], run0: Run, path: str) -> str:
     """S₀(t) vs task, one trace per readout (seed mean ± 1 s.e.), half-life in the caption.
 
     Parameters
     ----------
     S0 : dict
-        From ``szero_by_readout``.
+        ``{readout: (T, n_seeds)}`` from ``by_readout``.
     run0 : config.Run
         Any run of the cell.
     path : str
@@ -162,7 +187,7 @@ def half_life(m: np.ndarray) -> float:
     return j - 1 + (m[j - 1] - half) / (m[j - 1] - m[j])
 
 
-def main(argv=None):
+def main(argv: Optional[list[str]] = None) -> int:
     """Command-line entry point (see the module docstring)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=os.path.join(_path.ROOT, "configs", "stage1.yaml"),
@@ -189,7 +214,7 @@ def main(argv=None):
     if len(set(T_of.values())) != 1:
         raise SystemExit("cells differ in T; pass --tasks")
     T = next(iter(T_of.values()))
-    plan = pool.plan(args, [(cell, T) for cell in cells_.values()])
+    plan = pool.plan(args, [(g, T) for g in groups(cells_).values()])
     r0 = runs[0]
     print(f"S₀(t) vs task: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={r0.lam} {r0.solver} n_steps={r0.n_steps} "
           f"T={T} seeds={args.seeds}  [{plan.describe()}]", flush=True)

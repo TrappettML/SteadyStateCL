@@ -156,7 +156,7 @@ def test_plan_gpu_fills_cards_without_overcutting(monkeypatch):
     one = [(_runs(N=10, seeds=12), 20)]                       # 12 runs, 1 group
     pl = pool.plan(_args(gpus=[]), one)
     assert pl.gpus == [0, 1, 2, 3] and pl.per_gpu == 3 and pl.slots == 12
-    assert pl.pieces == [12]                                  # one group: cut to fill every process
+    assert pl.pieces == [4]                                   # one group: one piece per card
     assert pl.chunk == 16                                     # 64 and 32 exceed T = 20
     many = [(_runs(N=10, seeds=1), 2000) for _ in range(20)]  # 20 groups ≥ 12 slots
     pl = pool.plan(_args(gpus=["0", "1"]), many)
@@ -165,6 +165,8 @@ def test_plan_gpu_fills_cards_without_overcutting(monkeypatch):
     assert pl.per_gpu == 1 and pl.chunk == 8 and pl.pieces == [1] * 20   # split capped by the group size
     pl = pool.plan(_args(gpus=[], split=2), [(_runs(N=10, seeds=2), 20)] * 20)
     assert pl.pieces == [2] * 20
+    chains = [(_runs(N=10, seeds=8), 80), (_runs(N=10, seeds=8), 40), (_runs(N=10, seeds=8), 10)]
+    assert pool.plan(_args(gpus=[]), chains).pieces == [4, 2, 1]   # one piece per card × share of the longest chain
 
 
 def test_plan_gpu_respects_memory(monkeypatch):
@@ -189,3 +191,18 @@ def test_plan_gpu_respects_memory(monkeypatch):
     with pytest.raises(SystemExit):
         pool.plan(big, [(runs, 20)])
     assert r.N == 10
+
+
+def test_progress_lines_reach_the_log_in_process_and_from_workers(tmp_path):
+    from mup import pool
+    runs = _runs(N=10, seeds=2)
+    jobs = [((i,), {"runs": runs, "T_pre": 0, "n_follow": 20, "k": 0}, 1.0) for i in range(2)]
+    for kw in ({}, {"workers": 2}):
+        lines = []
+        pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=lines.append, chunk=5, **kw)
+        prog = [ln for ln in lines if "task " in ln and "%" in ln]
+        assert any("task 20/20 (100%)" in ln for ln in prog), lines
+        if not kw:                                              # workers relay only the latest line per 0.5 s poll
+            assert any("task 10/20 (50%)" in ln for ln in prog), lines
+        assert sum("done" in ln for ln in lines) == 2
+    assert pool._REPORT is None

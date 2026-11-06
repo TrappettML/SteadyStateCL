@@ -21,8 +21,12 @@ def age_schedule(N: int, kappa: float, T: int, n_geom: int = 24, m_max_factor: f
     ----------
     N : int
     kappa : float
+        Unused since 2026-11-06 (kept for the call sites): the half-life is
+        ≈ N ln 2 for every gated readout at every κ (write-up eq. mhalf_heads),
+        so the schedule no longer shrinks with κ (it used to be sized by
+        10N/κ², which at κ = 4 stopped short of the 4·m½ the write-up asks for).
     T : int
-        Number of tasks; m_max = m_max_factor·10N/κ² is capped at T − 1.
+        Number of tasks; m_max = m_max_factor·N ln 2 (≈ 4 half-lives) is capped at T − 1.
     n_geom : int
         Number of geometrically spaced ages beyond 24.
     m_max_factor : float
@@ -31,7 +35,7 @@ def age_schedule(N: int, kappa: float, T: int, n_geom: int = 24, m_max_factor: f
     -------
     (n_ages,) int32 array, increasing, starting at 0.
     """
-    m_max = int(min(round(m_max_factor * 10.0 * N / kappa**2), T - 1))
+    m_max = int(min(round(m_max_factor * np.log(2.0) * N), T - 1))
     ages = list(range(0, min(20, m_max) + 1))
     if m_max > 24:
         ages += [int(round(x)) for x in np.geomspace(24, m_max, n_geom)]

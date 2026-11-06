@@ -66,7 +66,9 @@ def test_T_per_N_and_extra_cells():
 
 def test_age_schedule_and_half_life():
     ages = age_schedule(100, 1.0, 2000)
-    assert ages[0] == 0 and ages[-1] == 1999 and np.all(np.diff(ages) > 0)
+    assert ages[0] == 0 and ages[-1] == round(4 * math.log(2) * 100) and np.all(np.diff(ages) > 0)
+    assert age_schedule(100, 4.0, 2000)[-1] == ages[-1]                 # κ-free: 4 half-lives of N ln 2 at every κ
+    assert age_schedule(100, 1.0, 200)[-1] == 199                       # capped at T − 1
     assert list(ages[:21]) == list(range(21))
     small = age_schedule(5, math.sqrt(5), 8)
     assert small[-1] <= 7

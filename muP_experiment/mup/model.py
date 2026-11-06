@@ -4,6 +4,7 @@ Every function here acts on ONE run; the caller adds the batch axis with
 ``jax.vmap``.  Per-run constants live in ``Params``; shapes (N, D, P) are
 static and come from the arrays themselves.
 """
+import math
 from typing import NamedTuple
 
 import jax
@@ -27,6 +28,7 @@ class Params(NamedTuple):
     learn_a : 1 if the readout learns, 0 if frozen
     do_proj : 1 projects onto Δ_i = Δ₀ after every step
     use_heads : 1 for task-specific heads
+    sigma0 : initial scale, W⁽⁰⁾_ij ~ N(0, σ₀²) (check 5; 1 in every sweep)
     """
 
     Delta0: jnp.ndarray    # raw imbalance Δ₀ = δ₀/η
@@ -38,6 +40,7 @@ class Params(NamedTuple):
     learn_a: jnp.ndarray   # 1: readout learns, 0: frozen
     do_proj: jnp.ndarray   # 1: project onto Δ_i = Δ₀ after every step
     use_heads: jnp.ndarray  # 1: task-specific heads
+    sigma0: jnp.ndarray    # initial scale of W (1 unless check 5 sweeps it)
 
 
 class State(NamedTuple):
@@ -50,7 +53,7 @@ class State(NamedTuple):
     a : (N,) shared readout, or the current task head
     g : (N,) current gate, 0/1 floats (all ones when ungated)
     w : (D,) current teacher
-    heads : (P, N) stored task heads (zeros unless use_heads)
+    heads : (P, N) stored task heads, masked by their gate (zeros unless use_heads)
     key : PRNGKey of the run
     t : int32 task index
 
@@ -424,9 +427,52 @@ def probe_task(key: jnp.ndarray, k, N: int, D: int, pN: jnp.ndarray, gated=1.0):
     return draw_task(task_keys(key, k)[0], N, D, pN, gated)
 
 
+#: Attempts at redrawing the rows of W⁽⁰⁾ that make the initial readout imaginary.
+MAX_REDRAW = 32
+
+
+def draw_W0(key: jnp.ndarray, p: Params, N: int, D: int) -> jnp.ndarray:
+    """
+    W⁽⁰⁾ with rows ~ N(0, σ₀² I_D), the infeasible rows redrawn.
+
+    A row is infeasible when Δ₀ + Q_ii/η < 0, i.e. ``draw_readout`` would give
+    an imaginary a_i (δ₀ ≤ −Q_ii; at small D the row norms fluctuate by
+    ~√(2/D), so δ₀ = −0.75 fails for about a third of the seeds at N ≤ 20).
+    Only those rows are redrawn (up to ``MAX_REDRAW`` times, each from a
+    fresh fold of the key), so a feasible first draw is unchanged and no seed
+    is lost; a row still infeasible after the last attempt is left as drawn
+    and shows up as NaN in ``a`` (``protocol.feasible``).
+
+    Parameters
+    ----------
+    key : PRNGKey (the W part of the run key)
+    p : Params
+    N, D : int
+
+    Returns
+    -------
+    (N, D) float64 array
+    """
+    def bad_rows(W):
+        return p.Delta0 + Q_diag(W) / p.eta < 0.0
+
+    def cond(c):
+        W, i = c
+        return jnp.logical_and(bad_rows(W).any(), i < MAX_REDRAW)
+
+    def body(c):
+        W, i = c
+        Wn = p.sigma0 * jax.random.normal(jax.random.fold_in(key, i + 1), (N, D), dtype=jnp.float64)
+        return jnp.where(bad_rows(W)[:, None], Wn, W), i + 1
+
+    W0 = p.sigma0 * jax.random.normal(key, (N, D), dtype=jnp.float64)
+    W0, _ = jax.lax.while_loop(cond, body, (W0, jnp.int32(0)))
+    return W0
+
+
 def init_state(key: jnp.ndarray, p: Params, N: int, D: int, P: int) -> State:
     """
-    Fresh run: W ~ N(0, 1), a from ``draw_readout`` at Δ_i = Δ₀, empty heads.
+    Fresh run: W ~ N(0, σ₀²) with infeasible rows redrawn (``draw_W0``), a from ``draw_readout`` at Δ_i = Δ₀, empty heads.
 
     Parameters
     ----------
@@ -440,7 +486,7 @@ def init_state(key: jnp.ndarray, p: Params, N: int, D: int, P: int) -> State:
     State
     """
     kW, ka = jax.random.split(key)
-    W0 = jax.random.normal(kW, (N, D), dtype=jnp.float64)
+    W0 = draw_W0(kW, p, N, D)
     a0 = draw_readout(ka, Q_diag(W0), p)
     z = jnp.zeros
     return State(
@@ -482,11 +528,16 @@ def masked_quantile(x: jnp.ndarray, mask: jnp.ndarray, q: float) -> jnp.ndarray:
 
 
 def norm_stats(W: jnp.ndarray, a: jnp.ndarray, g: jnp.ndarray) -> dict:
+    """``norm_stats_Q`` of ``Q_diag(W)``."""
+    return norm_stats_Q(Q_diag(W), a, g)
+
+
+def norm_stats_Q(Q: jnp.ndarray, a: jnp.ndarray, g: jnp.ndarray) -> dict:
     """Per-unit norm summaries of one state (the keys of PLAN.md §12.1 without a suffix).
 
     Parameters
     ----------
-    W : (N, D) hidden rows
+    Q : (N,) row norms Q_ii = |W_i|²/D
     a : (N,) readout (shared, or the current task head)
     g : (N,) gate, 0/1 floats
 
@@ -500,7 +551,6 @@ def norm_stats(W: jnp.ndarray, a: jnp.ndarray, g: jnp.ndarray) -> dict:
         Active-unit means and quantiles are NaN when the gate is empty (a
         task that trained nothing), so host-side averages must use ``nanmean``.
     """
-    Q = Q_diag(W)
     act = g == 1.0
     n_act = g.sum()
     act_mean = lambda x: jnp.where(n_act > 0, (g * x).sum() / jnp.maximum(n_act, 1.0), jnp.nan)
@@ -519,6 +569,11 @@ def norm_stats(W: jnp.ndarray, a: jnp.ndarray, g: jnp.ndarray) -> dict:
 def heads_fro2(heads: jnp.ndarray, n_stored) -> jnp.ndarray:
     """Mean squared norm of the first ``n_stored`` stored heads (0 when none are stored).
 
+    The heads are stored masked by their gate (``g_k ⊙ a_k``), so this is the
+    norm of what the probes read; before 2026-11-06 the unmasked head was
+    stored and about 85 % of this value came from entries outside the gate,
+    which are never trained or read.
+
     Parameters
     ----------
     heads : (P, N) stored task heads; rows beyond ``n_stored`` are zero.
@@ -530,3 +585,202 @@ def heads_fro2(heads: jnp.ndarray, n_stored) -> jnp.ndarray:
         ``Σ_k |heads[k]|² / max(n_stored, 1)``.
     """
     return (heads * heads).sum() / jnp.maximum(n_stored, 1)
+
+
+# ----------------------------------------------------------------------------
+# one task on the block of active rows (PLAN.md §3.2–§3.4 in the form of npmodel.step_task)
+# ----------------------------------------------------------------------------
+def block_rows(N: int, pN: float, gated: bool, n_sd: float = 8.0) -> int:
+    """
+    Rows of the active block a task's steps run on: N when ungated, else the
+    gate count's mean plus ``n_sd`` standard deviations (capped at N).
+
+    The gate count is Binomial(N, pN/N); with ``n_sd = 8`` the chance of a
+    task exceeding the block is below 1e-11, and such a task is not run
+    silently: ``train_block`` returns NaN for it.
+
+    Parameters
+    ----------
+    N : int
+    pN : float
+        Nominal active count κ√N (the largest of the batch).
+    gated : bool
+    n_sd : float
+
+    Returns
+    -------
+    int
+    """
+    if not gated:
+        return N
+    p = min(pN / N, 1.0)
+    return int(min(N, math.ceil(pN + n_sd * math.sqrt(N * p * (1.0 - p))) + 1))
+
+
+def _closed_form(Wb, ab, m, w, p, n_steps: int):
+    """Population steps of a frozen, unprojected readout in closed form.
+
+    With a fixed key the residual obeys r ← (1 − hηA) r, A = Σ_i (m_i a_i)²/pN,
+    so after n steps W = W⁽⁰⁾ − (m⊙a) r₀ᵀ (1 − qⁿ)/A with q = 1 − hηA (the
+    step loop to rounding; n·hη when A = 0).
+    """
+    ma = m * ab
+    A = (ma * ma).sum() / p.pN
+    r0 = ma @ Wb / p.pN - w
+    c = p.h * p.eta
+    q = 1.0 - c * A
+    fac = jnp.where(A > 0.0, (1.0 - q ** n_steps) / jnp.where(A > 0.0, A, 1.0), n_steps * c)
+    return Wb - fac * ma[:, None] * r0[None, :]
+
+
+def train_block(W, a, g, w, p: Params, k_stream, *, n_steps: int, solver: str, K: int,
+                closed: bool = False, traced: bool = False) -> dict:
+    """
+    ``n_steps`` solver steps, each followed by the row projection, on the block of the active rows.
+
+    The steps change ``W`` only through g⊙a and ``a`` only through g, so the
+    inactive rows receive exactly zero and the projection leaves them alone:
+    only the first ``K`` rows of ``argsort(−g)`` (the active units first, then
+    padding) are gathered, advanced and scattered back.  Within the task the
+    block is kept as diag(s)·W̃ with the projection's row factors folded into
+    ``s`` lazily, and the row norms Q_i are advanced analytically from the
+    quantities the step already computes (for W_i ← W_i − c·a_i r:
+    Q_i ← Q_i − 2c·a_i (W r)_i/D + c² a_i² |r|²/D), so one step reads the
+    block twice (the two matrix–vector products) and writes it once —
+    ``npmodel.step_task`` in JAX.  ``closed`` (population solver, frozen and
+    unprojected readout) replaces the loop by ``_closed_form``.
+
+    Parameters
+    ----------
+    W : (N, D)
+    a, g : (N,)
+    w : (D,)
+    p : Params
+    k_stream : PRNGKey of the task's input stream (SGD)
+    n_steps : int (static), ≥ 1
+    solver : {"pop", "sgd"} (static)
+    K : int (static)
+        Block rows (``block_rows``); N runs every row without a gather.
+    closed : bool (static)
+    traced : bool (static)
+        Also return the per-step rows of ``protocol.TRACE_QUANT``.
+
+    Returns
+    -------
+    dict
+        ``W``, ``a`` after the task (the projection's last factors applied);
+        ``f`` (N,) the product of the projection factors over the task (1 for
+        untouched units), ``f_last`` those of the last step alone; ``Q_pre``, ``a_pre`` (N,) after the last step and
+        before its projection; ``logf_sum`` = Σ_steps mean_active log f,
+        ``logf_max`` the largest |log f| over the steps; ``uc_before``,
+        ``uc_after`` the student function before and after the last
+        projection; ``n_act``; and with ``traced`` ``rows`` (n_steps, 7).
+        Every array is NaN when more than ``K`` units are active.
+    """
+    assert n_steps >= 1
+    N, D = W.shape
+    sqD = jnp.sqrt(D)
+    n_act = g.sum()
+    n_act1 = jnp.maximum(n_act, 1.0)
+    full = K >= N
+    if full:
+        Wb, ab, m = W, a, g
+    else:
+        idx = jnp.argsort(-g)[:K]
+        Wb, ab, m = W[idx], a[idx], g[idx]
+    Q_all = Q_diag(W)
+    Qb = Q_all if full else Q_all[idx]
+    Q_inact = ((1.0 - g) * Q_all).sum()                         # fixed over the task
+    act_mean = lambda x: jnp.where(n_act > 0, (m * x).sum() / n_act1, jnp.nan)
+    proj = (m == 1.0) & (p.do_proj == 1.0)
+
+    def solve(Wb, ab, Qb, s, i):
+        """One solver step on the lazy block: (W̃, a, Q) → (W̃, a, Q), s unchanged."""
+        ma = m * ab
+        if solver == "sgd":
+            x = jax.random.normal(jax.random.fold_in(k_stream, i), (D,), dtype=W.dtype)
+            hx = s * (Wb @ x) / sqD
+            e = ma @ hx / p.pN - w @ x / sqD
+            c = p.eta * e / sqD
+            a_new = ab - p.learn_a * p.eta / D * m * e * hx
+            Q_new = Qb - (2.0 * c / D) * ma * (hx * sqD) + (c * c / D) * ma * ma * (x @ x)
+            v = x
+        else:
+            r = (ma * s) @ Wb / p.pN - w
+            Wr = s * (Wb @ r)
+            c = p.h * p.eta
+            a_new = ab - p.learn_a * c * m * Wr / D
+            Q_new = Qb - (2.0 * c / D) * ma * Wr + (c * c / D) * ma * ma * (r @ r)
+            v = r
+        return Wb - c * (ma / s)[:, None] * v[None, :], a_new, Q_new
+
+    def project(ab, Qb, s):
+        """Eq. (proj) on the active rows from (a, Q); returns (a, Q, s, f)."""
+        A = ab * ab / p.eta
+        B = Qb / p.eta
+        AB = A * B
+        big = 0.5 * (jnp.abs(p.Delta0) + jnp.hypot(p.Delta0, 2.0 * jnp.sqrt(AB)))
+        small = AB / big
+        Ap = jnp.where(p.Delta0 >= 0.0, big, small)
+        Bp = jnp.where(p.Delta0 >= 0.0, small, big)
+        f = jnp.where(proj, jnp.sqrt(p.eta * Bp / Qb), 1.0)
+        return jnp.where(proj, jnp.sign(ab) * jnp.sqrt(p.eta * Ap), ab), Qb * f * f, s * f, f
+
+    def trace_row(Wb, a_p, Q_pre, Q_p, s, logf):
+        r_post = (m * a_p * s) @ Wb / p.pN - w
+        return jnp.stack([act_mean(Q_pre), act_mean(Q_p), (Q_inact + (m * Q_p).sum()) / N, act_mean(a_p * a_p),
+                          act_mean(jnp.abs(a_p) * jnp.sqrt(Q_p)), act_mean(logf), r_post @ r_post / (2.0 * D)])
+
+    def step(c, i):
+        Wb, ab, Qb, s, lsum, lmax = c
+        Wb, a_new, Q_new = solve(Wb, ab, Qb, s, i)
+        a_p, Q_p, s, f = project(a_new, Q_new, s)
+        logf = jnp.log(f)
+        out = (Wb, a_p, Q_p, s, lsum + (m * logf).sum() / n_act1, jnp.maximum(lmax, jnp.abs(logf).max()))
+        return out, (trace_row(Wb, a_p, Q_new, Q_p, s, logf) if traced else None)
+
+    ones = jnp.ones(m.shape, W.dtype)
+    zero = jnp.zeros((), W.dtype)
+    if closed:
+        Wb = _closed_form(Wb, ab, m, w, p, n_steps)
+        Qb = Q_diag(Wb)
+        a_pre_b, Q_pre_b, s, lsum, lmax = ab, Qb, ones, zero, zero
+        uc_before = uc_after = (m * ab) @ Wb / p.pN
+        f = ones
+        rows = jnp.stack([trace_row(Wb, ab, Qb, Qb, ones, jnp.zeros_like(ones))] * n_steps) if traced else None
+    else:
+        c0 = (Wb, ab, Qb, ones, zero, zero)
+        steps = jnp.arange(n_steps - 1, dtype=jnp.int32)
+        if traced:
+            (Wb, ab, Qb, s, lsum, lmax), rows = jax.lax.scan(step, c0, steps)
+        else:
+            Wb, ab, Qb, s, lsum, lmax = jax.lax.fori_loop(0, n_steps - 1, lambda i, c: step(c, i)[0], c0)
+            rows = None
+        # the last step: its pre-projection state is recorded and u_c checked across the projection
+        Wb, a_pre_b, Q_pre_b = solve(Wb, ab, Qb, s, n_steps - 1)
+        uc_before = (m * a_pre_b * s) @ Wb / p.pN
+        ab, Qb, s, f = project(a_pre_b, Q_pre_b, s)
+        logf = jnp.log(f)
+        lsum = lsum + (m * logf).sum() / n_act1
+        lmax = jnp.maximum(lmax, jnp.abs(logf).max())
+        uc_after = (m * ab * s) @ Wb / p.pN
+        if traced:
+            rows = jnp.concatenate([rows, trace_row(Wb, ab, Q_pre_b, Qb, s, logf)[None, :]], 0)
+    Wb = Wb * s[:, None]                                          # fold the row scale in
+    if full:
+        W_out, a_out, f_out, fl_out, Q_pre, a_pre = Wb, ab, s, f, Q_pre_b, a_pre_b
+    else:
+        W_out = W.at[idx].set(Wb)
+        a_out = a.at[idx].set(ab)
+        f_out = jnp.ones((N,), W.dtype).at[idx].set(s)
+        fl_out = jnp.ones((N,), W.dtype).at[idx].set(f)
+        Q_pre = Q_all.at[idx].set(Q_pre_b)
+        a_pre = a.at[idx].set(a_pre_b)
+    bad = n_act > K
+    nan = lambda x: jnp.where(bad, jnp.nan, x)
+    out = dict(W=nan(W_out), a=nan(a_out), f=nan(f_out), f_last=nan(fl_out), Q_pre=nan(Q_pre), a_pre=nan(a_pre),
+               logf_sum=nan(lsum), logf_max=nan(lmax), n_act=n_act,
+               uc_before=nan(uc_before), uc_after=nan(uc_after))
+    if traced:
+        out["rows"] = nan(rows)
+    return out

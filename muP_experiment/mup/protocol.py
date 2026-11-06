@@ -74,8 +74,14 @@ def _step_and_project(state: State, p: Params, step: Callable, i) -> tuple[State
     return s2, f, row
 
 
+def block_of(runs: Sequence) -> tuple[int, bool]:
+    """``(K, closed)`` of a batch: the block rows for its largest gate, and whether every run's task is closed-form
+    (a batch mixing closed-form and stepped runs steps all of them)."""
+    return max(r.block_rows() for r in runs), all(r.closed for r in runs)
+
+
 def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp.ndarray] = None,
-             *, n_steps: int, solver: str):
+             *, n_steps: int, solver: str, K: Optional[int] = None, closed: bool = False):
     """Train one task of ``n_steps`` steps, store it as a probe and evaluate all probes.
 
     Parameters
@@ -93,6 +99,10 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
     n_steps : int (static)
         Steps per task, ≥ 1.
     solver : {"pop", "sgd"} (static)
+    K : int (static), optional
+        Rows of the active block (``model.block_rows``; default N).
+    closed : bool (static)
+        Closed-form task (``Run.closed``).
 
     Returns
     -------
@@ -101,86 +111,64 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
         ``SCALARS`` as a 0-d array and, with ``trace_idx``, ``trace`` of shape
         (n_trace, len(TRACE_QUANT)).  ``E0``/``S0`` are ε and s of the task
         just learned (age 0).  ``*_pre`` scalars are evaluated after the
-        last step and before the last projection (the ``uc_before`` point),
-        ``*_post`` after it; the quantiles on the pre state.  ``logf_sum`` is
-        Σ_steps mean_active log f, ``logf_max`` the largest single-step
-        |log f| over active units.
+        last step and before the last projection (the ``uc_before`` point;
+        the stored heads there carry the rescaling of every earlier step of
+        the task), ``*_post`` after it; the quantiles on the pre state.
+        ``logf_sum`` is Σ_steps mean_active log f, ``logf_max`` the largest
+        single-step |log f| over active units.  The stored head is the
+        gate-masked key ``g_t ⊙ a``.
     """
     assert n_steps >= 1
     N, D = state.W.shape
+    K = N if K is None else K
     k_teach, k_head, k_stream = model.task_keys(state.key, state.t)
 
     w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated)
     head = model.draw_readout(k_head, model.Q_diag(state.W), p)
     a = jnp.where(p.use_heads == 1.0, head, state.a)
-    state = state._replace(w=w_t, g=g_t, a=a)
     t = state.t
 
     n_act = g_t.sum()
-    n_act1 = jnp.maximum(n_act, 1.0)
-    abar2 = jnp.where(n_act > 0, (g_t * a * a).sum() / n_act1, jnp.nan)   # NaN: empty gate, nothing trained
-    step = _step_fn(p, solver, k_stream)
+    abar2 = jnp.where(n_act > 0, (g_t * a * a).sum() / jnp.maximum(n_act, 1.0), jnp.nan)   # NaN: empty gate, nothing trained
+    r = model.train_block(state.W, a, g_t, w_t, p, k_stream, n_steps=n_steps, solver=solver, K=K,
+                          closed=closed, traced=trace_idx is not None)
+    f, f_last = r["f"], r["f_last"]
 
-    # The stored-head rescaling by 1/f (eq. proj) is a product over steps, so it is
-    # accumulated in ``fcum`` and applied to the (P, N) head buffer once per task.
-    ones = jnp.ones((N,), dtype=state.W.dtype)
-    carry0 = (state, ones, jnp.zeros((), state.W.dtype), jnp.zeros((), state.W.dtype))
-
-    def body(carry, i):
-        """Loop body: step i, project, accumulate Πf, Σ mean log f and max |log f|; returns (carry, trace row)."""
-        s, fcum, lsum, lmax = carry
-        s, f, row = _step_and_project(s, p, step, i)
-        logf = jnp.log(f)
-        return (s, fcum * f, lsum + logf.sum() / n_act1, jnp.maximum(lmax, jnp.abs(logf).max())), row
-
-    if trace_idx is None:
-        carry = jax.lax.fori_loop(0, n_steps - 1, lambda i, c: body(c, i)[0], carry0)
-        rows = None
-    else:
-        carry, rows = jax.lax.scan(body, carry0, jnp.arange(n_steps - 1, dtype=jnp.int32))
-    state, fcum, logf_sum, logf_max = carry
-
-    # last step with the gauge diagnostics (check 1) and the pre-projection norms
-    state = step(state, n_steps - 1)
-    uc_before = model.u_c(state, p)
-    pre = model.norm_stats(state.W, state.a, g_t)
-    pre["heads_fro2"] = model.heads_fro2(state.heads, t)
-    state, f = model.project_rows(state, p)
-    logf = jnp.log(f)
-    logf_sum = logf_sum + logf.sum() / n_act1
-    logf_max = jnp.maximum(logf_max, jnp.abs(logf).max())
-    state = model.rescale_heads(state, p, fcum * f)
-    uc_after = model.u_c(state, p)
-    gauge_uc = jnp.max(jnp.abs(uc_after - uc_before))
-    dres = jnp.abs(model.imbalance(state, p) - p.Delta0)
+    # pre-projection norms (after the last step); the heads there are rescaled by every step but the last
+    pre = model.norm_stats_Q(r["Q_pre"], r["a_pre"], g_t)
+    heads_pre = jnp.where(p.use_heads == 1.0, state.heads * (f_last / f)[None, :], state.heads)
+    pre["heads_fro2"] = model.heads_fro2(heads_pre, t)
+    state = state._replace(W=r["W"], a=r["a"], g=g_t, w=w_t)
+    state = model.rescale_heads(state, p, f)
+    gauge_uc = jnp.max(jnp.abs(r["uc_after"] - r["uc_before"]))
+    Q_post = model.Q_diag(state.W)
+    dres = jnp.abs(state.a * state.a / p.eta - Q_post / p.eta - p.Delta0)
     gauge_delta = jnp.max(jnp.where(g_t == 1.0, dres, 0.0))
 
-    # store the head (the probe's teacher and gate are regenerated from the key), then evaluate the age schedule
-    state = state._replace(heads=state.heads.at[t].set(jnp.where(p.use_heads == 1.0, state.a, 0.0)))
+    # store the masked head (the probe's teacher and gate are regenerated from the key), then evaluate the age schedule
+    state = state._replace(heads=state.heads.at[t].set(jnp.where(p.use_heads == 1.0, g_t * state.a, 0.0)))
     s, eps, valid = evaluate_probes(state, p, ages)
-    post = model.norm_stats(state.W, state.a, g_t)
+    post = model.norm_stats_Q(Q_post, state.a, g_t)
     post["heads_fro2"] = model.heads_fro2(state.heads, t + 1)
 
     out = {
         "s": s, "eps": eps, "valid": valid,
         "abar2": abar2, "n_active": n_act, "L_end": model.loss(state, p), "E0": eps[0], "S0": s[0],
         "gauge_delta": gauge_delta, "gauge_uc": gauge_uc,
-        "logf_sum": logf_sum, "logf_max": logf_max,
+        "logf_sum": r["logf_sum"], "logf_max": r["logf_max"],
         **{k + "_pre": pre[k] for k in NORM_KEYS}, **{k + "_post": post[k] for k in NORM_KEYS},
         **{k: pre[k] for k in QUANTILE_KEYS},
         "Q_mean": post["Q_all"], "a2_mean": post["a2_all"], "aQ_mean": post["aQ_all"], "aQ_max": post["aQ_max"],
     }
-    if rows is not None:
-        last = jnp.stack([pre["Q_act"], post["Q_act"], post["Q_all"], post["a2_act"], post["aQ_act"],
-                          logf.sum() / n_act1, out["L_end"]])
-        trace = jnp.concatenate([rows, last[None, :]], axis=0)        # (n_steps, n_quant)
-        out["trace"] = trace[trace_idx]
+    if trace_idx is not None:
+        out["trace"] = r["rows"][trace_idx]
     return state._replace(t=t + 1), out
 
 
 @functools.lru_cache(maxsize=None)
-def batched_run_task(n_steps: int, solver: str, traced: bool = False) -> Callable:
-    """``jit(vmap(run_task))`` for static ``(n_steps, solver, traced)``; cached.
+def batched_run_task(n_steps: int, solver: str, traced: bool = False, K: Optional[int] = None,
+                     closed: bool = False) -> Callable:
+    """``jit(vmap(run_task))`` for static ``(n_steps, solver, traced, K, closed)``; cached.
 
     Parameters
     ----------
@@ -189,6 +177,7 @@ def batched_run_task(n_steps: int, solver: str, traced: bool = False) -> Callabl
     traced : bool
         Whether the returned function takes a ``trace_idx`` array (shared by
         the batch) and returns ``out["trace"]``.
+    K, closed : see ``run_task`` (``block_of``)
 
     Returns
     -------
@@ -198,13 +187,14 @@ def batched_run_task(n_steps: int, solver: str, traced: bool = False) -> Callabl
         the probe and head buffers are updated in place; callers must use the
         returned state and never the argument.
     """
-    f = functools.partial(run_task, n_steps=n_steps, solver=solver)
+    f = functools.partial(run_task, n_steps=n_steps, solver=solver, K=K, closed=closed)
     in_axes = (0, 0, None, None) if traced else (0, 0, None)
     return jax.jit(jax.vmap(f, in_axes=in_axes), donate_argnums=(0,))
 
 
 @functools.lru_cache(maxsize=None)
-def batched_run_tasks(n_steps: int, solver: str, traced: bool, n_tasks: int) -> Callable:
+def batched_run_tasks(n_steps: int, solver: str, traced: bool, n_tasks: int, K: Optional[int] = None,
+                      closed: bool = False) -> Callable:
     """``jit(scan(vmap(run_task)))`` over ``n_tasks`` consecutive tasks; cached.
 
     One device call advances every run of the batch by ``n_tasks`` tasks and
@@ -220,6 +210,7 @@ def batched_run_tasks(n_steps: int, solver: str, traced: bool, n_tasks: int) -> 
     traced : bool
     n_tasks : int
         Tasks per call, ≥ 1.
+    K, closed : see ``run_task``
 
     Returns
     -------
@@ -228,7 +219,7 @@ def batched_run_tasks(n_steps: int, solver: str, traced: bool, n_tasks: int) -> 
         entry of ``out`` of shape ``(n_tasks, B, ...)``.  The state is donated.
     """
     assert n_tasks >= 1
-    f = functools.partial(run_task, n_steps=n_steps, solver=solver)
+    f = functools.partial(run_task, n_steps=n_steps, solver=solver, K=K, closed=closed)
     in_axes = (0, 0, None, None) if traced else (0, 0, None)
     vf = jax.vmap(f, in_axes=in_axes)
 
@@ -260,6 +251,7 @@ def make_params(runs: Sequence) -> Params:
     return Params(
         Delta0=col("Delta0"), eta=col("eta"), h=col("h"), pN=col("pN"), lam=col("lam"),
         gated=col("gated"), learn_a=col("learn_a"), do_proj=col("do_proj"), use_heads=col("use_heads"),
+        sigma0=col("sigma0"),
     )
 
 
@@ -387,7 +379,7 @@ def run_stream(
     Parameters
     ----------
     runs : sequence of config.Run
-        Must share ``(N, D, kappa, solver, n_steps, T_burn, T_meas, trace)``.
+        Must share ``batch_key`` (N, D, κ, solver, n_steps, T_burn, T_meas, trace, closed).
     log : callable, optional
         Receives progress strings.
     log_every : int
@@ -424,12 +416,14 @@ def run_stream(
         tidx = np.asarray(extra[0])
         traces = np.zeros((B, T, len(tidx), len(TRACE_QUANT)), dtype=np.float32)
 
+    K, closed = block_of(runs)
+
     def kernel(n_tasks):
         """Device call advancing ``n_tasks`` tasks; outputs always carry a leading task axis."""
         if n_tasks == 1 and chunk == 1:
-            f = batched_run_task(r0.n_steps, r0.solver, traced)
+            f = batched_run_task(r0.n_steps, r0.solver, traced, K, closed)
             return lambda s: (lambda r: (r[0], jax.tree_util.tree_map(lambda x: x[None], r[1])))(f(s, p, ages_j, *extra))
-        f = batched_run_tasks(r0.n_steps, r0.solver, traced, n_tasks)
+        f = batched_run_tasks(r0.n_steps, r0.solver, traced, n_tasks, K, closed)
         return lambda s: f(s, p, ages_j, *extra)
 
     mom = Moments(B, len(ages))
