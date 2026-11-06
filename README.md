@@ -49,6 +49,7 @@ code is unchanged between CPU and GPU; what changes is how it is driven:
 
 ```bash
 cd muP_experiment
+python -m pytest tests/test_gpu.py -v            # GPU backend, each card vs CPU, all cards at once, driver placement
 python scripts/gpu_check.py                      # devices, x64, fp64 matmul, kernel chunk per GPU vs CPU
 python scripts/gpu_check.py --bench --N 100 200 --B 64 256 1024 --chunk 1 16   # all 4 GPUs at once
 python scripts/run_sweep.py --config configs/stage1.yaml --dry-run --batch-size 256
