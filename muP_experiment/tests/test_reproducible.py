@@ -7,6 +7,7 @@ behaviour, not a bug: compare curves instead (PLAN.md §10).
 import hashlib
 import os
 
+import jax
 import numpy as np
 import pytest
 
@@ -31,6 +32,10 @@ def _hash():
 
 
 def test_hash_matches_reference():
+    if jax.default_backend() != "cpu":
+        pytest.skip("reference hash is for the CPU backend (GPU FMA order differs)")
+    if not jax.config.jax_threefry_partitionable:
+        pytest.skip("reference hash is for jax >= 0.5's PRNG stream (jax_threefry_partitionable)")
     h = _hash()
     if not os.path.exists(REF):
         with open(REF, "w") as f:

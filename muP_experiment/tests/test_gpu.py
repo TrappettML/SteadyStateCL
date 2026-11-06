@@ -6,13 +6,18 @@ What is checked, in order:
 
 1. JAX's default backend is a GPU and float64 arrays live there (x64 on).
 2. One chunk of the sweep kernel on every GPU gives the CPU's result
-   (teacher/gate draws exact, floats to 1e-8).
+   (integer fields exact, floats to 1e-8; the teacher draw can differ by an ulp
+   between backends through ``erfinv``).
 3. Scanning several tasks per call (``chunk``) equals one task per call on the GPU.
 4. ``run_stream`` of the same batch in one subprocess per GPU, all at the same
    time, gives the same moments and scalars on every card (and matches this
    process's CPU run).
 5. ``driver.launch`` over every GPU runs the pilot sweep end to end: every batch
    file is written, each log names its GPU, and the batches are spread over the cards.
+
+The subprocesses of 4 and 5 get ``GPU_MEM_SHARE = 0.2`` instead of the driver's 0.9:
+this pytest process already holds memory on every card (``tests/conftest.py`` turns
+preallocation off, but the compiled kernels still live there), and the pilot is tiny.
 """
 import json
 import os
@@ -69,8 +74,8 @@ def test_each_gpu_matches_cpu(gpu):
     st_c, out_c = _on(jax.devices("cpu")[0], runs, 4)
     st_g, out_g = _on(gpu, runs, 4)
     for name, a, b in zip(st_c._fields, st_c, st_g):
-        if name in ("g", "w", "key", "t"):
-            assert np.array_equal(np.asarray(a), np.asarray(b)), name      # draws are exact across devices
+        if name in ("key", "t"):
+            assert np.array_equal(np.asarray(a), np.asarray(b)), name
         else:
             np.testing.assert_allclose(np.asarray(a), np.asarray(b), atol=1e-8, rtol=0, err_msg=name)
     for k in out_c:
@@ -107,7 +112,13 @@ print(json.dumps({"backend": jax.default_backend(), "devices": [str(d) for d in 
 '''
 
 
-def test_all_gpus_concurrently(tmp_path):
+@pytest.fixture
+def small_share(monkeypatch):
+    """Subprocesses preallocate 20 % of a card, leaving room beside this process."""
+    monkeypatch.setattr(driver, "GPU_MEM_SHARE", 0.2)
+
+
+def test_all_gpus_concurrently(tmp_path, small_share):
     """One ``run_stream`` per GPU at the same time, each process pinned to its card."""
     gpus = driver.visible_gpus() or list(range(len(GPUS)))
     script = tmp_path / "child.py"
@@ -132,7 +143,7 @@ def test_all_gpus_concurrently(tmp_path):
         assert np.array_equal(np.array(o["count"]), ref["count"])
 
 
-def test_driver_spreads_batches_over_gpus(tmp_path):
+def test_driver_spreads_batches_over_gpus(tmp_path, small_share):
     """The pilot sweep (N = 10) through ``driver.launch`` with one process per GPU."""
     gpus = driver.visible_gpus() or list(range(len(GPUS)))
     config = os.path.join(ROOT, "configs", "pilot.yaml")
@@ -141,7 +152,9 @@ def test_driver_spreads_batches_over_gpus(tmp_path):
     batches = io.plan_sweep(cfg, out, [10], config)
     res = driver.launch(config, out, 0, batch_ids=list(range(len(batches))), log=lambda m: None,
                         gpus=gpus, per_gpu=1, chunk=8)
-    assert res["failed"] == [] and len(res["done"]) == len(batches)
+    logs = {i: open(os.path.join(out, "logs", f"batch_{i:05d}.log")).read()[-1500:]
+            for i in res["failed"] if os.path.exists(os.path.join(out, "logs", f"batch_{i:05d}.log"))}
+    assert res["failed"] == [] and len(res["done"]) == len(batches), logs
     used = set()
     for i in range(len(batches)):
         assert os.path.exists(io.batch_path(out, i)), i

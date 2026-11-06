@@ -55,8 +55,12 @@ def test_stored_heads_keep_stored_uk():
 
 
 def test_init_pins_delta_and_a_nonzero():
-    st, p = state_with_task(seed=9, N=30, D=120, delta0=-0.75, eta=0.1)
+    # δ₀ = −0.5 keeps every unit feasible (Q_ii + ηΔ₀ > 0) under any PRNG stream;
+    # −0.75 was infeasible for two units with jax < 0.5's threefry.
+    st, p = state_with_task(seed=9, N=30, D=120, delta0=-0.5, eta=0.1)
     d = np.asarray(model.imbalance(st, p))
+    assert np.isfinite(d).all(), "infeasible δ₀ for this draw"
+
     np.testing.assert_allclose(d, float(p.Delta0), atol=1e-12, rtol=0)
     assert (np.asarray(st.a) != 0).all()
 

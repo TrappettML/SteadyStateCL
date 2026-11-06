@@ -5,6 +5,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# On a GPU node the test process must not grab 75 % of every card: the GPU tests
+# start one subprocess per card beside it.  Must precede the first ``import jax``.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
 import jax
 import jax.numpy as jnp
 import pytest

@@ -35,8 +35,10 @@ def _drift_sgd(eta, n_steps=400):
 
 
 def test_sgd_drift_scales_as_eta2():
-    # same input stream, same number of steps: drift of a² − Q is O(η²)
-    d1, d2, d4 = _drift_sgd(0.04), _drift_sgd(0.02), _drift_sgd(0.01)
+    # same input stream, same number of steps: drift of a² − Q is O(η²).  Small η so
+    # the O(η³) term does not pull the ratio below 3 for some PRNG streams (jax < 0.5
+    # draws a different stream; at η = 0.04 it gave 2.9).
+    d1, d2, d4 = _drift_sgd(0.01), _drift_sgd(0.005), _drift_sgd(0.0025)
     assert d1 > d2 > d4
     assert 3.0 < d1 / d2 < 5.0
     assert 3.0 < d2 / d4 < 5.0
