@@ -57,12 +57,21 @@ LAM_DEFAULT = (0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0)
 ROWS = (("S0", "first memory", "first"), ("ST", "steady state", "steady"))
 
 
+def cost(runs: Sequence[Run], n_tasks: int) -> float:
+    """Device time of a job, for ``pool.run_jobs`` to balance the cards by: ``experiments.job_cost``, which grows
+    with n_steps = 10 λ, except for a closed-form batch (the frozen readouts under the population solver), whose
+    task is one update whatever λ is.  Counting those at the stepped rate would fill some cards with jobs that
+    finish in seconds and stack the long large-λ jobs on the others."""
+    c = X.job_cost(runs, n_tasks)
+    return c / runs[0].n_steps if runs[0].closed else c
+
+
 def groups(runs: list[Run], n_tasks: int) -> dict[tuple, list[Run]]:
-    """``{(λ,) + group_key: runs}``, costliest job first (``experiments.job_cost`` over ``n_tasks`` tasks)."""
+    """``{(λ,) + group_key: runs}``, costliest job first (``cost`` over ``n_tasks`` tasks)."""
     g = {}
     for r in runs:
         g.setdefault((r.lam,) + X.group_key(r), []).append(r)
-    return {k: g[k] for k in sorted(g, key=lambda k: -X.job_cost(g[k], n_tasks))}
+    return {k: g[k] for k in sorted(g, key=lambda k: -cost(g[k], n_tasks))}
 
 
 def make_jobs(groups_: dict[tuple, list[Run]], T: int, tau: int, pieces: Sequence[int]) -> list[tuple]:
@@ -70,7 +79,7 @@ def make_jobs(groups_: dict[tuple, list[Run]], T: int, tau: int, pieces: Sequenc
     jobs = []
     for (key, runs), k in zip(groups_.items(), pieces):
         for i, part in enumerate(X.split(runs, k)):
-            jobs.append(((key, i), {"runs": part, "T": T, "n_follow": tau + 1}, X.job_cost(part, T + tau + 1)))
+            jobs.append(((key, i), {"runs": part, "T": T, "n_follow": tau + 1}, cost(part, T + tau + 1)))
     return jobs
 
 

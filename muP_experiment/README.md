@@ -21,6 +21,8 @@ a script recomputes everything it draws.
 | `scripts/run_weight_norms.py` | are the weight norms bounded, and how do they scale with N and κ | `results/weight_norms/` |
 | `scripts/run_imbalance_comp.py` | how the steady-state norms and the half-life depend on δ₀, across N, κ and readouts | `results/imbalance_results/` |
 | `scripts/run_halflife_lam.py` | how the half-life depends on the learning per task λ, for the first memory and for a steady-state one | `results/halflife_lam/` |
+| `scripts/run_halflife_kappa.py` | how the half-life depends on the gate scale κ, from κ = 1 to √N, for the first memory and for a steady-state one | `results/halflife_kappa/` |
+| `scripts/run_synapse_comp.py` | does gating synapses instead of hidden units change the half-life: m½ vs N, both gatings | `results/synapse_comp/` |
 | `scripts/run_training_verify.py` | is every task learned: the per-step loss at the start, middle and end of the stream | `results/training_verify/` |
 
 ## Setup
@@ -59,6 +61,8 @@ python scripts/run_Nscaling.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --
 python scripts/run_weight_norms.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
 python scripts/run_imbalance_comp.py --N 5 10 20 50 100 200 --kappa 1 2 4 --delta0 0 1 2 4 --seeds 8 --gpus
 python scripts/run_training_verify.py --seeds 8 --gpus                 # the four default cells
+python scripts/run_halflife_kappa.py --N 1000 --seeds 8 --gpus          # κ = 1, 2, 4, 8, 16, √N
+python scripts/run_synapse_comp.py --synapse --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
 python scripts/run_halflife_lam.py --N 100 --kappa 1 --seeds 8 --gpus  # λ = 0.5 … 20
 
 # Xeon, CPU processes (keep --workers moderate: many XLA compiles at once stall the node)
@@ -262,6 +266,49 @@ counted in the caption), one trace per readout, dotted grey N ln 2 — and
 the `.npz` with the per-seed half-lives `mhalf_{first|steady}_{readout}_lam{λ}`.
 Console: both half-lives and the censored counts per (λ, readout).
 
+### `run_halflife_kappa.py` — half-life against the gate scale
+
+```
+python scripts/run_halflife_kappa.py [--N 1000] [--kappa 1 2 4 … sqrtN] [--delta0 0] [--lam 4] [--seeds 4] [--T T] [--tau τ] [--gpus]
+python scripts/run_halflife_kappa.py --N 50 --seeds 4 --workers 4       # laptop
+```
+
+`run_halflife_lam.py` with κ on the x axis: one cell (a single N, δ₀, λ)
+at every `--kappa` (default: 1, 2, 4, … below √N, then `sqrtN`; κ = 1 is
+the smallest the model allows), each run one stream of T + τ + 1 tasks.
+T defaults to T_burn + T_meas = 14 N and τ to T — 28 001 tasks per run at
+N = 1000; `--T` / `--tau` shorten it.
+
+Output: `figures/mhalf_vs_kappa_N{N}_d0{δ₀}_lam{λ}.png` — two rows sharing
+both axes (first memory / steady state), x = κ (log), y = m½ (log; seed
+mean ± 1 s.e. over the seeds that reach half), one trace per gated
+readout, the ungated readouts (no κ) as dashed horizontal lines, dotted
+grey N ln 2 — and the `.npz` with the per-seed half-lives.  Console: both
+half-lives and the censored counts per (κ, readout).
+
+### `run_synapse_comp.py` — unit gating against synaptic gating
+
+```
+python scripts/run_synapse_comp.py [--synapse] [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0] [--lam 4] [--seeds 4] [--theory nln2|nk2] [--gpus]
+python scripts/run_synapse_comp.py --synapse --N 10 20 --kappa 1 --seeds 2     # laptop
+```
+
+The experiment and flags of `run_Nscaling.py`.  `--synapse` also runs
+every gated readout with the gate on the synapse (`mup/synapse.py`: a
+mask of i.i.d. indicators on the N × D weights at the density κ/√N of the
+unit gate, the projection on all N units) and adds it to both figures as
+a trace.  A synaptic run has the initial weights, teachers, fresh heads,
+h and n_steps of its unit-gated twin (the fixed nominal task duration),
+so the pair differs in the mask alone.  Without the flag the script is
+`run_Nscaling.py`.  Population solver only.
+
+Output, in `figures/`: `mhalf_vs_N_k{κ₁}_…` and `mhalf_theory_…` as
+`run_Nscaling.py`, the synaptic runs dash-dotted with open squares in the
+colour of their unit-gated trace, and `mhalf_….npz` with the per-seed m½,
+keys `N{N}_k{κ}_{readout}` (unit) and `syn_N{N}_k{κ}_{readout}`.
+Console: every condition, then the two gatings side by side with the
+ratio synaptic / unit.
+
 ### `run_training_verify.py` — the loss of the task being trained
 
 ```
@@ -305,6 +352,7 @@ and in the caption.
 | path | what |
 |---|---|
 | `scripts/run_*.py` (the scripts above) | each: build the runs, group them into jobs, run the jobs through `mup.pool`, draw |
+| `mup/synapse.py` | synaptic gating: the masked task, probe and job function of `run_synapse_comp.py` |
 | `mup/experiments.py` | the batched kernels and job functions of the scripts: one task without observables, the per-task/per-step observables evaluated inside a `scan`, NaN columns for infeasible runs |
 | `mup/pool.py` | the jobs over GPUs, CPU processes or in-process; `--gpus` planning |
 | `mup/config.py` | `Config` (YAML), `Run`, readout table, task duration, grid → runs |
