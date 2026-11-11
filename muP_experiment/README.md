@@ -61,7 +61,7 @@ python scripts/run_Nscaling.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --
 python scripts/run_weight_norms.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
 python scripts/run_imbalance_comp.py --N 5 10 20 50 100 200 --kappa 1 2 4 --delta0 0 1 2 4 --seeds 8 --gpus
 python scripts/run_training_verify.py --seeds 8 --gpus                 # the four default cells
-python scripts/run_halflife_kappa.py --N 1000 --seeds 8 --gpus          # κ = 1, 2, 4, 8, 16, √N
+python scripts/run_halflife_kappa.py --N 1000 --seeds 8 --gpus          # 6 κ from 1 to √N; add --synaptic, --logx
 python scripts/run_synapse_comp.py --synapse --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
 python scripts/run_halflife_lam.py --N 100 --kappa 1 --seeds 8 --gpus  # λ = 0.5 … 20
 
@@ -269,22 +269,29 @@ Console: both half-lives and the censored counts per (λ, readout).
 ### `run_halflife_kappa.py` — half-life against the gate scale
 
 ```
-python scripts/run_halflife_kappa.py [--N 1000] [--kappa 1 2 4 … sqrtN] [--delta0 0] [--lam 4] [--seeds 4] [--T T] [--tau τ] [--gpus]
-python scripts/run_halflife_kappa.py --N 50 --seeds 4 --workers 4       # laptop
+python scripts/run_halflife_kappa.py [--synaptic] [--logx] [--N 1000] [--n-kappa 6] [--kappa …] [--delta0 0] [--lam 4] [--seeds 4] [--T T] [--tau τ] [--gpus]
+python scripts/run_halflife_kappa.py --synaptic --N 50 --seeds 4 --workers 4       # laptop
 ```
 
 `run_halflife_lam.py` with κ on the x axis: one cell (a single N, δ₀, λ)
-at every `--kappa` (default: 1, 2, 4, … below √N, then `sqrtN`; κ = 1 is
-the smallest the model allows), each run one stream of T + τ + 1 tasks.
-T defaults to T_burn + T_meas = 14 N and τ to T — 28 001 tasks per run at
-N = 1000; `--T` / `--tau` shorten it.
+at `--n-kappa` values of κ from 1 (the smallest the model allows) to √N,
+evenly spaced on a linear x axis, or with `--logx` evenly spaced in log κ
+on a log x axis; `--kappa` lists the values instead.  Each run is one
+stream of T + τ + 1 tasks.  T defaults to T_burn + T_meas = 14 N and τ to
+T — 28 001 tasks per run at N = 1000; `--T` / `--tau` shorten it.
+
+`--synaptic` adds every gated readout with the gate on the synapse
+(`mup/synapse.py`, as `run_synapse_comp.py`: same initial weights,
+teachers, heads and task duration as the unit-gated twin), dash-dotted
+with open squares.  A synaptic step touches all N·D synapses at every κ,
+so at N = 1000 these runs dominate the cost.
 
 Output: `figures/mhalf_vs_kappa_N{N}_d0{δ₀}_lam{λ}.png` — two rows sharing
-both axes (first memory / steady state), x = κ (log), y = m½ (log; seed
-mean ± 1 s.e. over the seeds that reach half), one trace per gated
-readout, the ungated readouts (no κ) as dashed horizontal lines, dotted
-grey N ln 2 — and the `.npz` with the per-seed half-lives.  Console: both
-half-lives and the censored counts per (κ, readout).
+both axes (first memory / steady state), x = κ, y = m½ (log; seed mean
+± 1 s.e. over the seeds that reach half), one trace per gated readout,
+the ungated readouts (no κ) as dashed horizontal lines, dotted grey
+N ln 2 — and the `.npz` with the per-seed half-lives.  Console: both
+half-lives and the censored counts per (κ, readout), unit gating first.
 
 ### `run_synapse_comp.py` — unit gating against synaptic gating
 
