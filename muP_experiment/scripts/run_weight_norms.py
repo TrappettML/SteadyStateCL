@@ -10,17 +10,27 @@ every task, records the hidden-layer norm mean_i Q_ii = mean_i |W_i|²/D
 N units (``_all``) and over the task's active units (``_act``), and the
 effective weight norm |u_t|²/D of the task just trained, u_t = (g ⊙ a) W / pN
 (the gate g of that task; for task heads ``a`` is its head;
-``experiments.task_norms``).  Figures in ``results/weight_norms/figures/``:
+``experiments.task_norms``).  Before every task it also records the output of
+that task's active set before any step, u_b = (g ⊙ a) W / pN with the new
+task's gate (and fresh head) on the weights left by the previous tasks
+(``experiments.leak_norms``): its norm |u_b|²/D, its overlap w·u_b/D with the
+new teacher, and the single-unit part Σ_i g_i a_i² Q_ii / pN² of the norm.
+These test the incoherence behind the scaling Q̄ ∝ pN: in steady state the
+frozen norm balance needs |u_b|²/D = f/(2 − f), f = 1 − e^{−λ}, with
+w·u_b ≈ 0, and the pairs i ≠ j of active units should carry a vanishing
+fraction of |u_b|².  Figures in ``results/weight_norms/figures/``:
 
 ``norms_vs_task_k{κ}_…``   rows = (mean Q_ii, mean a_i², |u_t|²/D, the scaled Q̄
-    of the bottom row of ``norms_vs_N``, per task), columns = N,
+    of ``norms_vs_N``, |u_b|²/D, w·u_b/D, the pair fraction of |u_b|², per task), columns = N,
     traces = readouts at the first κ listed (ungated readouts have no κ),
     x = task; seed mean with a ±1 s.e. band, burn-in shaded.
-``norms_vs_N_…``           rows = the same three quantities plus the scaling
+``norms_vs_N_…``           rows = the same quantities: the three norms, the scaling
     collapse Q̄/pN for the frozen readouts and Q̄²/pN for the learned ones
     (Q̄ the steady-state mean_i Q_ii of the top row, pN = κ√N, or N when
     ungated; a constant in N confirms the mechanism, and a frozen constant
-    with a drifting learned one points at extra dynamics in a), columns = κ,
+    with a drifting learned one points at extra dynamics in a), then the
+    three leak rows (the pair fraction here is the ratio of the window
+    means, 1 − ⟨diagonal⟩/⟨|u_b|²⟩, not the mean of the per-task ratio), columns = κ,
     x = N (log), y = the steady-state value (mean over the measurement
     window t ≥ T_burn, then seed mean ± 1 s.e. bars), traces = readouts;
     the ungated readouts repeat in every column.
@@ -55,8 +65,8 @@ from mup.config import Config, READOUT_ORDER, Run, is_gated, make_runs
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
 #: Recorded per task: (key, y-axis label)
-QUANT = (("Q_all", r"mean $Q_{ii} = |W_i|^2/D$"), ("a2_all", r"mean $a_i^2$"), ("u2", r"$|u_t|^2/D$"))
-ALL_KEYS = X.NORM_KEYS                      # ("Q_all", "Q_act", "a2_all", "a2_act", "u2")
+QUANT = (("Q_all", r"$\bar Q = \mathrm{mean}_i\,|W_i|^2/D$"), ("a2_all", r"mean $a_i^2$"), ("u2", r"$|u_t|^2/D$"))
+ALL_KEYS = X.NORM_KEYS + X.LEAK_KEYS        # ("Q_all", "Q_act", "a2_all", "a2_act", "u2", "ub2", "wub", "ub_diag")
 #: Fourth row of ``norms_vs_N``: the scaling collapse of Q̄ = mean Q_ii (derived from ``Q_all`` per seed)
 Q_SCALED = ("Q_scaled", r"$\bar Q/pN$ (frozen),  $\bar Q^2/pN$ (learned)")
 
@@ -76,6 +86,52 @@ def q_scaled(ss_Q: np.ndarray, run: Run) -> np.ndarray:
     """
     pN = float(run.pN)
     return ss_Q / pN if run.learn_a == 0.0 else ss_Q * ss_Q / pN
+
+
+#: Leak rows of both figures: the output u_b of a task's active set before it is trained (``X.leak_norms``).
+#: ``cross`` is derived: the share of |u_b|² carried by pairs i ≠ j of active units, (ub2 − ub_diag)/ub2.
+LEAK = (("ub2", r"$|u^{\mathrm{b}}_t|^2/D$"), ("wub", r"$w_t\cdot u^{\mathrm{b}}_t/D$"),
+        ("cross", r"pair fraction of $|u^{\mathrm{b}}_t|^2$"))
+ROWS = QUANT + (Q_SCALED,) + LEAK
+
+
+def _ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+    """``num/den`` with NaN where ``den`` is 0 or not finite (an empty gate has u_b = 0)."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(np.isfinite(den) & (den > 0), num / np.where(den > 0, den, 1.0), np.nan)
+
+
+def per_task(d: dict[str, np.ndarray], q: str, run: Run) -> np.ndarray:
+    """(n_seeds, T) values of row ``q`` of ``ROWS`` task by task, from a condition's recorded curves ``d``."""
+    if q == Q_SCALED[0]:
+        return q_scaled(d["Q_all"], run)
+    if q == "cross":
+        return _ratio(d["ub2"] - d["ub_diag"], d["ub2"])
+    return d[q]
+
+
+def steady(d: dict[str, np.ndarray], q: str, run: Run) -> np.ndarray:
+    """(n_seeds,) steady-state value of row ``q``: its mean over the measurement window t ≥ T_burn.
+
+    The two derived rows are functions of window means, not window means of the per-task value: the collapse
+    variable of the mean Q̄, and for ``cross`` the ratio 1 − ⟨ub_diag⟩/⟨ub2⟩ (the per-task ratio is noisy when
+    few units are active and undefined when none is)."""
+    win = lambda k: np.nanmean(d[k][:, run.T_burn:], 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        if q == Q_SCALED[0]:
+            return q_scaled(win("Q_all"), run)
+        if q == "cross":
+            return _ratio(win("ub2") - win("ub_diag"), win("ub2"))
+        return win(q)
+
+
+def leak_reference(ax, q: str, lam: float) -> None:
+    """Dotted reference of a leak row: f/(2 − f), f = 1 − e^{−λ}, for |u_b|²/D (frozen norm balance); 0 for the others."""
+    if q not in dict(LEAK):
+        return
+    f = 1.0 - math.exp(-lam)
+    ax.axhline(f / (2.0 - f) if q == "ub2" else 0.0, color="0.35", lw=0.8, ls=":", zorder=1)
 
 
 def groups(runs: list[Run]) -> dict[tuple, list[Run]]:
@@ -111,12 +167,12 @@ def collect(runs: list[Run], plan: pool.Plan, log: Callable[[str], None] = print
     for key in sorted(cond, key=lambda k: (k[0], READOUT_ORDER.index(k[2]), k[1])):
         b = cond[key]
         out[key] = {q: np.stack([per_run[key + (r.seed,)][q] for r in b]) for q in ALL_KEYS}
-        T_burn = b[0].T_burn
-        ss = {q: np.nanmean(out[key][q][:, T_burn:], 1) for q, _ in QUANT}
+        ss = {q: steady(out[key], q, b[0]) for q, _ in QUANT + LEAK}
         n_ok = int(np.isfinite(ss["Q_all"]).sum())
         print(f"  N={key[0]:4d} κ={key[1]:5s} {key[2]:15s} T={out[key]['Q_all'].shape[1]:5d}  "
               f"steady mean Q = {np.nanmean(ss['Q_all']):7.3f}  mean a² = {np.nanmean(ss['a2_all']):7.3f}  "
-              f"|u|²/D = {np.nanmean(ss['u2']):7.3f}  "
+              f"|u|²/D = {np.nanmean(ss['u2']):7.3f}  |u_b|²/D = {np.nanmean(ss['ub2']):7.3f}  "
+              f"w·u_b/D = {np.nanmean(ss['wub']):+7.3f}  pairs = {np.nanmean(ss['cross']):+7.3f}  "
               f"infeasible {len(b) - n_ok}/{len(b)}", flush=True)
     return out
 
@@ -138,7 +194,7 @@ def fig_vs_task(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabel: 
     ``run0`` is the full run list (a run per condition is looked up for ``pN``, ``learn_a``, ``T_burn``)."""
     P.apply_style()
     Ns = [N for N in Ns if any(k[0] == N for k in res)]
-    rows = QUANT + (Q_SCALED,)
+    rows = ROWS
     fig, axes = P.grid(len(rows), len(Ns), sharex="col", sharey="row", panel=(2.6, 2.0))
     figdata = {}
     readouts = []
@@ -152,11 +208,8 @@ def fig_vs_task(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabel: 
                     continue
                 if ro not in readouts:
                     readouts.append(ro)
-                if q == Q_SCALED[0]:                                  # per task, per seed: the collapse variable of Q̄(t)
-                    run = next(rr for rr in run0 if rr.N == N and rr.readout == ro and rr.kappa_label == k)
-                    Y = q_scaled(res[(N, k, ro)]["Q_all"], run)
-                else:
-                    Y = res[(N, k, ro)][q]
+                run = next(rr for rr in run0 if rr.N == N and rr.readout == ro and rr.kappa_label == k)
+                Y = per_task(res[(N, k, ro)], q, run)                 # per task, per seed
                 if r == 0:
                     n_inf += int((~np.isfinite(Y).any(1)).sum())
                 m, se = _mean_se(Y)
@@ -165,6 +218,7 @@ def fig_vs_task(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabel: 
                 P.plot_readout(ax, x, m, ro, zorder=4)
                 figdata[f"{q}_N{N}_{ro}"] = np.stack([x, m, se])
             run = next(rr for rr in run0 if rr.N == N)
+            leak_reference(ax, q, run.lam)
             P.shade_burnin(ax, run.T_burn, run.T_meas)
             if r == len(rows) - 1:
                 ax.set_xlabel("task")
@@ -176,9 +230,12 @@ def fig_vs_task(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabel: 
     P.caption(fig, f"after each task: mean over all N units of Q_ii = |W_i|²/D (top) and of a_i² (middle; the head "
                    f"just trained for task heads), and the effective weight norm |u_t|²/D of the task just trained, "
                    f"u_t = (g ⊙ a) W / pN (third), and the scaling collapse of the top row, Q̄/pN for the frozen "
-                   f"readouts and Q̄²/pN for the learned ones, pN = κ√N or N when ungated (bottom; flat across the "
-                   f"columns confirms the mechanism); seed mean, band ±1 s.e. over seeds; grey: burn-in, dotted: half of "
-                   f"the measurement window; the ungated readouts have no κ; {n_inf} infeasible seeds dropped.")
+                   f"readouts and Q̄²/pN for the learned ones, pN = κ√N or N when ungated (fourth; flat across the "
+                   f"columns confirms the mechanism); then, before each task, the output u_b of its active set on "
+                   f"the old weights: |u_b|²/D (dotted: f/(2−f), f = 1−e^(−λ), the frozen norm balance), its overlap "
+                   f"w·u_b/D with the new teacher, and the fraction of |u_b|² carried by pairs i ≠ j of active units "
+                   f"(0 = units add incoherently); seed mean, band ±1 s.e. over seeds; grey: burn-in, dotted vertical: "
+                   f"half of the measurement window; the ungated readouts have no κ; {n_inf} infeasible seeds dropped.")
     P.fig_legend(fig, readouts)
     return P.save(fig, path, figdata=figdata)
 
@@ -188,7 +245,7 @@ def fig_vs_N(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabels: li
 
     ``run0`` is the full run list, as in ``fig_vs_task``."""
     P.apply_style()
-    rows = QUANT + (Q_SCALED,)
+    rows = ROWS
     fig, axes = P.grid(len(rows), len(klabels), sharex="all", sharey="row", panel=(3.0, 2.4))
     figdata = {}
     readouts = []
@@ -202,10 +259,7 @@ def fig_vs_N(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabels: li
                     if (N, k, ro) not in res:
                         continue
                     run = next(rr for rr in run0 if rr.N == N and rr.readout == ro and rr.kappa_label == k)
-                    if q == Q_SCALED[0]:
-                        ss = q_scaled(np.nanmean(res[(N, k, ro)]["Q_all"][:, run.T_burn:], 1), run)
-                    else:
-                        ss = np.nanmean(res[(N, k, ro)][q][:, run.T_burn:], 1)     # per-seed steady-state value
+                    ss = steady(res[(N, k, ro)], q, run)                           # per-seed steady-state value
                     v = ss[np.isfinite(ss)]
                     if len(v):
                         pts.append((N, v.mean(), v.std(ddof=1) / math.sqrt(len(v)) if len(v) > 1 else 0.0))
@@ -217,6 +271,7 @@ def fig_vs_N(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabels: li
                 P.plot_readout(ax, x, m, ro, marker="o", ms=3)
                 ax.errorbar(x, m, yerr=se, fmt="none", ecolor=P.READOUT_COLOR[ro], elinewidth=0.8, capsize=2, zorder=3)
                 figdata[f"{q}_k{klabel}_{ro}"] = np.stack([x, m, se])
+            leak_reference(ax, q, run0[0].lam)
             P.logaxis(ax, "x")
             P.discrete_ticks(ax, Ns, "x")
             if r == len(rows) - 1:
@@ -228,9 +283,13 @@ def fig_vs_N(res: dict[tuple, dict[str, np.ndarray]], Ns: list[int], klabels: li
     P.cell_title(fig, d0=r0.delta0, lam=r0.lam, solver=r0.solver, eta=r0.eta)
     P.caption(fig, "steady-state norms: mean over the measurement window (t ≥ T_burn) of mean_i Q_ii (top), "
                    "mean_i a_i² (second) and the effective weight norm |u_t|²/D, u_t = (g ⊙ a) W / pN (third), "
-                   "then seed mean with ±1 s.e. bars; bottom: the scaling collapse of the top row, Q̄/pN for the "
+                   "then seed mean with ±1 s.e. bars; fourth: the scaling collapse of the top row, Q̄/pN for the "
                    "frozen readouts and Q̄²/pN for the learned ones (pN = κ√N, or N when ungated) — flat in N "
-                   "confirms the mechanism; the ungated readouts have no κ and repeat in every column.")
+                   "confirms the mechanism; last three: the output u_b of each task's active set before it is "
+                   "trained — |u_b|²/D (dotted: f/(2−f), f = 1−e^(−λ), the frozen norm balance), its overlap w·u_b/D "
+                   "with the new teacher, and the fraction of |u_b|² carried by pairs i ≠ j of active units, "
+                   "1 − ⟨Σ_i g_i a_i² Q_ii/pN²⟩/⟨|u_b|²/D⟩ over the window (0 = units add incoherently); "
+                   "the ungated readouts have no κ and repeat in every column.")
     P.fig_legend(fig, readouts, marker=True)
     return P.save(fig, path, figdata=figdata)
 

@@ -20,6 +20,7 @@ a script recomputes everything it draws.
 | `scripts/run_Nscaling.py` | how the steady-state half-life m½ scales with N and κ, against N ln 2 | `results/Nscaling/` |
 | `scripts/run_weight_norms.py` | are the weight norms bounded, and how do they scale with N and κ | `results/weight_norms/` |
 | `scripts/run_imbalance_comp.py` | how the steady-state norms and the half-life depend on δ₀, across N, κ and readouts | `results/imbalance_results/` |
+| `scripts/run_halflife_lam.py` | how the half-life depends on the learning per task λ, for the first memory and for a steady-state one | `results/halflife_lam/` |
 | `scripts/run_training_verify.py` | is every task learned: the per-step loss at the start, middle and end of the stream | `results/training_verify/` |
 
 ## Setup
@@ -58,6 +59,7 @@ python scripts/run_Nscaling.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --
 python scripts/run_weight_norms.py --N 5 10 20 50 100 200 --kappa 1 2 4 --seeds 8 --gpus
 python scripts/run_imbalance_comp.py --N 5 10 20 50 100 200 --kappa 1 2 4 --delta0 0 1 2 4 --seeds 8 --gpus
 python scripts/run_training_verify.py --seeds 8 --gpus                 # the four default cells
+python scripts/run_halflife_lam.py --N 100 --kappa 1 --seeds 8 --gpus  # λ = 0.5 … 20
 
 # Xeon, CPU processes (keep --workers moderate: many XLA compiles at once stall the node)
 python scripts/run_Nscaling.py --N 5 10 20 50 100 --kappa 1 2 4 --seeds 8 --workers 16
@@ -237,6 +239,28 @@ Output, under `results/imbalance_results/`:
 
 Console: per (N, κ, readout, δ₀) the steady means, m½ ± s.e. and the
 censored-or-infeasible count.
+
+### `run_halflife_lam.py` — half-life against the learning per task
+
+```
+python scripts/run_halflife_lam.py [--N 100] [--kappa 1] [--delta0 0] [--lam 0.5 1 2 … 20] [--seeds 4] [--T T] [--tau τ] [--gpus]
+python scripts/run_halflife_lam.py --N 20 --lam 1 4 8 --seeds 2        # laptop
+```
+
+One cell (a single N, κ, δ₀) at every `--lam` (a list here; default
+0.5, 1, 2, 3, 4, 6, 8, 10, 12, 16, 20; λ = 0 takes no step and is skipped).
+Every run is one stream of T + τ + 1 tasks
+(`experiments.first_and_steady_signal`): the first teacher is followed for
+the first T tasks (as `run_szero`), then the teacher of task T for τ more
+(as `run_stask`).  T defaults to T_burn + T_meas, τ to T.  n_steps = 10 λ
+is static in the kernels, so each λ is its own set of jobs.
+
+Output: `figures/mhalf_vs_lam_N{N}_k{κ}_d0{δ₀}.png` — two rows sharing
+both axes (first memory / steady state), x = λ (linear, from 0), y = m½
+(log; seed mean ± 1 s.e. over the seeds that reach half, censored seeds
+counted in the caption), one trace per readout, dotted grey N ln 2 — and
+the `.npz` with the per-seed half-lives `mhalf_{first|steady}_{readout}_lam{λ}`.
+Console: both half-lives and the censored counts per (λ, readout).
 
 ### `run_training_verify.py` — the loss of the task being trained
 

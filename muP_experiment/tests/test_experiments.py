@@ -8,6 +8,7 @@ import pytest
 from conftest import one_batch, small_runs  # noqa: F401
 
 from mup import experiments as X
+from mup import model as M
 from mup import pool
 from mup.config import Config, make_runs
 from mup.observe import age_schedule
@@ -67,6 +68,16 @@ def test_signal_after_tasks_matches_loop(small_runs):
     np.testing.assert_allclose(got2, want2, atol=1e-11, rtol=0)
 
 
+def test_first_and_steady_signal_matches_signal_after_tasks(small_runs):
+    """One stream of T + n tasks gives the first-memory curve and the steady-state one of the two separate calls."""
+    runs = small_runs
+    T, n = 5, 4
+    got = X.first_and_steady_signal(runs, T, n, chunk=2)
+    assert got["S0"].shape == (T, len(runs)) and got["ST"].shape == (n, len(runs))
+    np.testing.assert_allclose(got["S0"], X.signal_after_tasks(runs, 0, T, 0, chunk=3), atol=1e-11, rtol=0)
+    np.testing.assert_allclose(got["ST"], X.signal_after_tasks(runs, T, n, T, chunk=3), atol=1e-11, rtol=0)
+
+
 def test_norms_over_tasks_matches_loop(small_runs):
     runs = small_runs
     T = 4
@@ -76,6 +87,30 @@ def test_norms_over_tasks_matches_loop(small_runs):
     got = X.norms_over_tasks(runs, T, chunk=3)
     for i, q in enumerate(X.NORM_KEYS):
         np.testing.assert_allclose(got[q], want[:, :, i].T, atol=1e-11, rtol=0, err_msg=q)
+
+
+def test_leak_norms_match_loop(small_runs):
+    """``LEAK_KEYS`` of task t come from the state before it: u_b of the next task's own gate, teacher and readout."""
+    runs = small_runs
+    T = 4
+    ref, p = _ref_states(runs, T)
+    st0, _ = init_batch(runs)
+    before = [jax.device_get(st0)] + ref[:-1]
+    vl = jax.jit(jax.vmap(X.leak_norms))
+    want = np.stack([np.asarray(vl(s, p)) for s in before])         # (T, B, 3)
+    got = X.norms_over_tasks(runs, T, chunk=3)
+    for i, q in enumerate(X.LEAK_KEYS):
+        np.testing.assert_allclose(got[q], want[:, :, i].T, atol=1e-11, rtol=0, err_msg=q)
+    # the pieces against a direct evaluation for one run: ub2 = diagonal + pairs, with the task's own draws
+    s = jax.tree_util.tree_map(lambda x: x[0], before[1])
+    p0 = jax.tree_util.tree_map(lambda x: x[0], p)
+    N, D = s.W.shape
+    k_teach, k_head, _ = M.task_keys(s.key, s.t)
+    w, g = M.draw_task(k_teach, N, D, p0.pN, p0.gated)
+    a = np.where(float(p0.use_heads) == 1.0, np.asarray(M.draw_readout(k_head, M.Q_diag(s.W), p0)), np.asarray(s.a))
+    V = (np.asarray(g) * a)[:, None] * np.asarray(s.W) / float(p0.pN)
+    G = V @ V.T / D
+    np.testing.assert_allclose(want[1, 0], [G.sum(), V.sum(0) @ np.asarray(w) / D, np.trace(G)], atol=1e-11, rtol=0)
 
 
 def test_imbalance_over_steps_pins_with_projection(small_runs):

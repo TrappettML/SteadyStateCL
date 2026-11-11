@@ -95,6 +95,32 @@ def task_norms(state: State, p: Params) -> jnp.ndarray:
     return jnp.stack([Q.mean(), act(Q), a2.mean(), act(a2), (u @ u) / state.W.shape[1]])
 
 
+#: Pre-training output of the next task (``leak_norms``), recorded by ``norms_kernel`` beside ``NORM_KEYS``.
+LEAK_KEYS = ("ub2", "wub", "ub_diag")
+
+
+def leak_norms(state: State, p: Params) -> jnp.ndarray:
+    """(3,) ``LEAK_KEYS`` of the task about to be trained, from the state BEFORE ``train_task``.
+
+    With w, g the teacher and gate of task ``state.t`` (the draws ``train_task`` makes), a its readout (the
+    fresh head for task heads, else the shared ``state.a``) and u_b = (g ⊙ a) W / pN its output before any step:
+
+    ``ub2``      |u_b|²/D — the leak norm; the frozen norm balance predicts f/(2 − f), f = 1 − e^{−λ}
+    ``wub``      w·u_b/D — its overlap with the new teacher (|w|²/D ≈ 1); ≈ 0 for unrelated teachers
+    ``ub_diag``  Σ_i g_i a_i² Q_ii / pN² — the single-unit (diagonal) part of ``ub2``; ``ub2 − ub_diag`` is the
+                 sum over pairs i ≠ j of active units, a_i a_j W_i·W_j / (pN² D)
+
+    All three are 0 when the gate drew no unit.
+    """
+    N, D = state.W.shape
+    k_teach, k_head, _ = model.task_keys(state.key, state.t)
+    w, g = model.draw_task(k_teach, N, D, p.pN, p.gated)
+    Q = model.Q_diag(state.W)
+    a = jnp.where(p.use_heads == 1.0, model.draw_readout(k_head, Q, p), state.a)
+    u = (g * a) @ state.W / p.pN
+    return jnp.stack([(u @ u) / D, (u @ w) / D, (g * a * a * Q).sum() / (p.pN * p.pN)])
+
+
 def imbalance_stats(state: State, p: Params) -> jnp.ndarray:
     """(4,) mean, min, max of Δ_i over the active units and max |Δ_i − Δ₀| (``run_gauge_comp.py``)."""
     g = state.g
@@ -155,14 +181,17 @@ def signal_kernel(n_steps: int, solver: str, n_tasks: int, K: Optional[int] = No
 
 @functools.lru_cache(maxsize=None)
 def norms_kernel(n_steps: int, solver: str, n_tasks: int, K: Optional[int] = None, closed: bool = False) -> Callable:
-    """``f(state, p) -> (state, X)`` with ``X`` (n_tasks, B, 5) the ``NORM_KEYS`` after each task."""
+    """``f(state, p) -> (state, X)`` with ``X`` (n_tasks, B, 8): the ``NORM_KEYS`` after each task, then the
+    ``LEAK_KEYS`` of that task from the state before it was trained."""
     vf = jax.vmap(functools.partial(train_task, n_steps=n_steps, solver=solver, K=K, closed=closed))
     vn = jax.vmap(task_norms)
+    vl = jax.vmap(leak_norms)
 
     def run(state, p):
         def body(s, _):
+            leak = vl(s, p)
             s = vf(s, p)
-            return s, vn(s, p)
+            return s, jnp.concatenate([vn(s, p), leak], -1)
         return jax.lax.scan(body, state, None, length=n_tasks)
 
     return jax.jit(run, donate_argnums=(0,))
@@ -240,20 +269,47 @@ def signal_after_tasks(runs: Sequence, T_pre: int, n_follow: int, k: int, chunk:
     return _expand(np.concatenate(S, 0), ok)
 
 
+def first_and_steady_signal(runs: Sequence, T: int, n_follow: int, chunk: Optional[int] = None) -> dict:
+    """``{"S0": (T, B), "ST": (n_follow, B)}`` from ONE stream of ``T + n_follow`` tasks (``run_halflife_lam.py``).
+
+    ``S0`` is the signal of probe 0 after each of the first ``T`` tasks (``signal_after_tasks`` with
+    ``T_pre = 0, k = 0``) and ``ST`` that of probe ``T`` after each of the next ``n_follow`` (``T_pre = T,
+    k = T``): the first ``T`` tasks are both the life of the first memory and the burn-in of the steady-state
+    one, so the pair costs ``T + n_follow`` tasks instead of ``2T + n_follow``.  NaN columns for infeasible runs.
+    """
+    r0 = runs[0]
+    state, p, ok, kc = _batch(runs, T + n_follow)
+    if state is None:
+        return {"S0": np.full((T, len(runs)), np.nan), "ST": np.full((n_follow, len(runs)), np.nan)}
+    prog = pool.Progress(T + n_follow)
+    out = {}
+    for name, k, length in (("S0", 0, T), ("ST", T, n_follow)):
+        S = []
+        kk = jnp.int32(k)
+        for n in chunks(length, chunk):
+            state, s = signal_kernel(r0.n_steps, r0.solver, n, *kc)(state, p, kk)
+            S.append(np.asarray(s))
+            prog.add(n)
+        out[name] = _expand(np.concatenate(S, 0), ok)
+    return out
+
+
 def norms_over_tasks(runs: Sequence, T: int, chunk: Optional[int] = None) -> dict:
-    """``{key: (B, T) array}`` of ``NORM_KEYS`` after each of ``T`` tasks (``run_weight_norms.py``)."""
+    """``{key: (B, T) array}`` of ``NORM_KEYS`` after each of ``T`` tasks and of ``LEAK_KEYS`` before each
+    (``run_weight_norms.py``)."""
+    keys = NORM_KEYS + LEAK_KEYS
     r0 = runs[0]
     state, p, ok, kc = _batch(runs, T)
     if state is None:
-        return {q: np.full((len(runs), T), np.nan) for q in NORM_KEYS}
+        return {q: np.full((len(runs), T), np.nan) for q in keys}
     X = []
     prog = pool.Progress(T)
     for n in chunks(T, chunk):
         state, x = norms_kernel(r0.n_steps, r0.solver, n, *kc)(state, p)
         X.append(np.asarray(x))
         prog.add(n)
-    X = _expand(np.concatenate(X, 0), ok)                        # (T, B, 5)
-    return {q: X[:, :, i].T for i, q in enumerate(NORM_KEYS)}
+    X = _expand(np.concatenate(X, 0), ok)                        # (T, B, 8)
+    return {q: X[:, :, i].T for i, q in enumerate(keys)}
 
 
 def imbalance_over_steps(runs: Sequence, do_proj: Sequence[float], n_tasks: int, chunk: Optional[int] = None) -> np.ndarray:

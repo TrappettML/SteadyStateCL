@@ -214,7 +214,7 @@ never reuse a state after passing it):
 |---|---|
 | `train_kernel` | state advanced `n_tasks` tasks, no output |
 | `signal_kernel` | `(state, S)`, `S` (n_tasks, B): `probe_signal` of probe `k` after each task |
-| `norms_kernel` | `(state, X)`, `X` (n_tasks, B, 5): `task_norms` (`NORM_KEYS`) after each task |
+| `norms_kernel` | `(state, X)`, `X` (n_tasks, B, 8): `task_norms` (`NORM_KEYS`) after each task, then `leak_norms` (`LEAK_KEYS`) of that task from the state before it |
 | `gauge_kernel` | `(state, R)`, `R` (n_tasks, B, n_steps, 4): `imbalance_stats` after every step (`gauge_task`, the explicit `_step_and_project` loop, not `train_block`) |
 
 Observables:
@@ -223,6 +223,10 @@ Observables:
 - `task_norms`: `Q_all, Q_act, a2_all, a2_act, u2` with
   `u2 = |(g ⊙ a) @ W / pN|²/D` of the task just trained; active means NaN
   when the gate drew no unit.
+- `leak_norms` (state before a task): `ub2, wub, ub_diag` of the task about
+  to be trained, `u_b = (g ⊙ a) @ W / pN` with its own gate and readout
+  (fresh head for task heads): `|u_b|²/D`, `w·u_b/D`, and the single-unit
+  part `Σ_i g_i a_i² Q_ii / pN²`; `ub2 − ub_diag` is the sum over pairs.
 - `imbalance_stats`: mean, min, max of `Δ_i` over active units and
   `max|Δ_i − Δ₀|`.
 
@@ -232,7 +236,7 @@ arguments and results must pickle):
 | function | arguments | returns |
 |---|---|---|
 | `signal_after_tasks` | `runs, T_pre, n_follow, k, chunk=None` | (n_follow, B): train `T_pre` tasks, then `n_follow` recording probe `k` after each.  `run_szero`: `T_pre=0, k=0`; `run_stask`, `run_Nscaling`: `T_pre=T, k=T` |
-| `norms_over_tasks` | `runs, T, chunk=None` | `{key: (B, T)}` over `NORM_KEYS` |
+| `norms_over_tasks` | `runs, T, chunk=None` | `{key: (B, T)}` over `NORM_KEYS + LEAK_KEYS` |
 | `imbalance_over_steps` | `runs, do_proj, n_tasks, chunk=None` | (B, n_tasks·n_steps, 4) with `Params.do_proj` forced per run from `do_proj[i]` |
 
 `_batch(runs, P)` asserts the job is homogeneous (`group_key[:4]`), drops
@@ -418,14 +422,22 @@ a warning as a bug in the figure.
 ### 6.5 `run_weight_norms.py` — norms against task and against N
 
 - `groups`/`make_jobs` as 6.4 with `norms_over_tasks(runs, T)`;
-  `plan(..., out_per_task=8 · 5)`.
+  `plan(..., out_per_task=8 · 8)`.
 - `collect` returns `{(N, kappa_label, readout): {key: (n_seeds, T)}}`
-  over `ALL_KEYS = experiments.NORM_KEYS`; the console line gives the
+  over `ALL_KEYS = experiments.NORM_KEYS + LEAK_KEYS`; the console line gives the
   steady-state means (window `t ≥ T_burn`).
-- Rows drawn (`QUANT` + `Q_SCALED`): `Q_all`, `a2_all`, `u2`, and the
-  collapse variable `q_scaled`: `Q̄/pN` when `learn_a = 0`, `Q̄²/pN` when
-  the readout learns, with `pN` from the condition's `Run`.  (`Q_act`,
-  `a2_act` are recorded and saved but not drawn.)
+- Rows drawn (`ROWS = QUANT + Q_SCALED + LEAK`): `Q_all`, `a2_all`, `u2`,
+  the collapse variable `q_scaled` (`Q̄/pN` when `learn_a = 0`, `Q̄²/pN`
+  when the readout learns, with `pN` from the condition's `Run`), and the
+  three leak rows from the state before each task: `ub2` (`|u_b|²/D`),
+  `wub` (`w·u_b/D`) and the derived `cross = (ub2 − ub_diag)/ub2`, the
+  share of `|u_b|²` carried by pairs of active units.  `per_task` gives a
+  row task by task; `steady` gives its steady-state value, which for the
+  two derived rows is a function of window means (for `cross`,
+  `1 − ⟨ub_diag⟩/⟨ub2⟩`), not a window mean of the per-task value.
+  `leak_reference` draws `f/(2 − f)`, `f = 1 − e^{−λ}`, on the `ub2` row
+  (the frozen norm balance) and 0 on the other two.  (`Q_act`, `a2_act`,
+  `ub_diag` are recorded and saved but not drawn.)
 - `fig_vs_task` (`norms_vs_task_k{κ₁}_{tag}`): rows × columns = N,
   traces = readouts at `klabels[0]`, `_mean_se` over finite seeds, band,
   `shade_burnin`; the infeasible-seed count from the top row.
