@@ -12,3 +12,5 @@ sgd_contraction: 0.05
 D_factor: 4
 T_factor: 10.0
 batch_size: 64
+# task clock: SGD runs the nominal clock (i), n = round(λ D/(η ā²_nom)) steps per task (write-up, "SGD rate η")
+clock: nominal

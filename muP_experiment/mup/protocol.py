@@ -32,8 +32,12 @@ NORM_KEYS = ("Q_act", "Q_all", "W_fro2", "a2_act", "a2_all", "aQ_act", "aQ_all",
 #: Active-unit quantiles (evaluated on the pre-projection state; see ``run_task``).
 QUANTILE_KEYS = ("Q_q05", "Q_q50", "Q_q95", "aQ_q05", "aQ_q95")
 #: Per-task scalars returned by ``run_task`` and stored as (T, B) arrays in every batch file.
+#: Start-of-task quantities of the write-up's "Step sizes and learning per task" (``run_task``): the key norm
+#: ā²_c, the mean Q̄_c and largest eigenvalue of the active block of Q, the hidden-layer exponent λ_c = Λ_c ā²_c
+#: realized by the task, the readout exponent λᵃ_c = Λ_c‖M_c‖ and the left side of eq. (popstab).
+CLOCK_KEYS = ("abar_c", "Qbar_c", "qmax_c", "lam_c", "lam_a", "popstab")
 SCALARS = (
-    ("abar2", "n_active", "L_end", "E0", "S0", "gauge_delta", "gauge_uc", "logf_sum", "logf_max")
+    ("abar2", "n_active", "L_end", "E0", "S0", "gauge_delta", "gauge_uc", "logf_sum", "logf_max") + CLOCK_KEYS
     + tuple(k + "_pre" for k in NORM_KEYS) + tuple(k + "_post" for k in NORM_KEYS) + QUANTILE_KEYS
     + ("Q_mean", "a2_mean", "aQ_mean", "aQ_max")     # schema-1 names, kept for one version
 )
@@ -84,6 +88,9 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
              *, n_steps: int, solver: str, K: Optional[int] = None, closed: bool = False):
     """Train one task of ``n_steps`` steps, store it as a probe and evaluate all probes.
 
+    The task's duration follows the run's clock (``model.task_h``): the fixed nominal Λ = λ/ā²_nom of clock (i)
+    or the realized Λ_c = λ/ā²_c of clock (ii), ā²_c the key norm the task starts with.
+
     Parameters
     ----------
     state : State
@@ -117,6 +124,17 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
         ``logf_sum`` is Σ_steps mean_active log f, ``logf_max`` the largest
         single-step |log f| over active units.  The stored head is the
         gate-masked key ``g_t ⊙ a``.
+
+        ``abar2`` is the mean of a_i² over the active units (kept under its schema name); the write-up's
+        key norm, with the nominal pN in the denominator, is ``abar_c`` = Σ_i g_i a_i²/pN = (n_c/pN)·``abar2``.
+        The ``CLOCK_KEYS`` are evaluated on the state the task starts with (the fresh head for task heads):
+        ``abar_c``; ``Qbar_c`` the mean Q_ii over the active units; ``qmax_c`` the largest eigenvalue of the
+        active block Q_c of Q (``model.active_qmax``; NaN for a closed-form batch, whose frozen readout has
+        no readout channel); ``lam_c`` = Λ_c ā²_c with Λ_c = η h n the duration the task ran for (eq. lamreal
+        under clock (i), λ under clock (ii)); ``lam_a`` = Λ_c·``qmax_c``/pN, the readout exponent λᵃ_c =
+        Λ_c‖M_c‖ at the start of the task, bounded by eq. (lama) through ``Qbar_c`` and ``n_active``; and
+        ``popstab`` = hη(ā²_c + tr M_c), which is hη (n_c/pN)(δ₀ + 2Q̄_c), the left side of eq. (popstab), for
+        a projected readout and hη ā²_c for a frozen one; < 2 for a contracting step (NaN for SGD).
     """
     assert n_steps >= 1
     N, D = state.W.shape
@@ -130,6 +148,9 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
 
     n_act = g_t.sum()
     abar2 = jnp.where(n_act > 0, (g_t * a * a).sum() / jnp.maximum(n_act, 1.0), jnp.nan)   # NaN: empty gate, nothing trained
+    abar_c = model.key_norm(a, g_t, p)
+    Qbar_c = jnp.where(n_act > 0, (g_t * model.Q_diag(state.W)).sum() / jnp.maximum(n_act, 1.0), jnp.nan)
+    qmax_c = jnp.asarray(jnp.nan) if closed else model.active_qmax(state.W, g_t, K)
     r = model.train_block(state.W, a, g_t, w_t, p, k_stream, n_steps=n_steps, solver=solver, K=K,
                           closed=closed, traced=trace_idx is not None)
     f, f_last = r["f"], r["f_last"]
@@ -151,9 +172,19 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
     post = model.norm_stats_Q(Q_post, state.a, g_t)
     post["heads_fro2"] = model.heads_fro2(state.heads, t + 1)
 
+    # duration of the task in τ = ηα: n population steps of h (the task's own under clock (ii)), or n/D SGD steps
+    h_eta = p.eta * r["h"] if solver == "pop" else p.eta / D
+    Lam_c = n_steps * h_eta
+    # hη(ā²_c + tr M_c) ≥ hη(ā²_c + ‖M_c‖), tr M_c = (n_c/pN) Q̄_c: eq. (popstab) for a projected readout, where
+    # ā²_c = (n_c/pN)(δ₀ + Q̄_c); the hidden channel alone, hη ā²_c, for a frozen one (no readout channel)
+    trM = p.learn_a * (n_act / p.pN) * jnp.where(n_act > 0, Qbar_c, 0.0)
+    stab = h_eta * (abar_c + trM) if solver == "pop" else jnp.asarray(jnp.nan)
+
     out = {
         "s": s, "eps": eps, "valid": valid,
         "abar2": abar2, "n_active": n_act, "L_end": model.loss(state, p), "E0": eps[0], "S0": s[0],
+        "abar_c": abar_c, "Qbar_c": Qbar_c, "qmax_c": qmax_c, "lam_c": Lam_c * abar_c,
+        "lam_a": Lam_c * qmax_c / p.pN, "popstab": stab,
         "gauge_delta": gauge_delta, "gauge_uc": gauge_uc,
         "logf_sum": r["logf_sum"], "logf_max": r["logf_max"],
         **{k + "_pre": pre[k] for k in NORM_KEYS}, **{k + "_post": post[k] for k in NORM_KEYS},
@@ -251,7 +282,7 @@ def make_params(runs: Sequence) -> Params:
     return Params(
         Delta0=col("Delta0"), eta=col("eta"), h=col("h"), pN=col("pN"), lam=col("lam"),
         gated=col("gated"), learn_a=col("learn_a"), do_proj=col("do_proj"), use_heads=col("use_heads"),
-        sigma0=col("sigma0"),
+        sigma0=col("sigma0"), clock=col("clock_id"),
     )
 
 
@@ -298,10 +329,12 @@ def state_bytes(run, B: int = 1) -> int:
 
 
 def feasible(runs: Sequence) -> np.ndarray:
-    """Mask of runs whose initial readout is real, i.e. δ₀ > −min_i Q0_i (PLAN.md §3.5).
+    """Mask of runs whose initial readout is real, i.e. δ₀ ≥ −min_i Q0_i (PLAN.md §3.5; write-up "Initialization").
 
     At small D the row norms Q0_i fluctuate by ~√(2/D), so δ₀ = −0.75 fails
-    for many seeds at N ≤ 20; such runs are refused, not clamped.
+    for many seeds at N ≤ 20; such runs are refused, not clamped.  The test is
+    ``model.readout_infeasible`` on the rows left after ``model.draw_W0``'s
+    redraws, which ``model.draw_readout`` marks with NaN.
 
     Parameters
     ----------
@@ -396,7 +429,8 @@ def run_stream(
     dict of numpy arrays
         ``ages`` (n_ages,); the running moments ``sum_s``, ``sum_s2``, ``sum_e``,
         ``sum_e2``, ``count`` each (B, n_ages, 2) over the two measurement
-        halves; every key of ``SCALARS`` as (T, B); ``alpha_task`` (B,);
+        halves; every key of ``SCALARS`` as (T, B); ``alpha_task`` (B,), the
+        nominal duration λ/(η ā²_nom) (the realized one per task is ``lam_c``/(η·``abar_c``));
         ``T_burn``, ``T_meas``, ``n_steps`` as ints.  For trace runs also
         ``trace`` (B, T, n_trace, len(TRACE_QUANT)) float32 and ``trace_idx``.
     """

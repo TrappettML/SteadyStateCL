@@ -24,10 +24,18 @@ def Q_diag(W: np.ndarray) -> np.ndarray:
 
 
 def draw_readout(rng: np.random.Generator, Q: np.ndarray, eta: float, Delta0: float) -> np.ndarray:
-    """a_i = ε_i √(η (Δ₀ + Q_ii/η)), ε_i = ±1; NaN where Δ₀ + Q_ii/η < 0 (infeasible δ₀)."""
+    """a_i = ε_i √(η (Δ₀ + Q_ii/η)), ε_i = ±1; NaN where Δ₀ + Q_ii/η < 0 by more than rounding (infeasible δ₀),
+    0 where it is negative within rounding (``model.draw_readout``, ``model.readout_infeasible``)."""
     eps = rng.choice(np.array([-1.0, 1.0]), size=Q.shape)
-    with np.errstate(invalid="ignore"):
-        return eps * np.sqrt(eta * (Delta0 + Q / eta))
+    arg = Delta0 + Q / eta
+    a = eps * np.sqrt(eta * np.maximum(arg, 0.0))
+    a[infeasible(Q, eta, Delta0)] = np.nan
+    return a
+
+
+def infeasible(Q: np.ndarray, eta: float, Delta0: float) -> np.ndarray:
+    """Rows whose readout would be imaginary: Δ₀ + Q_ii/η < 0 beyond rounding (``model.readout_infeasible``)."""
+    return Delta0 + Q / eta < -1e-12 * (abs(Delta0) + Q / eta)
 
 
 def init_run(run: Run) -> tuple:
@@ -38,7 +46,7 @@ def init_run(run: Run) -> tuple:
     rng = np.random.default_rng(run.rng_seed())
     W = run.sigma0 * rng.standard_normal((run.N, run.D))
     for _ in range(32):                                       # redraw the infeasible rows (model.draw_W0)
-        bad = float(run.Delta0) + Q_diag(W) / float(run.eta) < 0.0
+        bad = infeasible(Q_diag(W), float(run.eta), float(run.Delta0))
         if not bad.any():
             break
         W[bad] = run.sigma0 * rng.standard_normal((int(bad.sum()), run.D))
@@ -170,7 +178,8 @@ def tasks(run: Run, rng: np.random.Generator, W: np.ndarray, a: np.ndarray, n_ta
     One task draws a teacher w and gate g (every unit active when
     ungated), a fresh head when ``use_heads`` (else keeps ``a``), then runs
     ``n_steps`` solver steps each followed by the row projection, exactly as
-    ``protocol.run_task`` (``step_task``, in place on the active rows).
+    ``protocol.run_task`` (``step_task``, in place on the active rows), with
+    the population step of the run's task clock (``model.task_h``).
     ``fcum`` is the product over the task's steps of the projection
     factors, by which a stored head of an earlier task must be divided
     (``model.rescale_heads``) to keep its output unchanged.  ``W`` and
@@ -186,6 +195,7 @@ def tasks(run: Run, rng: np.random.Generator, W: np.ndarray, a: np.ndarray, n_ta
     gated, learn_a = run.gated == 1.0, float(run.learn_a)
     do_proj, use_heads = run.do_proj == 1.0, run.use_heads == 1.0
     n_steps, solver = int(run.n_steps), run.solver
+    lam, realized = float(run.lam), run.clock == "realized"
     assert n_steps >= 1
     if solver not in ("pop", "sgd"):
         raise ValueError(f"unknown solver {solver!r}")
@@ -198,5 +208,9 @@ def tasks(run: Run, rng: np.random.Generator, W: np.ndarray, a: np.ndarray, n_ta
         head = draw_readout(rng, Q, eta, Delta0)              # drawn every task to keep the rng stream fixed
         if use_heads:
             a = head
-        fcum, u = step_task(W, a, g, w, rng, Delta0, eta, h, pN, learn_a, do_proj, n_steps, solver, Q)
+        h_t = h
+        if realized and solver == "pop":                      # clock (ii): Λ_c = λ/ā²_c (model.task_h)
+            abar = float((g * a * a).sum()) / pN
+            h_t = lam / (eta * n_steps * abar) if abar > 0.0 else 0.0
+        fcum, u = step_task(W, a, g, w, rng, Delta0, eta, h_t, pN, learn_a, do_proj, n_steps, solver, Q)
         yield t, W, a, g, w, fcum, Q, u

@@ -1,29 +1,36 @@
 #!/usr/bin/env python
-"""Steady-state half-life against width (PLAN.md §12.13): m½ from S_T(m)/S_T(0) vs N.
+"""Steady-state half-life against width (PLAN.md §12.13): m½ from S_T(m)/S_T(0) vs N, against the write-up's equations.
 
-    python scripts/run_Nscaling.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0] [--lam 4] [--seeds 4] [--gpus auto]
+    python scripts/run_Nscaling.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0] [--lam 4] [--seeds 4]
+                                   [--stat mean|seed] [--theory eq|nln2|nk2] [--clock realized|nominal] [--gpus auto]
 
 For every (N, κ, readout, seed) the network trains the Stage-1 stream of
 T = T_burn + T_meas tasks (14N under ``configs/stage1.yaml``), then T
 more while the teacher of task T is followed: S_T(m) = u_{T+m}·w_T*/|w_T*|²
 for m = 0 … T, with the gate of task T and its stored head (task heads)
-or the current shared readout.  The half-life m½ is the first m at
-which S_T(m)/S_T(0) ≤ ½ (linear interpolation), i.e. the number of tasks
-a memory survives at half alignment or better; a seed that never
-crosses in T tasks is censored (NaN, counted in the caption).  Two
-figures in ``results/Nscaling/figures/``:
+or the current shared readout.
+
+The half-life (``--stat``, ``mup.halflife``).  The default, ``mean``, is the write-up's m½: the mean curve
+Σ(m) = ⟨S_T(m)⟩/⟨S_T(0)⟩ over seeds (eq. Sigma) first crosses ½ at m½ (linear interpolation), with a jackknife
+standard error over seeds; this is the number the equations predict.  ``seed`` is the mean over seeds of each
+seed's own half-life, a different statistic (a noisy curve crosses ½ earlier on average) with censored seeds
+left out; both go to the ``.npz``.  Two figures in ``results/Nscaling/figures/``:
 
 ``mhalf_vs_N_k{κ}_…``   x = N (log), y = m½ (tasks, log), one trace per
-    readout at the first κ listed (seed mean, ±1 s.e. bars over seeds);
+    readout at the first κ listed (±1 s.e. bars);
     the ungated readouts have no κ and appear on this figure only.
-    Dotted grey: the plan's estimate m½ = N ln 2 (PLAN.md §12.3 M4).
+    Dotted grey: N ln 2, the task-heads half-life at θ = 1, N → ∞ (eq. mhalf_heads).
 ``mhalf_theory_…``      one panel per gated readout, traces = κ in shades
     of the readout's colour (lightest = smallest κ); solid = simulation
-    (seed mean ± 1 s.e.), dotted = the equation.  ``--theory nln2``
-    (default) draws m½ = N ln 2 for every κ; ``--theory nk2`` draws
-    m½ = N ln 2 / κ² (the N/κ² claim of PLAN.md §12.3).
+    (±1 s.e.), dotted = the equation.  ``--theory eq`` (default) draws the half-life of the readout's own
+    curve — eq. (S_heads) for task heads, eq. (S_frozen) for the gated frozen readout, eq. (S_learned) with
+    the key drift of eqs. (delta_est), (abarss) for the gated shared one — at the run's (N, κ, λ, δ₀)
+    (``theory.mhalf``: the root of Σ(m) = ½ on integer ages, interpolated like the measurement).
+    ``--theory nln2`` draws m½ = N ln 2 for every κ; ``--theory nk2`` draws
+    m½ = N ln 2 / κ² (the N/κ² scaling of the initial decay, which the write-up rules out for m½).
 
-The per-condition values are written to ``mhalf_….npz`` beside the figures.
+The values are written to ``mhalf_….npz`` beside the figures: ``N{N}_k{κ}_{readout}`` (the statistic drawn),
+``seed_N{N}_k{κ}_{readout}`` (the per-seed half-lives) and ``theory_N{N}_k{κ}_{readout}`` (``theory.mhalf``).
 
 Placement (``mup.pool``): the runs of one width — every κ, readout and
 seed, which share (N, D, n_steps, T) — form one ``vmap`` batch advanced
@@ -45,9 +52,11 @@ import numpy as np
 import _path  # noqa: F401
 
 from mup import experiments as X
+from mup import halflife as H
 from mup import plotting as P
 from mup import pool
-from mup.config import Config, READOUT_ORDER, Run, is_gated, make_runs
+from mup import theory as TH
+from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -55,20 +64,20 @@ _T0 = time.perf_counter()        # wall clock from after the imports to the end 
 GATED = tuple(ro for ro in READOUT_ORDER if is_gated(ro))
 
 
-def half_life(m: np.ndarray) -> float:
-    """First task at which ``m`` falls to ``m[0]/2``, linearly interpolated; NaN if never (as ``run_szero.half_life``)."""
-    half = m[0] / 2
-    below = np.nonzero(m <= half)[0]
-    if len(below) == 0:
-        return float("nan")
-    j = int(below[0])
-    if j == 0:
-        return 0.0
-    return j - 1 + (m[j - 1] - half) / (m[j - 1] - m[j])
+#: First crossing of half the initial value, linearly interpolated (``mup.halflife``); kept under this name for
+#: the scripts that import it.
+half_life = H.half_life
+
+#: Equation of the theory figure: label by ``--theory`` kind.
+THEORY_LABEL = {"eq": "eqs. (S_heads), (S_frozen), (S_learned)", "nln2": "N ln 2", "nk2": "N ln 2 / κ²"}
 
 
-def theory(N: float, kappa: float, kind: str) -> float:
-    """Equation half-life: ``nln2`` → N ln 2; ``nk2`` → N ln 2 / κ²."""
+def theory(N: float, kappa: float, kind: str, readout: Optional[str] = None, lam: float = 4.0, delta0: float = 0.0,
+           sigma0: float = 1.0) -> float:
+    """Equation half-life.  ``eq`` → the root of the readout's own Σ(m) = ½ (``theory.mhalf``: eq. S_heads,
+    S_frozen or S_learned at this N, κ, λ, δ₀); ``nln2`` → N ln 2; ``nk2`` → N ln 2 / κ²."""
+    if kind == "eq":
+        return TH.mhalf(readout, int(N), kappa, lam, delta0, sigma0)
     return N * math.log(2) / (kappa ** 2 if kind == "nk2" else 1.0)
 
 
@@ -92,67 +101,82 @@ def make_jobs(groups_: dict[tuple, list[Run]], pieces: Sequence[int]) -> list[tu
 
 
 def mhalf_from_signal(S: np.ndarray) -> np.ndarray:
-    """m½ of every column of ``S`` (T + 1, B); NaN when censored or infeasible (NaN column)."""
-    return np.array([half_life(S[:, j]) if np.isfinite(S[:, j]).all() else float("nan") for j in range(S.shape[1])])
+    """Per-seed m½ of every column of ``S`` (T + 1, B); NaN when censored or infeasible (``halflife.per_seed``)."""
+    return H.per_seed(S)
 
 
-def _report(key: tuple, mh: Optional[np.ndarray], T: int) -> None:
-    """Print one condition's line: seed mean ± s.e. of m½ and the censored count, or that every seed was infeasible."""
+def _report(key: tuple, mh: Optional[np.ndarray], T: int, seed: Optional[np.ndarray] = None,
+            th: Optional[float] = None) -> None:
+    """Print one condition's line: m½ ± s.e. of the chosen statistic and its missing count, the per-seed mean
+    beside it and the equation's value, or that every seed was infeasible."""
     if mh is None:
-        print(f"  N={key[0]} κ={key[1]} {key[2]}: every seed infeasible, skipped", flush=True)
+        print(f"  N={key[0]} κ={key[1]} {key[2]}: no half-life (every seed infeasible, or never below ½), skipped", flush=True)
         return
-    n_ok = int(np.isfinite(mh).sum())
-    se = np.nanstd(mh, ddof=1) / math.sqrt(n_ok) if n_ok > 1 else 0.0
-    print(f"  N={key[0]:4d} κ={key[1]:5s} {key[2]:15s} T={T:5d}  m½ = {np.nanmean(mh):7.2f} ± {se:5.2f}"
-          f"  censored or infeasible {int(np.isnan(mh).sum())}/{len(mh)}", flush=True)
+    m, se = H.stat(mh)
+    txt = (f"  N={key[0]:4d} κ={key[1]:5s} {key[2]:15s} T={T:5d}  m½ = {m:7.2f} ± {se:5.2f}"
+           f"  censored or infeasible {int(np.isnan(mh).sum())}/{len(mh)}")
+    if seed is not None:
+        txt += f"  per-seed mean {H.stat(seed)[0]:7.2f}"
+    if th is not None:
+        txt += f"  equation {th:7.2f}"
+    print(txt, flush=True)
 
 
-def collect(runs: list[Run], plan: pool.Plan, log: Callable[[str], None] = print) -> dict[tuple, np.ndarray]:
-    """``{(N, kappa_label, readout): (n_seeds,) m½ array}`` for every condition of ``runs``.
+def cond_key(r: Run) -> tuple:
+    """(N, κ label, readout) of a run: one point of a trace."""
+    return (r.N, r.kappa_label, r.readout)
+
+
+def reduce(jobs: list[tuple], res: list[np.ndarray], stat: str) -> dict[tuple, dict]:
+    """``halflife.by_condition`` over the columns of every job's signal: ``{(N, κ label, readout): {"mhalf",
+    "seed", "S", "seeds"}}``; a condition's seeds may be spread over several jobs."""
+    cols = [(r, S[:, j]) for (_, kw, _), S in zip(jobs, res) for j, r in enumerate(kw["runs"])]
+    return H.by_condition(cols, cond_key, stat)
+
+
+def collect(runs: list[Run], plan: pool.Plan, stat: str = "mean",
+            log: Callable[[str], None] = print) -> tuple[dict[tuple, np.ndarray], dict[tuple, np.ndarray]]:
+    """Half-lives of every condition of ``runs``.
 
     Parameters
     ----------
     runs : list of config.Run
     plan : pool.Plan
         Placement and pieces per width (``pool.plan`` over ``groups(runs)``).
+    stat : {"mean", "seed"}
+        Half-life statistic (``mup.halflife``): the mean curve's (the write-up's m½) or the per-seed mean.
     log : callable
         Progress sink.
 
     Returns
     -------
-    dict
-        Conditions with at least one feasible seed, in (N, readout, κ) order.
+    (res, seed)
+        ``res[(N, kappa_label, readout)]`` the (n_seeds,) values of ``stat`` (their mean is the half-life, their
+        s.e. its error: ``halflife.stat``) for the conditions that have one, in (N, readout, κ) order;
+        ``seed`` the per-seed half-lives of the same conditions.
     """
     jobs = make_jobs(groups(runs), plan.pieces)
     res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
-    mh = {}
-    for (_, kw, _), S in zip(jobs, res):
-        for r, v in zip(kw["runs"], mhalf_from_signal(S)):
-            mh[(r.N, r.kappa_label, r.readout, r.seed)] = v
-    cond = {}
-    for r in runs:
-        cond.setdefault((r.N, r.kappa_label, r.readout), []).append(r)
-    out = {}
+    cond = reduce(jobs, res, stat)
+    run_of = {cond_key(r): r for r in runs}
+    out, seed = {}, {}
     for key in sorted(cond, key=lambda k: (k[0], READOUT_ORDER.index(k[2]), k[1])):
-        v = np.array([mh[key + (r.seed,)] for r in cond[key]])
-        T = cond[key][0].T_burn + cond[key][0].T_meas
+        v, r = cond[key]["mhalf"], run_of[key]
+        T = r.T_burn + r.T_meas
         if not np.isfinite(v).any():
             _report(key, None, T)
             continue
-        out[key] = v
-        _report(key, v, T)
-    return out
+        out[key], seed[key] = v, cond[key]["seed"]
+        _report(key, v, T, seed[key], theory(r.N, r.kappa, "eq", r.readout, r.lam, r.delta0, r.sigma0))
+    return out, seed
 
 
 def _stat(mh: np.ndarray) -> tuple[float, float]:
-    """(mean, s.e.) over the uncensored seeds."""
-    v = mh[np.isfinite(mh)]
-    if len(v) == 0:
-        return np.nan, np.nan
-    return float(v.mean()), float(v.std(ddof=1) / math.sqrt(len(v))) if len(v) > 1 else 0.0
+    """(mean, s.e.) over the finite entries of a ``halflife.values`` array (``halflife.stat``)."""
+    return H.stat(mh)
 
 
-def fig_readouts(res: dict[tuple, np.ndarray], Ns: list[int], klabel: str, run0: Run, path: str) -> str:
+def fig_readouts(res: dict[tuple, np.ndarray], Ns: list[int], klabel: str, run0: Run, path: str, stat: str = "mean") -> str:
     """m½ vs N, one trace per readout at κ = ``klabel`` (ungated readouts at their κ-free value)."""
     P.apply_style()
     fig, axes = P.grid(1, 1, panel=(4.0, 2.8))
@@ -178,15 +202,16 @@ def fig_readouts(res: dict[tuple, np.ndarray], Ns: list[int], klabel: str, run0:
     ax.set_xlabel("$N$")
     ax.set_ylabel(r"half-life $m_{1/2}$ (tasks)")
     P.cell_title(fig, kappa=klabel, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta)
-    P.caption(fig, f"m½: first m with S_T(m)/S_T(0) ≤ ½ after T = T_burn + T_meas tasks of training, followed for T more "
-                   f"(seed mean, ±1 s.e. bars; {n_cens} censored seeds dropped); dotted grey: N ln 2; the ungated "
-                   f"readouts have no κ (every unit active) and sit at < 1 task.")
+    P.caption(fig, f"{H.STAT_TEXT[stat]}; S_T(m) the signal of the teacher of task T = T_burn + T_meas after m more "
+                   f"tasks, followed for T ({n_cens} seeds without a value dropped); dotted grey: N ln 2; the ungated "
+                   f"readouts have no κ (every unit active) and sit at 1/(2θ), about half a task.")
     P.fig_legend(fig, readouts, styles=[(":", "N ln 2")])
     return P.save(fig, path, figdata=figdata)
 
 
-def fig_theory(res: dict[tuple, np.ndarray], Ns: list[int], klabels: list[str], run0: Run, kind: str, path: str) -> str:
-    """One panel per gated readout; traces = κ (shades); solid = simulation, dotted = equation."""
+def fig_theory(res: dict[tuple, np.ndarray], Ns: list[int], klabels: list[str], run0: Run, kind: str, path: str,
+               stat: str = "mean") -> str:
+    """One panel per gated readout; traces = κ (shades); solid = simulation, dotted = equation (``theory``)."""
     P.apply_style()
     ros = [ro for ro in GATED if any(k[2] == ro for k in res)]
     fig, axes = P.grid(1, len(ros), sharex="all", sharey="all", panel=(3.0, 2.8))
@@ -203,21 +228,23 @@ def fig_theory(res: dict[tuple, np.ndarray], Ns: list[int], klabels: list[str], 
                 ax.plot(x, m, color=col, ls="-", lw=P.LW_TRACE, marker="o", ms=3, zorder=4)
                 ax.errorbar(x, m, yerr=se, fmt="none", ecolor=col, elinewidth=0.8, capsize=2, zorder=3)
                 figdata[f"sim_{ro}_k{P.fmt(k)}"] = np.stack([x, m, se])
-            th = np.array([theory(N, kv, kind) for N in Nr])
-            ax.plot(Nr, th, color=col, ls=":", lw=P.LW_TRACE, zorder=2)
-            figdata[f"theory_{ro}_k{P.fmt(k)}"] = np.stack([Nr, th])
+            ok = [N for N in Nr if kv <= math.sqrt(N) * 1.0001]         # the equation needs p = κ/√N ≤ 1
+            th = np.array([theory(N, kv, kind, ro, run0.lam, run0.delta0, run0.sigma0) for N in ok])
+            ax.plot(ok, th, color=col, ls=":", lw=P.LW_TRACE, zorder=2)
+            figdata[f"theory_{ro}_k{P.fmt(k)}"] = np.stack([np.array(ok), th])
         ax.set_title(P.READOUT_LABEL[ro], color=P.READOUT_COLOR[ro], fontsize=P.FS_MIN + 1)
         P.logaxis(ax, "x"); P.logaxis(ax, "y")
         P.discrete_ticks(ax, Ns, "x")
         ax.set_xlabel("$N$")
     axes[0, 0].set_ylabel(r"half-life $m_{1/2}$ (tasks)")
-    eq = "N ln 2" if kind == "nln2" else "N ln 2 / κ²"
+    eq = THEORY_LABEL[kind]
     P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta)
-    P.caption(fig, f"solid: simulated m½ (first m with S_T(m)/S_T(0) ≤ ½ after T tasks, followed for T more; seed mean, "
-                   f"±1 s.e. bars); dotted: the equation m½ = {eq}; κ in shades of the readout colour, lightest = smallest κ.")
+    P.caption(fig, f"solid: simulation, S_T(m) followed for T tasks after T of training; {H.STAT_TEXT[stat]}. Dotted: "
+                   + ("the root of Σ(m) = ½ for the readout's own curve, " if kind == "eq" else "the equation m½ = ")
+                   + f"{eq}; κ in shades of the readout colour, lightest = smallest κ.")
     handles = [P.Line2D([], [], color=P.kappa_shades(i, len(klabels)), lw=1.6, label=f"κ = {P.fmt(k)}")
                for i, k in enumerate(klabels)]
-    P.fig_legend(fig, handles=handles, styles=[("-", "simulation"), (":", f"equation {eq}")])
+    P.fig_legend(fig, handles=handles, styles=[("-", "simulation"), (":", "equation" if kind == "eq" else f"equation {eq}")])
     return P.save(fig, path, figdata=figdata)
 
 
@@ -231,15 +258,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--lam", type=float, default=None, help="default: the config's first λ")
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
-    ap.add_argument("--theory", choices=["nln2", "nk2"], default="nln2")
+    ap.add_argument("--theory", choices=list(THEORY_LABEL), default="eq",
+                    help="dotted curve of the theory figure: 'eq' the half-life of the readout's own equation "
+                         "(S_heads, S_frozen, S_learned), 'nln2' N ln 2, 'nk2' N ln 2 / κ²")
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "Nscaling"))
+    H.add_arg(ap)
+    add_clock_arg(ap)
     pool.add_args(ap)
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
     over = {"name": "Nscaling", "N": list(args.N), "kappa": list(args.kappa), "readout": list(args.readout),
             "delta0": [args.delta0], "lam": [args.lam if args.lam is not None else cfg.lam[0]],
-            "seeds": args.seeds, "extra": (), "trace": False}
+            "seeds": args.seeds, "extra": (), "trace": False, **clock_override(args)}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
     if not runs:
@@ -247,17 +278,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     run0 = runs[0]
     plan = pool.plan(args, [(g, 2 * key[-1] + 1) for key, g in groups(runs).items()])
-    print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} seeds={args.seeds}  "
-          f"[{plan.describe()}]", flush=True)
-    res = collect(runs, plan)
+    print(f"half-life vs N: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} {run0.clock} clock "
+          f"seeds={args.seeds} statistic={args.stat}  [{plan.describe()}]", flush=True)
+    res, seed = collect(runs, plan, args.stat)
 
     klabels = [str(k) for k in args.kappa]              # the runs' kappa_label is the argument as typed
     fdir = os.path.join(args.out, "figures")
     tag = f"d0{P.fmt(run0.delta0)}_lam{P.fmt(run0.lam)}"
-    f1 = fig_readouts(res, list(args.N), klabels[0], run0, os.path.join(fdir, f"mhalf_vs_N_k{P.fmt(klabels[0])}_{tag}"))
-    f2 = fig_theory(res, list(args.N), klabels, run0, args.theory, os.path.join(fdir, f"mhalf_theory_{args.theory}_{tag}"))
-    np.savez_compressed(os.path.join(fdir, f"mhalf_{tag}.npz"),
-                        **{f"N{N}_k{k}_{ro}": v for (N, k, ro), v in res.items()})
+    f1 = fig_readouts(res, list(args.N), klabels[0], run0, os.path.join(fdir, f"mhalf_vs_N_k{P.fmt(klabels[0])}_{tag}"),
+                      args.stat)
+    f2 = fig_theory(res, list(args.N), klabels, run0, args.theory, os.path.join(fdir, f"mhalf_theory_{args.theory}_{tag}"),
+                    args.stat)
+    run_of = {cond_key(r): r for r in runs}
+    data = {f"N{N}_k{k}_{ro}": v for (N, k, ro), v in res.items()}
+    data.update({f"seed_N{N}_k{k}_{ro}": v for (N, k, ro), v in seed.items()})
+    data.update({f"theory_N{N}_k{k}_{ro}": np.array(theory(N, run_of[(N, k, ro)].kappa, "eq", ro, run0.lam, run0.delta0,
+                                                           run0.sigma0)) for (N, k, ro) in res})
+    np.savez_compressed(os.path.join(fdir, f"mhalf_{tag}.npz"), stat=np.array(args.stat), clock=np.array(run0.clock), **data)
     print(f"wrote {f1}\n      {f2}")
     return 0
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Signal half-life against the gate scale κ: m½ of the first memory and of a steady-state memory, one figure.
 
-    python scripts/run_halflife_kappa.py [--synaptic] [--logx] [--N 1000] [--n-kappa 6] [--kappa …] [--delta0 0] [--lam 4] [--seeds 4] [--T T] [--tau τ] [--gpus]
+    python scripts/run_halflife_kappa.py [--synaptic] [--logx] [--N 1000] [--n-kappa 6] [--kappa …] [--delta0 0] [--lam 4] [--seeds 4]
+                                         [--T T] [--tau τ] [--stat mean|seed] [--clock realized|nominal] [--gpus]
 
 The companion of ``run_halflife_lam.py`` with κ on the x axis.  One figure for the cell (N, δ₀, λ),
 ``results/halflife_kappa/figures/mhalf_vs_kappa_N{N}_d0{δ₀}_lam{λ}.png``, two rows that share both axes,
@@ -17,23 +18,30 @@ row 2, steady state      the same network trains on; the teacher of task T is fo
 
 The gated readouts are traces over κ.  The ungated ones (learned shared, frozen) have no κ — every unit is
 active, the κ = √N point of their gated counterpart — so each is one value, drawn as a dashed horizontal line
-with a ±1 s.e. band.  Half-lives are linearly interpolated and computed per seed; a point is the mean ± 1 s.e.
-over the seeds that reach half, and a seed that never does within its window (T tasks, row 1; τ tasks, row 2)
-is censored: left out and counted in the caption and on the console.  Dotted grey: N ln 2.
+with a ±1 s.e. band.  Half-lives are linearly interpolated.  ``--stat mean`` (default) is the write-up's m½, the
+first crossing of ½ by the mean curve over seeds (eq. Sigma) with a jackknife s.e.; ``--stat seed`` is the mean
+± 1 s.e. of the per-seed half-lives (``mup.halflife``).  A curve that never reaches half within its window
+(T tasks, row 1; τ tasks, row 2) is censored: left out and counted in the caption and on the console.
+Dotted, in a gated readout's colour: the half-life of its equation over κ (``theory.mhalf``: eqs. S_heads,
+S_frozen and, in the steady-state row, S_learned; ``run_halflife_lam.theory_mhalf``).  Dotted grey: N ln 2.
 
 ``--synaptic`` adds, for every gated readout, the same runs with the gate on the synapse (write-up Section
 "Synaptic gating", ``mup.synapse``): task c has a mask Γ_c ∈ {0, 1}^{N×D} of i.i.d. indicators with
 Pr = p = κ/√N applied entrywise to W, u_{c,j} = Σ_i γ_cij a_i W_ij / pN; the step is eq. (syn_pop) and the
-projection runs on all N units after every step.  A synaptic run has the W⁽⁰⁾, readout, teachers, fresh heads
-and task duration (h, n_steps: clock (i), the one the unit-gated runs here use) of its unit-gated twin, so the
-pair differs in the mask alone — the condition under which the write-up shows equal mean signals, eq.
-(syn_Sigma).  The synaptic traces are dash-dotted with open squares in the colour of their unit-gated trace.
+projection runs on all N units after every step.  A synaptic run has the W⁽⁰⁾, readout, teachers and fresh heads
+of its unit-gated twin.  Under ``--clock nominal`` (clock (i)) it also has its task duration, so the pair
+differs in the mask alone — the condition under which the write-up shows equal mean signals, eq. (syn_Sigma).
+Under the default ``--clock realized`` (clock (ii), the write-up's experiment) each gating runs its own
+realized duration λ/ā²_c, the synaptic one at the mean rate over the input coordinates, and the half-lives
+differ by the factor θν/θ̄ of eq. (syn_heads), which tends to 1 as κ√N grows.  The synaptic traces are
+dash-dotted with open squares in the colour of their unit-gated trace.
 A synaptic step touches all N·D synapses whatever κ is (a factor √N/κ over unit gating), so at N = 1000 these
 runs dominate the cost.
 
 N = 1000, δ₀ = 0 by default and λ the config's (4).  T defaults to the Stage-1 stream T_burn + T_meas (14 N tasks) and
 ``--tau`` to T; at N = 1000 that is 28 001 tasks of 40 steps per run, so use ``--T`` / ``--tau`` to shorten it.
-The per-seed half-lives are written next to the figure as ``mhalf_vs_kappa_….npz``.
+The half-lives (the statistic drawn, and the per-seed ones under ``…_seed``) are written next to the figure as
+``mhalf_vs_kappa_….npz``.
 
 Placement (``mup.pool``): a gated batch steps on the block of its active rows, about κ√N of the N, so every κ
 is its own ``vmap`` batch (``experiments.group_key``), all seeds together, and the cost grows with κ.  Each
@@ -55,12 +63,14 @@ import numpy as np
 import _path  # noqa: F401
 
 from mup import experiments as X
+from mup import halflife as H
 from mup import plotting as P
 from mup import pool
 from mup import synapse as S
-from mup.config import Config, READOUT_ORDER, Run, is_gated, make_runs
-from run_Nscaling import _stat, mhalf_from_signal
-from run_halflife_lam import ROWS, cost, make_jobs
+from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
+from run_Nscaling import _stat
+from run_halflife_lam import ROWS, cost, make_jobs, reduce_rows, theory_mhalf
+from run_synapse_comp import CLOCK_TEXT
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -114,7 +124,7 @@ def cond_key(r: Run) -> tuple:
 
 
 def _report(key: tuple, d: dict, T: int, tau: int) -> None:
-    """Print one condition's line: m½ (seed mean ± s.e.) and the censored count of both rows."""
+    """Print one condition's line: m½ ± s.e. of the chosen statistic and the censored count of both rows."""
     txt = []
     for (name, label, _), window in zip(ROWS, (T, tau)):
         mh = d[name]
@@ -125,9 +135,10 @@ def _report(key: tuple, d: dict, T: int, tau: int) -> None:
     print(f"  κ={kappa:6s} {key[0]:15s} " + "   ".join(txt), flush=True)
 
 
-def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, synaptic: bool = False,
+def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, synaptic: bool = False, stat: str = "mean",
             log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
-    """``{(readout, κ label): {"S0": (n_seeds,) m½ of the first memory, "ST": (n_seeds,) m½ at steady state}}``.
+    """``{(readout, κ label): {"S0": (n_seeds,) m½ values of the first memory, "ST": those at steady state,
+    "S0_seed", "ST_seed": the per-seed half-lives}}`` (``run_halflife_lam.reduce_rows``; ``stat`` as ``mup.halflife``).
 
     Parameters
     ----------
@@ -156,23 +167,19 @@ def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, synaptic: bool =
     else:
         jobs = make_jobs(groups(runs, T + tau + 1), T, tau, plan.pieces)
         res = pool.run_jobs("mup.experiments:first_and_steady_signal", jobs, log=log, **plan.place)
-    per_run, kappa_of = {}, {}
-    for (_, kw, _), d in zip(jobs, res):
-        mh = {name: mhalf_from_signal(d[name]) for name, _, _ in ROWS}
-        for j, r in enumerate(kw["runs"]):
-            per_run[(cond_key(r), r.seed)] = {name: mh[name][j] for name in mh}
-            kappa_of[cond_key(r)] = r.kappa
+    red = reduce_rows(jobs, res, cond_key, stat)
+    kappa_of = {cond_key(r): r.kappa for _, kw, _ in jobs for r in kw["runs"]}
     out = {}
-    for key in sorted(kappa_of, key=lambda k: (READOUT_ORDER.index(k[0]), kappa_of[k])):
-        seeds = sorted(s for k, s in per_run if k == key)
-        out[key] = {name: np.array([per_run[(key, s)][name] for s in seeds]) for name, _, _ in ROWS}
+    for key in sorted(red, key=lambda k: (READOUT_ORDER.index(k[0]), kappa_of[k])):
+        out[key] = red[key]
         _report(key, out[key], T, tau)
     return out
 
 
 def figure(res: dict[tuple, dict[str, np.ndarray]], syn: Optional[dict], kappas: list[tuple[float, str]], run0: Run,
-           T: int, tau: int, logx: bool, path: str) -> str:
-    """m½ vs κ: row 1 the first memory, row 2 a steady-state memory; one trace per readout (seed mean ± 1 s.e.).
+           T: int, tau: int, logx: bool, path: str, stat: str = "mean") -> str:
+    """m½ vs κ: row 1 the first memory, row 2 a steady-state memory; one trace per readout (± 1 s.e.), dotted the
+    half-life of a gated readout's equation over κ.
 
     Parameters
     ----------
@@ -226,6 +233,7 @@ def figure(res: dict[tuple, dict[str, np.ndarray]], syn: Optional[dict], kappas:
                     continue
                 mh = res[(ro, klabel)][name]
                 figdata[f"mhalf_{tag}_{ro}_k{klabel}"] = mh
+                figdata[f"mhalf_{tag}_{ro}_k{klabel}_seed"] = res[(ro, klabel)][name + "_seed"]
                 cens += int(np.isnan(mh).sum())
                 m, se = _stat(mh)
                 if np.isfinite(m) and m > 0:                            # log axis: a point needs a positive mean
@@ -236,12 +244,18 @@ def figure(res: dict[tuple, dict[str, np.ndarray]], syn: Optional[dict], kappas:
             P.plot_readout(ax, x, m, ro, marker="o", ms=3)
             ax.errorbar(x, m, yerr=se, fmt="none", ecolor=col, elinewidth=0.8, capsize=2, zorder=3)
             figdata[f"{tag}_{ro}"] = np.stack([x, m, se])
+            xt = np.geomspace(lo, hi, 60) if logx else np.linspace(lo, hi, 60)   # the equation's half-life over κ
+            yt = np.array([theory_mhalf(ro, name, run0.N, k, run0.lam, run0.delta0, run0.sigma0) for k in xt])
+            if np.isfinite(yt).any():
+                ax.plot(xt, yt, color=col, ls=":", lw=P.LW_REF, zorder=2)
+                figdata[f"theory_{tag}_{ro}"] = np.stack([xt, yt])
             pts = []
             for k, klabel in (kappas if syn else []):
                 if (ro, klabel) not in syn:
                     continue
                 mh = syn[(ro, klabel)][name]
                 figdata[f"mhalf_{tag}_syn_{ro}_k{klabel}"] = mh
+                figdata[f"mhalf_{tag}_syn_{ro}_k{klabel}_seed"] = syn[(ro, klabel)][name + "_seed"]
                 cens += int(np.isnan(mh).sum())
                 m, se = _stat(mh)
                 if np.isfinite(m) and m > 0:
@@ -265,13 +279,15 @@ def figure(res: dict[tuple, dict[str, np.ndarray]], syn: Optional[dict], kappas:
     ax.set_xlabel(r"gate scale $\kappa$  (gate density $\kappa/\sqrt{N}$)")
     P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=f"N = {run0.N}")
     n_seeds = max(len(d[ROWS[0][0]]) for d in res.values())
-    P.caption(fig, f"m½: each seed's first crossing of half its initial signal, mean ± 1 s.e. over the seeds that "
-                   f"reach it ({n_seeds} seeds per point). Top: first teacher from a fresh start, $S_0(t)/S_0(0)$ ≤ ½ "
-                   f"within T = {T} tasks ({n_cens[0]} censored seeds dropped). Bottom: the teacher of task T, "
-                   rf"$S_T(\tau)/S_T(0)$ ≤ ½ within τ ≤ {tau} more tasks ({n_cens[1]} dropped). Dashed horizontal "
-                   f"lines: the ungated readouts, which have no κ (every unit active, as at κ = √N). Dotted grey: N ln 2."
+    P.caption(fig, f"{H.STAT_TEXT[stat]} ({n_seeds} seeds per point). Top: first teacher from a fresh start, "
+                   f"$S_0(t)/S_0(0)$ ≤ ½ within T = {T} tasks ({n_cens[0]} values missing: censored). Bottom: the teacher "
+                   rf"of task T, $S_T(\tau)/S_T(0)$ ≤ ½ within τ ≤ {tau} more tasks ({n_cens[1]} missing). Dashed horizontal "
+                   f"lines: the ungated readouts, which have no κ (every unit active, as at κ = √N). Dotted in a readout's "
+                   f"colour: the half-life of its equation, (S_heads), (S_frozen) or, at steady state, (S_learned). "
+                   f"Dotted grey: N ln 2."
                    + (" Dash-dotted, open squares: the gated readouts with the gate on the synapse, same density, "
-                      "initial weights, teachers and task duration as the unit-gated trace of their colour." if syn else ""))
+                      f"initial weights and teachers as the unit-gated trace of their colour, {CLOCK_TEXT[run0.clock]}."
+                      if syn else ""))
     handles = [P.Line2D([], [], color="k", ls=SYN_LS, lw=1.2, marker=SYN_MARKER, ms=4, mfc="white",
                         label="synaptic gating")] if syn else []
     P.fig_legend(fig, readouts, handles=handles + [P.Line2D([], [], color=P.GREY_REF, ls=":", lw=1.2, label="N ln 2")])
@@ -300,13 +316,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--tau", type=int, default=None, help="tasks the steady-state probe is followed for (default: T)")
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "halflife_kappa"))
+    H.add_arg(ap)
+    add_clock_arg(ap)
     pool.add_args(ap)
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
     over = {"name": "halflife_kappa", "N": [args.N], "kappa": list(args.kappa or default_kappas(args.N, args.n_kappa, args.logx)),
             "readout": list(args.readout), "delta0": [args.delta0],
-            "lam": [args.lam if args.lam is not None else cfg.lam[0]], "seeds": args.seeds, "extra": (), "trace": False}
+            "lam": [args.lam if args.lam is not None else cfg.lam[0]], "seeds": args.seeds, "extra": (), "trace": False,
+            **clock_override(args)}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)                             # κ outside [1, √N] is skipped with a note
     if not runs:
@@ -320,15 +339,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     plan = pool.plan(args, [(g, T + tau + 1) for g in groups(runs, T + tau + 1).values()])
     r0 = runs[0]
     print(f"m½ vs κ: N={args.N} κ={[lab for _, lab in kappas]} δ₀={r0.delta0} λ={r0.lam} {r0.solver} "
-          f"n_steps={r0.n_steps} T={T} τ≤{tau} seeds={args.seeds}  [{plan.describe()}]", flush=True)
+          f"n_steps={r0.n_steps} {r0.clock} clock T={T} τ≤{tau} seeds={args.seeds} statistic={args.stat}  "
+          f"[{plan.describe()}]", flush=True)
     if args.synaptic:
         print("unit (hidden-layer) gating:", flush=True)
-    res = collect(runs, T, tau, plan)
+    res = collect(runs, T, tau, plan, stat=args.stat)
     syn = None
     if args.synaptic and syn_groups(runs, T + tau + 1):
         plan_syn = pool.plan(args, [(g, T + tau + 1) for g in syn_groups(runs, T + tau + 1).values()])
         print(f"synaptic gating:  [{plan_syn.describe()}]", flush=True)
-        syn = collect(runs, T, tau, plan_syn, synaptic=True)
+        syn = collect(runs, T, tau, plan_syn, synaptic=True, stat=args.stat)
         same = sorted({cond_key(r) for r in runs if r.gated == 1.0 and S.all_open(r)})
         syn.update({key: res[key] for key in same})        # density 1: the unit-gated run is the synaptic run
         if same:
@@ -336,7 +356,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                   f"for {', '.join(ro for ro, _ in same)}", flush=True)
 
     stem = os.path.join(args.out, "figures", f"mhalf_vs_kappa_N{args.N}_d0{P.fmt(r0.delta0)}_lam{P.fmt(r0.lam)}")
-    out = figure(res, syn, kappas, r0, T, tau, args.logx, stem)
+    out = figure(res, syn, kappas, r0, T, tau, args.logx, stem, args.stat)
     print(f"wrote {out} and {stem}.npz")
     return 0
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Steady-state teacher signal against age (PLAN.md §12.12): S_T(τ) = u_{T+τ}·w_T*/|w_T*|², one trace per readout, one figure per cell.
 
-    python scripts/run_stask.py [--N 100] [--kappa 1] [--delta0 0] [--lam 4] [--seeds 4] [--T 1400] [--tau 1000] [--gpus auto]
+    python scripts/run_stask.py [--N 100] [--kappa 1] [--delta0 0] [--lam 4] [--seeds 4] [--T 1400] [--tau 1000]
+                                [--stat mean|seed] [--clock realized|nominal] [--gpus auto]
 
 The companion of ``run_szero.py`` with the probe taken after the network
 has reached its steady state: train T tasks (default the Stage-1 stream
@@ -11,9 +12,13 @@ with u = (g_T ⊙ a) W / pN, the gate of task T and its stored head (task
 heads) or the current shared readout, evaluated after every task T + τ.
 One figure per cell (N, κ, δ₀), ``results/stask/figures/stask_N{N}_k{κ}_d0{δ₀}_lam{λ}.png``:
 x = τ + 1 on a log axis (τ = 0, the task just learned, at x = 1), y =
-S_T(τ)/S_T(0) so every trace starts at 1, one trace per readout of §4 as the seed mean of each seed's
-S_T(τ)/S_T(0) with a ±1 s.e. band over seeds; the half-life m½ (each seed's first crossing of its
-S_T(0)/2, averaged over seeds) is in the caption.  N = 100, κ = 1, δ₀ = 0 by default; solver, λ and step-size
+S_T(τ)/S_T(0) so every trace starts at 1, one trace per readout of §4.  With ``--stat mean`` (default) the
+trace is the write-up's Σ(τ) = ⟨S_T(τ)⟩/⟨S_T(0)⟩ over seeds (eq. Sigma; band: jackknife ±1 s.e.) and the
+half-life m½ in the caption its first crossing of ½; with ``--stat seed`` the seed mean of each seed's own
+ratio and the mean of the per-seed half-lives (``run_szero.seed_signal``, ``mup.halflife``).  Dotted, in the
+readout's colour: the equation the write-up says to plot — eq. (S_heads), eq. (S_frozen) and eq. (S_learned)
+with the key drift of eqs. (delta_est) and (abarss), i.e. from the closed-form steady-state norms and no
+measured input (``theory.sigma``).  N = 100, κ = 1, δ₀ = 0 by default; solver, λ and step-size
 rule come from ``configs/stage1.yaml``.  The per-τ arrays are written
 next to the figure as ``stask_….npz``.
 
@@ -33,10 +38,13 @@ import numpy as np
 import _path  # noqa: F401
 
 from mup import experiments as X
+from mup import halflife as H
 from mup import plotting as P
 from mup import pool
-from mup.config import Config, READOUT_ORDER, Run, make_runs
-from run_szero import by_readout, cells, columns, groups, mhalf_text, per_cell, seed_signal
+from mup import theory as TH
+from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
+from run_szero import (LINE_TEXT, MHALF_TEXT, by_readout, cells, columns, groups, mhalf_text, per_cell, seed_signal,
+                       theory_curve)
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -60,8 +68,8 @@ def collect(cells_: dict[tuple, list[Run]], T: int, tau: int, plan: pool.Plan,
     return per_cell(cells_, columns(jobs, res))
 
 
-def figure(S: dict[str, np.ndarray], run0: Run, T: int, path: str) -> str:
-    """S_T(τ) vs τ + 1 (log), one trace per readout (seed mean ± 1 s.e.), half-life in the caption.
+def figure(S: dict[str, np.ndarray], run0: Run, T: int, path: str, stat: str = "mean") -> str:
+    """S_T(τ) vs τ + 1 (log), one trace per readout (± 1 s.e.), its equation dotted, half-life in the caption.
 
     Parameters
     ----------
@@ -87,12 +95,14 @@ def figure(S: dict[str, np.ndarray], run0: Run, T: int, path: str) -> str:
     for ro, Y in S.items():
         n_tau, n = Y.shape
         x = np.arange(n_tau) + 1                                        # log axis: τ = 0 at x = 1
-        m, se, mh[ro] = seed_signal(Y)                                  # each seed's S_T(τ)/S_T(0) and half-life
+        m, se, mh[ro] = seed_signal(Y, stat)                            # normalized signal and its half-life
         P.band(ax, x, m - se, m + se, P.READOUT_COLOR[ro])
         P.plot_readout(ax, x, m, ro)
+        theory_curve(ax, ro, run0, n_tau, True, figdata)
         figdata[f"ST_{ro}"] = Y
         figdata[f"STnorm_{ro}"] = m
         figdata[f"mhalf_{ro}"] = mh[ro]
+        figdata[f"mhalf_seed_{ro}"] = H.per_seed(Y)
     figdata["tau"] = np.arange(max(Y.shape[0] for Y in S.values()))
     P.ref_line(ax, 0.0)
     P.ref_line(ax, 0.5)
@@ -104,10 +114,11 @@ def figure(S: dict[str, np.ndarray], run0: Run, T: int, path: str) -> str:
     mtxt = ", ".join(f"{P.READOUT_LABEL[ro]} {mhalf_text(mh[ro], n_tau_all - 1)}" for ro in S)
     P.cell_title(fig, kappa=run0.kappa_label, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta,
                  extra=f"N = {run0.N}, T = {T}")
-    P.caption(fig, f"line: seed mean of each seed's signal of teacher T = {T} after task T + τ divided by its own value "
-                   f"at τ = 0, drawn at τ + 1 so τ = 0 is at 1 ({n_seeds} seeds); band: ±1 s.e. over seeds; half-life "
-                   f"m½ (tasks): each seed's first crossing of ½ (grey line), mean ± s.e. over seeds: {mtxt}.")
-    P.fig_legend(fig, list(S))
+    P.caption(fig, f"line: {LINE_TEXT[stat].format(what=f'signal of teacher T = {T} after task T + τ', ref='at τ = 0')}, "
+                   f"drawn at τ + 1 so τ = 0 is at 1 ({n_seeds} seeds); band: ±1 s.e.; dotted in the readout's "
+                   f"colour: its equation, (S_heads), (S_frozen) or (S_learned) with the closed-form norms of "
+                   f"eq. (abarss); half-life m½ (tasks), first crossing of ½ (grey line), {MHALF_TEXT[stat]}: {mtxt}.")
+    P.fig_legend(fig, list(S), styles=[(":", "equation")])
     return P.save(fig, path, figdata=figdata)
 
 
@@ -125,13 +136,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--tau", type=int, default=1000, help="tasks followed after task T")
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "stask"))
+    H.add_arg(ap)
+    add_clock_arg(ap)
     pool.add_args(ap)
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
     over = {"name": "stask", "N": list(args.N), "kappa": list(args.kappa), "readout": list(args.readout),
             "delta0": list(args.delta0), "lam": [args.lam if args.lam is not None else cfg.lam[0]],
-            "seeds": args.seeds, "extra": (), "trace": False}
+            "seeds": args.seeds, "extra": (), "trace": False, **clock_override(args)}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
     if not runs:
@@ -145,7 +158,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     plan = pool.plan(args, [(g, T + args.tau + 1) for g in groups(cells_).values()])
     r0 = runs[0]
     print(f"S_T(τ) vs τ: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={r0.lam} {r0.solver} n_steps={r0.n_steps} "
-          f"T={T} τ≤{args.tau} seeds={args.seeds}  [{plan.describe()}]", flush=True)
+          f"{r0.clock} clock T={T} τ≤{args.tau} seeds={args.seeds} statistic={args.stat}  [{plan.describe()}]", flush=True)
     res = collect(cells_, T, args.tau, plan)
 
     outs = []
@@ -153,14 +166,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"cell N={N} κ={k} δ₀={d0} λ={lam}:")
         for ro, Y in S.items():
             m = Y.mean(1)
-            print(f"  {ro:15s} S_T(0) = {m[0]:.4f}  m½ = {mhalf_text(seed_signal(Y)[2], Y.shape[0] - 1)}  "
-                  f"S_T(τ_max) = {m[-1]:+.4f}", flush=True)
+            kap = cells_[(N, k, d0, lam)][0].kappa if k else 1.0
+            print(f"  {ro:15s} S_T(0) = {m[0]:.4f} (θ = {TH.theta(lam):.4f})  m½ = "
+                  f"{mhalf_text(seed_signal(Y, args.stat)[2], Y.shape[0] - 1)}  S_T(τ_max) = {m[-1]:+.4f}  "
+                  f"equation m½ = {TH.mhalf(ro, N, kap, lam, d0):.1f}", flush=True)
         if not S:
             continue
         cell = cells_[(N, k, d0, lam)]
         run0 = next((r for r in cell if r.gated == 1.0), cell[0])
         stem = os.path.join(args.out, "figures", f"stask_N{N}_k{P.fmt(k)}_d0{P.fmt(d0)}_lam{P.fmt(lam)}")
-        outs.append(figure(S, run0, T, stem))
+        outs.append(figure(S, run0, T, stem, args.stat))
         print(f"wrote {outs[-1]} and {stem}.npz")
     return 0
 

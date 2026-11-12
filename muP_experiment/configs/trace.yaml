@@ -14,3 +14,6 @@ pop_contraction: 0.1
 trace: true
 trace_points: 200
 batch_size: 64
+# task clock (write-up, "Decision: the task clock"): realized = (ii), every task lasts Λ_c = λ/ā²_c with the key
+# norm it starts with, so λ is the hidden-layer learning per task for every readout; nominal = (i), Λ = λ/(1 + δ₀)
+clock: realized

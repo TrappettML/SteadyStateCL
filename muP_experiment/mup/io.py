@@ -12,7 +12,7 @@ import numpy as np
 
 from mup.config import Config, Run, make_batches, make_runs
 
-SCHEMA_VERSION = 3   # 3: masked stored heads, κ-free age schedule, σ₀ (2026-11-06); 2: §12.1 norm scalars; 1: the original set
+SCHEMA_VERSION = 4   # 4: task clock (ii) by default and the start-of-task scalars protocol.CLOCK_KEYS (2026-11-11); 3: masked stored heads, κ-free age schedule, σ₀ (2026-11-06); 2: §12.1 norm scalars; 1: the original set
 
 
 def runs_hash(runs) -> str:

@@ -35,7 +35,7 @@ def test_step_task_matches_model(solver, Delta0, gate, learn_a, do_proj):
 
     # reference: n_steps of model step + project_rows, as protocol.run_task does
     p = model.Params(*[jnp.asarray(v, dtype=jnp.float64)
-                       for v in (Delta0, eta, h, pN, 4.0, 1.0, learn_a, do_proj, 0.0, 1.0)])
+                       for v in (Delta0, eta, h, pN, 4.0, 1.0, learn_a, do_proj, 0.0, 1.0, 0.0)])
     st = model.State(W=jnp.asarray(W0), a=jnp.asarray(a0), g=jnp.asarray(g), w=jnp.asarray(w), heads=jnp.zeros((1, N)),
                      key=jax.random.PRNGKey(0), t=jnp.int32(0))
     fcum_ref = jnp.ones(N)
@@ -72,7 +72,7 @@ def test_sgd_x_matches_model_draw():
     N, D = 6, 20
     rng = np.random.default_rng(2)
     W0 = rng.standard_normal((N, D)); a0 = rng.standard_normal(N); g = np.ones(N); w = rng.standard_normal(D)
-    p = model.Params(*[jnp.asarray(v, dtype=jnp.float64) for v in (1.0, 0.5, 0.1, 6.0, 4.0, 0.0, 1.0, 0.0, 0.0, 1.0)])
+    p = model.Params(*[jnp.asarray(v, dtype=jnp.float64) for v in (1.0, 0.5, 0.1, 6.0, 4.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0)])
     st = model.State(W=jnp.asarray(W0), a=jnp.asarray(a0), g=jnp.asarray(g), w=jnp.asarray(w), heads=jnp.zeros((1, N)),
                      key=jax.random.PRNGKey(0), t=jnp.int32(0))
     k = jax.random.PRNGKey(5)

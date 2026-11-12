@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Imbalance comparison: steady-state weight norms and half-life against N and κ across several δ₀.
 
-    python scripts/run_imbalance_comp.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0 1 2 4] [--lam 4] [--seeds 4] [--gpus]
+    python scripts/run_imbalance_comp.py [--N 5 10 20 50 100] [--kappa 1 2 4] [--delta0 0 1 2 4] [--lam 4] [--seeds 4]
+                                         [--stat mean|seed] [--clock realized|nominal] [--gpus]
 
 The grid of ``run_weight_norms.py`` and ``run_Nscaling.py`` (every readout ×
 κ × seed at each N) is run at every ``--delta0`` and the two observables are
@@ -9,7 +10,12 @@ recorded per (N, κ, readout, δ₀, seed): the norms after each task
 (``experiments.norms_over_tasks``; steady state = the mean over the
 measurement window t ≥ T_burn) and the steady-state half-life m½ of the
 probe stored after T tasks (``experiments.signal_after_tasks`` with
-``T_pre = T, k = T``; ``run_Nscaling.mhalf_from_signal``).
+``T_pre = T, k = T``; ``--stat mean``, the default, is the write-up's m½,
+the first crossing of ½ by the mean curve over seeds with a jackknife
+s.e., ``--stat seed`` the mean of the per-seed half-lives — ``mup.halflife``).
+δ₀ is the rate ratio η_a/η_W in equal-rate variables: at fixed λ it sets the
+readout's learning per task, λᵃ_c ∝ 1/(1 + δ₀), while λ holds the hidden
+layer's fixed (write-up, "Readout exponent").
 
 Output, under ``--out`` (default ``results/imbalance_results``):
 
@@ -25,13 +31,17 @@ Output, under ``--out`` (default ``results/imbalance_results``):
     ``run_weight_norms.fig_vs_N`` at that δ₀.
 ``halflife_by_delta0.png``
     rows = readouts, columns = κ, x = N (log), y = m½ (seed mean ± 1 s.e.
-    over the uncensored seeds), traces = δ₀ in the colours of
-    ``plotting.delta0_style``; dotted grey N ln 2.
+    over seeds), traces = δ₀ in the colours of
+    ``plotting.delta0_style``; dotted in a trace's colour: the half-life of
+    the readout's equation at that δ₀ (``theory.mhalf``: eqs. S_heads and
+    S_frozen have no δ₀ in them, eq. S_learned approaches the frozen curve as
+    δ₀ grows); dotted grey N ln 2.
 ``halflife_by_model.png``
     rows = δ₀, columns = κ, traces = readouts.
 ``imbalance_comp.npz``
     every per-run curve and half-life: ``N{N}_k{κ}_{readout}_d0{δ₀}_{key}``
-    with value (n_seeds, T) for the norm keys and ``_mhalf`` (n_seeds,).
+    with value (n_seeds, T) for the norm keys, ``_mhalf`` (n_seeds,) the
+    values of the statistic drawn and ``_mhalf_seed`` the per-seed half-lives.
 
 Placement (``mup.pool``): the runs of one (width, δ₀-independent group)
 form one ``vmap`` batch per observable, split over the GPUs (``--gpus``),
@@ -49,11 +59,13 @@ import numpy as np
 import _path  # noqa: F401
 
 from mup import experiments as X
+from mup import halflife as H
 from mup import plotting as P
 from mup import pool
-from mup.config import Config, READOUT_ORDER, Run, is_gated, make_runs
-from run_Nscaling import _stat, mhalf_from_signal
-from run_weight_norms import ALL_KEYS, QUANT, Q_SCALED, fig_vs_N, q_scaled
+from mup import theory as TH
+from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
+from run_Nscaling import _stat
+from run_weight_norms import ALL_KEYS, QUANT, Q_SCALED, fig_vs_N, norm_theory, q_scaled
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -88,8 +100,9 @@ def cond_key(r: Run) -> tuple:
     return (r.N, r.kappa_label, r.readout, r.delta0)
 
 
-def collect(runs: list[Run], plan_norms: pool.Plan, plan_mhalf: pool.Plan, log=print) -> dict[tuple, dict]:
-    """``{(N, κ label, readout, δ₀): {key: (n_seeds, T) for key in ALL_KEYS, "mhalf": (n_seeds,)}}``."""
+def collect(runs: list[Run], plan_norms: pool.Plan, plan_mhalf: pool.Plan, stat: str = "mean", log=print) -> dict[tuple, dict]:
+    """``{(N, κ label, readout, δ₀): {key: (n_seeds, T) for key in ALL_KEYS, "mhalf": (n_seeds,) half-life values of
+    ``stat`` (``halflife.values``), "mhalf_seed": (n_seeds,) per-seed half-lives}}``."""
     g = groups(runs)
     out = {}
     per_run: dict[tuple, dict] = {}
@@ -102,14 +115,13 @@ def collect(runs: list[Run], plan_norms: pool.Plan, plan_mhalf: pool.Plan, log=p
     log("half-life:")
     jobs = make_jobs(g, plan_mhalf.pieces, "mhalf")
     res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan_mhalf.place)
-    for (_, kw, _), S in zip(jobs, res):
-        mh = mhalf_from_signal(S)
-        for j, r in enumerate(kw["runs"]):
-            per_run[(cond_key(r), r.seed)]["mhalf"] = mh[j]
+    mh = H.by_condition([(r, S[:, j]) for (_, kw, _), S in zip(jobs, res) for j, r in enumerate(kw["runs"])],
+                        cond_key, stat)
     for key in sorted({k for k, _ in per_run}, key=lambda k: tuple(str(x) for x in k)):
         seeds = sorted(s for k, s in per_run if k == key)
+        assert seeds == mh[key]["seeds"]
         out[key] = {q: np.stack([per_run[(key, s)][q] for s in seeds]) for q in ALL_KEYS}
-        out[key]["mhalf"] = np.array([per_run[(key, s)]["mhalf"] for s in seeds])
+        out[key]["mhalf"], out[key]["mhalf_seed"] = mh[key]["mhalf"], mh[key]["seed"]
     for key, d in out.items():
         r = next(rr for rr in runs if cond_key(rr) == key)
         ss = {q: np.nanmean(d[q][:, r.T_burn:], 1) for q, _ in QUANT}
@@ -175,6 +187,10 @@ def fig_norms_by_delta(res: dict, Ns: list[int], klabels: list[str], d0s: list[f
                 ax.plot(x, m, color=col, marker=mk, ms=4, lw=P.LW_TRACE, ls="-" if is_gated(ro) else "--")
                 ax.errorbar(x, m, yerr=se, fmt="none", ecolor=col, elinewidth=0.8, capsize=2, zorder=3)
                 figdata[f"{q}_k{klabel}_d0{P.fmt(d0)}"] = np.stack([x, m, se])
+                th = np.array([norm_theory(q, next(rr for rr in runs if cond_key(rr) == (N, k, ro, d0))) for N in x])
+                if np.isfinite(th).all():                             # closed-form steady state, eqs. (abarss), (Qss)
+                    ax.plot(x, th, color=col, ls=":", lw=P.LW_REF, zorder=2)
+                    figdata[f"theory_{q}_k{klabel}_d0{P.fmt(d0)}"] = np.stack([x, th])
             P.logaxis(ax, "x")
             P.discrete_ticks(ax, Ns, "x")
             if r == len(rows) - 1:
@@ -193,7 +209,7 @@ def fig_norms_by_delta(res: dict, Ns: list[int], klabels: list[str], d0s: list[f
 
 
 def fig_halflife(res: dict, Ns: list[int], klabels: list[str], d0s: list[float], readouts: list[str],
-                 runs: list[Run], by: str, path: str) -> str:
+                 runs: list[Run], by: str, path: str, stat: str = "mean") -> str:
     """m½ vs N: columns = κ; ``by = "delta0"``: rows = readouts, traces = δ₀; ``by = "model"``: rows = δ₀, traces = readouts."""
     P.apply_style()
     row_keys = readouts if by == "delta0" else d0s
@@ -217,6 +233,12 @@ def fig_halflife(res: dict, Ns: list[int], klabels: list[str], d0s: list[float],
                     P.plot_readout(ax, x, m, ro, marker="o", ms=3)
                 ax.errorbar(x, m, yerr=se, fmt="none", ecolor=col, elinewidth=0.8, capsize=2, zorder=3)
                 figdata[f"mhalf_k{klabel}_{ro}_d0{P.fmt(d0)}"] = np.stack([x, m, se])
+                if is_gated(ro):                                        # the readout's equation at this δ₀
+                    kv = float(P.fmt(klabel))
+                    xt = [N for N in Ns if kv <= math.sqrt(N) * 1.0001]
+                    yt = [TH.mhalf(ro, N, kv, runs[0].lam, d0, runs[0].sigma0) for N in xt]
+                    ax.plot(xt, yt, color=col, ls=":", lw=P.LW_REF, zorder=2)
+                    figdata[f"theory_k{klabel}_{ro}_d0{P.fmt(d0)}"] = np.stack([np.array(xt, float), np.array(yt)])
             xs = np.array(Ns, float)
             ax.plot(xs, xs * math.log(2), color=P.GREY_REF, ls=":", lw=1.0, zorder=1)
             P.logaxis(ax, "x"); P.logaxis(ax, "y")
@@ -229,8 +251,9 @@ def fig_halflife(res: dict, Ns: list[int], klabels: list[str], d0s: list[float],
     r0 = runs[0]
     P.cell_title(fig, lam=r0.lam, solver=r0.solver, eta=r0.eta,
                  extra="half-life by " + ("δ₀" if by == "delta0" else "readout"))
-    P.caption(fig, "steady-state half-life m½ (first age with S_T(m) ≤ S_T(0)/2 after T = T_burn + T_meas tasks, "
-                   "per seed, then mean ± 1 s.e. over the uncensored seeds) against N; "
+    P.caption(fig, f"steady-state half-life of the teacher of task T = T_burn + T_meas against N; {H.STAT_TEXT[stat]}; "
+                   "dotted in a trace's colour: the half-life of the gated readout's equation, (S_heads), (S_frozen) "
+                   "or (S_learned), at that δ₀; "
                    + ("rows = readouts, traces = δ₀ (blue ▼ below 0, grey ● at 0, red ▲ above, darker = farther "
                       "from 0)" if by == "delta0"
                       else "rows = δ₀, traces = readouts")
@@ -253,13 +276,15 @@ def main(argv=None) -> int:
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "imbalance_results"))
+    H.add_arg(ap)
+    add_clock_arg(ap)
     pool.add_args(ap)
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
     over = {"name": "imbalance_comp", "N": list(args.N), "kappa": list(args.kappa), "readout": list(args.readout),
             "delta0": [float(d) for d in args.delta0], "lam": [args.lam if args.lam is not None else cfg.lam[0]],
-            "seeds": args.seeds, "extra": (), "trace": False}
+            "seeds": args.seeds, "extra": (), "trace": False, **clock_override(args)}
     cfg = Config(**{**cfg.__dict__, **over})
     runs = make_runs(cfg)
     if not runs:
@@ -272,9 +297,9 @@ def main(argv=None) -> int:
     d0s = sorted(set(cfg.delta0))
     klabels = [str(k) for k in args.kappa]
     readouts = [ro for ro in READOUT_ORDER if ro in args.readout]
-    print(f"imbalance comparison: N={args.N} κ={args.kappa} δ₀={d0s} λ={run0.lam} {run0.solver} seeds={args.seeds}  "
-          f"[{plan_norms.describe()}]", flush=True)
-    res = collect(runs, plan_norms, plan_mhalf)
+    print(f"imbalance comparison: N={args.N} κ={args.kappa} δ₀={d0s} λ={run0.lam} {run0.solver} {run0.clock} clock "
+          f"seeds={args.seeds} statistic={args.stat}  [{plan_norms.describe()}]", flush=True)
+    res = collect(runs, plan_norms, plan_mhalf, args.stat)
 
     outs = []
     d_by = os.path.join(args.out, "weight_norm_by_delta")
@@ -285,8 +310,10 @@ def main(argv=None) -> int:
         res_d0 = {(N, k, ro): d for (N, k, ro, dd), d in res.items() if dd == d0}
         runs_d0 = [r for r in runs if r.delta0 == d0]
         outs.append(fig_vs_N(res_d0, list(args.N), klabels, runs_d0, os.path.join(d_model, f"norms_vs_N_d0{P.fmt(d0)}")))
-    outs.append(fig_halflife(res, list(args.N), klabels, d0s, readouts, runs, "delta0", os.path.join(args.out, "halflife_by_delta0")))
-    outs.append(fig_halflife(res, list(args.N), klabels, d0s, readouts, runs, "model", os.path.join(args.out, "halflife_by_model")))
+    outs.append(fig_halflife(res, list(args.N), klabels, d0s, readouts, runs, "delta0",
+                             os.path.join(args.out, "halflife_by_delta0"), args.stat))
+    outs.append(fig_halflife(res, list(args.N), klabels, d0s, readouts, runs, "model",
+                             os.path.join(args.out, "halflife_by_model"), args.stat))
     np.savez_compressed(os.path.join(args.out, "imbalance_comp.npz"),
                         **{f"N{N}_k{k}_{ro}_d0{P.fmt(d0)}_{q}": v for (N, k, ro, d0), d in res.items() for q, v in d.items()})
     print("wrote\n  " + "\n  ".join(outs) + f"\n  {os.path.join(args.out, 'imbalance_comp.npz')}")

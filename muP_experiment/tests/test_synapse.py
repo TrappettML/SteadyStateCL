@@ -2,6 +2,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from mup import experiments as X
 from mup import model as M
@@ -12,9 +13,9 @@ from mup.protocol import init_batch
 GATED = ["gated_shared", "gated_frozen", "task_heads"]
 
 
-def _runs(kappa, N=9, seeds=2, lam=1.0, delta0=0.5, readout=GATED):
+def _runs(kappa, N=9, seeds=2, lam=1.0, delta0=0.5, readout=GATED, clock="realized"):
     cfg = Config(name="t", N=[N], kappa=[kappa], readout=readout, delta0=[delta0], lam=[lam], seeds=seeds,
-                 T_per_N=1.0, T_min=4)
+                 T_per_N=1.0, T_min=4, clock=clock, burn_halflives=0.0)
     return make_runs(cfg)
 
 
@@ -49,6 +50,9 @@ def _numpy_stream(run, T, k):
         w, mask = (np.asarray(v) for v in S.draw_mask(k_teach, N, D, jnp.float64(pN)))
         if run.use_heads:
             a = np.asarray(M.draw_readout(k_head, jnp.asarray((W ** 2).sum(1) / D), jax.tree_util.tree_map(lambda v: v[0], p)))
+        if run.clock == "realized":                    # clock (ii) at the mean rate over the input coordinates
+            abar = (mask * (a * a)[:, None]).sum() / (pN * D)
+            c = run.lam / (run.n_steps * abar)
         for _ in range(run.n_steps):
             MW = mask * W
             r = a @ MW / pN - w
@@ -70,8 +74,9 @@ def _numpy_stream(run, T, k):
     return np.array(out)
 
 
-def test_matches_numpy_loop():
-    runs = _runs(1.5, seeds=1)
+@pytest.mark.parametrize("clock", ["realized", "nominal"])
+def test_matches_numpy_loop(clock):
+    runs = _runs(1.5, seeds=1, clock=clock)
     T, k = 6, 2
     got = S.signal_after_tasks(runs, k, T - k, k, chunk=2)
     for j, r in enumerate(runs):

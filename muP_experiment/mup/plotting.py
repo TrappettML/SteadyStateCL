@@ -72,8 +72,12 @@ QUANTITY_LABEL = {
     "logf_sum": r"$\Sigma\,\log f$", "logf_max": r"max $|\log f|$",
     "Q_q05": r"$Q_{ii}$ 5 %", "Q_q50": r"$Q_{ii}$ median", "Q_q95": r"$Q_{ii}$ 95 %",
     "aQ_q05": r"$|a_i|\sqrt{Q_{ii}}$ 5 %", "aQ_q95": r"$|a_i|\sqrt{Q_{ii}}$ 95 %",
-    "S0": "S(0)", "E0": "E(0)", "L_end": r"$L$ (end of task)", "abar2": r"$\bar a^2$", "n_active": "active units",
+    "S0": "S(0)", "E0": "E(0)", "L_end": r"$L$ (end of task)", "abar2": r"mean $a_i^2$ (active, start)", "n_active": "active units",
     "dm_half": r"$\Delta m_{1/2}/m_{1/2}$",
+    # start-of-task quantities of the task clock and the readout exponent (protocol.CLOCK_KEYS)
+    "abar_c": r"$\bar a^2_c$ (key norm)", "Qbar_c": r"$\bar Q_c$ (active, start)", "qmax_c": r"$\|Q_c\|$",
+    "lam_c": r"$\lambda_c=\Lambda_c\bar a^2_c$", "lam_a": r"$\lambda^a_c=\Lambda_c\|M_c\|$",
+    "popstab": r"$h\eta(\bar a^2_c+\mathrm{tr}\,M_c)$",
     # trace quantities (protocol.TRACE_QUANT)
     "a2_act": r"$a_i^2$ (active)", "aQ_act": r"mean $|a_i|\sqrt{Q_{ii}}$", "Q_all": r"$Q_{ii}$ (all)",
     "logf": r"$\log f$", "loss": "loss",

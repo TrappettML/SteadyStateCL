@@ -10,6 +10,13 @@ from typing import Any, Optional, Sequence
 
 import yaml
 
+from mup import theory
+
+#: Task clocks of the write-up ("Decision: the task clock") → ``Params.clock``.
+#: "nominal": (i) every task lasts Λ = λ/ā²_nom, ā²_nom = 1 + δ₀.
+#: "realized": (ii), the default: every task lasts Λ_c = λ/ā²_c, ā²_c its key norm at the start of the task.
+CLOCKS = {"nominal": 0.0, "realized": 1.0}
+
 READOUTS = {
     #                  gated, learn_a, do_proj, use_heads        (PLAN.md §4)
     "gated_shared":   (1.0, 1.0, 1.0, 0.0),   # one a, learned every task; κ-sparse gates
@@ -56,7 +63,12 @@ class Config:
         runs at an (N, κ) outside that range are skipped and listed on stdout by ``make_runs``
     readout : readout keys (``READOUTS``)
     delta0 : dimensionless imbalances δ₀ = ηΔ₀ (> −1)
-    lam : learning per task λ = Λ ā²
+    lam : hidden-layer learning per task λ = Λ ā²_nom (the frozen-readout exponent; the readout exponent
+        λᵃ_c = Λ‖M_c‖ is derived from (λ, δ₀) and the state, never set)
+    clock : task clock, "realized" (clock (ii) of the write-up, the default) or "nominal" (clock (i)); SGD runs
+        always take the nominal clock (its step count n = round(λD/(η ā²_nom)) is the write-up's)
+    burn_halflives : burn-in the config must cover, in half-lives of the slowest readout (task heads,
+        N ln 2/(θν)); ``make_runs`` notes the runs that fall short (``theory.burn_in_halflives``)
     seeds : int (→ range) or explicit list
     solver : "pop" or "sgd"
     eta : per-run η (pop: 1; sgd: values with η ā² ≤ sgd_contraction)
@@ -93,6 +105,10 @@ class Config:
     #: extra gated (N, κ) cells off the N × κ product, e.g. ``[{N: 100, kappa: 4.0}]``; an N not in ``N`` gets no ungated runs
     extra: Sequence[dict] = ()
     sigma0: Sequence[float] = (1.0,)        # initial scale of W (check 5 of the write-up sweeps it)
+    clock: str = "realized"                 # task clock: "realized" = (ii) Λ_c = λ/ā²_c (default), "nominal" = (i) Λ = λ/ā²_nom
+    #: burn-in in half-lives of the slowest readout that a sweep should cover: the write-up's T_burn = 7N is
+    #: 7θν/ln 2 ≈ 10 of them (9.9ν at λ = 4, i.e. 9.4 at N = 5, κ = 1 and 9.9 from N = 20), so the note fires below 9
+    burn_halflives: float = 9.0
 
     @classmethod
     def from_yaml(cls, path: str) -> "Config":
@@ -162,6 +178,35 @@ class Run:
     trace: bool = False
     trace_points: int = 200
     sigma0: float = 1.0                     # W⁽⁰⁾_ij ~ N(0, σ₀²); 1 unless check 5 sweeps it
+    #: task clock (``CLOCKS``); "nominal" for batch files written before 2026-11-11, which ran clock (i)
+    clock: str = "nominal"
+
+    @property
+    def clock_id(self) -> float:
+        """``Params.clock``: 0.0 for the nominal clock (i), 1.0 for the realized clock (ii)."""
+        return CLOCKS[self.clock]
+
+    @property
+    def theta(self) -> float:
+        """θ = 1 − e^{−λ}: the fraction of the residual a task removes through the hidden layer."""
+        return theory.theta(self.lam)
+
+    @property
+    def p(self) -> float:
+        """Gate density pN/N: κ/√N when gated, 1 when ungated."""
+        return self.pN / self.N
+
+    def popstab(self) -> float:
+        """Left side of the write-up's sufficient contraction condition, eq. (popstab), before the run:
+        hη (n_c/pN)(δ₀ + 2Q̄_c) at n_c = pN and Q̄_c the larger of σ₀² and the steady-state estimate of
+        eq. (abarss) (``theory.popstab_steady``; the hidden channel alone for a frozen readout).  The step
+        contracts the residual in every direction when this is < 2; NaN for SGD.  The value a run realizes
+        task by task is the recorded scalar ``popstab``."""
+        if self.solver != "pop":
+            return float("nan")
+        return theory.popstab_steady(self.h, self.eta, self.delta0, self.pN, self.lam, self.sigma0,
+                                     projected=self.do_proj == 1.0, realized=self.clock == "realized",
+                                     n_steps=self.n_steps)
 
     @property
     def pN(self) -> float:
@@ -238,13 +283,14 @@ class Run:
         """Short human-readable identifier (used in messages and trace manifests)."""
         return (f"N={self.N} k={self.kappa_label or self.kappa} {self.readout} "
                 f"d0={self.delta0} lam={self.lam} eta={self.eta} seed={self.seed}"
-                + (f" sigma0={self.sigma0}" if self.sigma0 != 1.0 else ""))
+                + (f" sigma0={self.sigma0}" if self.sigma0 != 1.0 else "")
+                + (" clock=nominal" if self.clock == "nominal" and self.solver == "pop" else ""))
 
     def to_dict(self) -> dict:
         """Fields plus the derived properties, JSON-serialisable (stored in every batch file)."""
         d = dataclasses.asdict(self)
         d.update(pN=self.pN, Delta0=self.Delta0, gated=self.gated, learn_a=self.learn_a,
-                 do_proj=self.do_proj, use_heads=self.use_heads)
+                 do_proj=self.do_proj, use_heads=self.use_heads, clock_id=self.clock_id)
         return d
 
     @classmethod
@@ -274,7 +320,14 @@ class Run:
 
 def task_duration(solver: str, lam: float, eta: float, delta0: float, cfg: Config, D: int) -> tuple[int, float, float]:
     """
-    Steps per task from the deterministic ā² = 1 + δ₀ (PLAN.md §3.6).
+    Steps per task from the deterministic ā²_nom = 1 + δ₀ (PLAN.md §3.6; write-up "Population step h").
+
+    Population: h = min(h_max, 0.1/(η ā²_nom)), n = ⌈α_task/h⌉, α_task = λ/(η ā²_nom); h is then set to
+    α_task/n so that n steps span the nominal task exactly.  This is the step of clock (i) and the first-task
+    step of clock (ii); under clock (ii) the step count n is kept and each task takes its own
+    h_c = λ/(η n ā²_c) (``model.task_h``), so hη ā²_c = λ/n ≤ 0.1 holds for the realized key norm.
+    The rule resolves the hidden channel only; the readout channel is covered by eq. (popstab)
+    (``Run.popstab``, checked in ``make_runs``).  SGD: n = round(λD/(η ā²_nom)), η ā²_nom ≤ ``sgd_contraction``.
 
     Parameters
     ----------
@@ -390,11 +443,14 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
     Raises
     ------
     ValueError
-        Unknown readout, δ₀ ≤ −1, or an SGD η that violates the contraction rule.
+        Unknown readout or clock, δ₀ ≤ −σ₀², or an SGD η that violates the contraction rule.
     """
     for readout in cfg.readout:
         if readout not in READOUTS:
             raise ValueError(f"unknown readout {readout!r}; known: {list(READOUTS)}")
+    if cfg.clock not in CLOCKS:
+        raise ValueError(f"unknown clock {cfg.clock!r}; known: {list(CLOCKS)}")
+    clock = "nominal" if cfg.solver == "sgd" else cfg.clock     # SGD: η is the noise amplitude, n is nominal
     if any(map(is_gated, cfg.readout)):
         _note_skipped_kappas(cfg)
     runs = []
@@ -416,8 +472,9 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
                 else:
                     T_half = max(cfg.T_min, int(round(cfg.T_factor * N / kappa_s**2)))
                 for delta0, lam, eta, seed, sigma0 in itertools.product(cfg.delta0, cfg.lam, cfg.eta, cfg.seed_list(), cfg.sigma0):
-                    if delta0 <= -1.0:
-                        raise ValueError(f"δ₀ = {delta0} ≤ −1 makes the initial readout imaginary")
+                    if delta0 <= -sigma0 ** 2:
+                        raise ValueError(f"δ₀ = {delta0} ≤ −σ₀² = {-sigma0 ** 2:g} makes the initial readout imaginary "
+                                         f"(a_i² = δ₀ + Q_ii with Q_ii ≈ σ₀²)")
                     n_steps, h, alpha = task_duration(cfg.solver, lam, eta, delta0, cfg, D)
                     runs.append(Run(
                         N=N, D=D, kappa=kappa, readout=readout, delta0=float(delta0), lam=float(lam),
@@ -425,8 +482,69 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
                         alpha_task=float(alpha), T_burn=T_half, T_meas=T_half, kappa_label=klabel, kappa_sched=float(kappa_s),
                         n_ages_geom=int(cfg.n_ages_geom), m_max_factor=float(cfg.m_max_factor),
                         trace=bool(cfg.trace), trace_points=int(cfg.trace_points), sigma0=float(sigma0),
+                        clock=clock,
                     ))
+    _note_checks(cfg, runs)
     return runs
+
+
+#: Conditions already reported by ``_note_checks`` in this process (a script calls ``make_runs`` once per cell).
+_NOTED: set = set()
+
+
+def unstable_runs(runs: Sequence[Run]) -> list[Run]:
+    """Runs whose population step fails the sufficient contraction condition of the write-up, eq. (popstab):
+    ``Run.popstab`` ≥ 2 (one run per condition; seeds share the value)."""
+    seen, out = set(), []
+    for r in runs:
+        key = (r.N, r.kappa_label, r.readout, r.delta0, r.lam, r.eta, r.sigma0, r.clock)
+        if key in seen or r.solver != "pop":
+            continue
+        seen.add(key)
+        if r.popstab() >= 2.0:
+            out.append(r)
+    return out
+
+
+def short_burn_in(runs: Sequence[Run], n_half: float) -> list[tuple[Run, float]]:
+    """(run, half-lives) of the conditions whose burn-in is shorter than ``n_half`` half-lives of the slowest
+    readout, the task heads' N ln 2/(θν) at the run's gate density (``theory.burn_in_halflives``; write-up,
+    Protocol: T_burn = 7N is 7θν/ln 2 ≈ 10).  One entry per (N, κ, λ, T_burn)."""
+    seen, out = set(), []
+    for r in runs:
+        key = (r.N, r.kappa_label, r.lam, r.T_burn)
+        if key in seen:
+            continue
+        seen.add(key)
+        x = theory.burn_in_halflives(r.T_burn, r.N, r.p, r.lam)
+        if x < n_half:
+            out.append((r, x))
+    return out
+
+
+def _note_checks(cfg: Config, runs: Sequence[Run]) -> None:
+    """One line on stdout per derived check of the write-up that some runs fail: the contraction condition
+    eq. (popstab) and the burn-in length in half-lives.  Notes, not errors: eq. (popstab) is sufficient and
+    rests on a leading-order norm estimate, and scripts that pass their own stream length (``--T``) do not
+    use ``T_burn``.  The burn-in is checked only under the rule T_burn = ``T_per_N``·N.  A condition is
+    reported once per process."""
+    bad = [r for r in unstable_runs(runs) if ("stab", r.label()) not in _NOTED]
+    if bad:
+        _NOTED.update(("stab", r.label()) for r in bad)
+        txt = ", ".join(f"(N={r.N}, κ={r.kappa_label}, {r.readout}, δ₀={r.delta0:g}, λ={r.lam:g}: {r.popstab():.2f})"
+                        for r in bad[:6])
+        print(f"note: eq. (popstab) hη(δ₀ + 2Q̄) < 2 fails at the estimated steady state for {len(bad)} conditions "
+              f"under the {bad[0].clock} clock: {txt}{', …' if len(bad) > 6 else ''}; the recorded scalar "
+              f"'popstab' is the realized value", flush=True)
+    # the burn-in rule under test is the write-up's T_burn = T_per_N·N; the legacy N/κ² form (T_per_N = 0) is not checked
+    short = [(r, x) for r, x in (short_burn_in(runs, cfg.burn_halflives) if cfg.T_per_N > 0 else [])
+             if ("burn", r.N, r.kappa_label, r.lam, r.T_burn) not in _NOTED]
+    if short:
+        _NOTED.update(("burn", r.N, r.kappa_label, r.lam, r.T_burn) for r, _ in short)
+        lo = min(short, key=lambda t: t[1])
+        print(f"note: T_burn covers fewer than {cfg.burn_halflives:g} half-lives of the slowest readout "
+              f"(N ln 2/(θν)) for {len(short)} (N, κ, λ) cells; shortest: N={lo[0].N}, κ={lo[0].kappa_label}, "
+              f"λ={lo[0].lam:g}, T_burn={lo[0].T_burn} = {lo[1]:.1f} half-lives", flush=True)
 
 
 def _note_skipped_kappas(cfg: Config) -> list[tuple[int, str, str]]:
@@ -473,3 +591,15 @@ def make_batches(runs: Sequence[Run], batch_size: int) -> list[list[Run]]:
         for i in range(0, len(b), batch_size):
             batches.append(b[i:i + batch_size])
     return batches
+
+
+def add_clock_arg(ap) -> None:
+    """Add ``--clock`` to a script's argument parser (default: the config's, clock (ii) ``realized``)."""
+    ap.add_argument("--clock", choices=list(CLOCKS), default=None,
+                    help="task clock of the write-up: 'realized' = (ii), every task lasts Λ_c = λ/ā²_c with its own "
+                         "key norm (the default); 'nominal' = (i), every task lasts Λ = λ/(1 + δ₀) (default: the config's)")
+
+
+def clock_override(args) -> dict:
+    """``{"clock": …}`` for a ``Config`` override when ``--clock`` was given, else ``{}``."""
+    return {"clock": args.clock} if getattr(args, "clock", None) else {}

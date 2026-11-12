@@ -8,7 +8,8 @@ Every script in ``scripts/`` that trains networks reduces to jobs over
 the CPU) exactly as ``protocol.run_stream`` does for the sweep.
 
 ``train_task`` is ``protocol.run_task`` without the observables: the same
-draws, the same ``n_steps`` of step + row projection, the same head
+draws, the same task clock (``model.task_h``: clock (ii) of the write-up by
+default), the same ``n_steps`` of step + row projection, the same head
 rescaling and storing, so a state advanced here equals one advanced by the
 sweep kernel (``tests/test_experiments.py``).  The per-task observables of
 each experiment are evaluated inside the scan and come back stacked, one
@@ -98,6 +99,36 @@ def task_norms(state: State, p: Params) -> jnp.ndarray:
 #: Pre-training output of the next task (``leak_norms``), recorded by ``norms_kernel`` beside ``NORM_KEYS``.
 LEAK_KEYS = ("ub2", "wub", "ub_diag")
 
+#: Start-of-task quantities of the readout exponent (``clock_norms``), recorded by ``norms_kernel``.
+CLOCK_KEYS = ("n_c", "abar_c", "Qbar_c", "qmax_c", "h_c")
+
+
+def clock_norms(state: State, p: Params, *, n_steps: int, solver: str, K: int) -> jnp.ndarray:
+    """(5,) ``CLOCK_KEYS`` of the task about to be trained, from the state BEFORE ``train_task`` (write-up,
+    "Readout exponent" and "Decision: the task clock").
+
+    With g the gate of task ``state.t`` and a its readout (the fresh head for task heads):
+
+    ``n_c``      realized active count Σ_i g_i
+    ``abar_c``   key norm ā²_c = Σ_i g_i a_i²/pN, the rate of the hidden channel (eq. rflow)
+    ``Qbar_c``   mean Q_ii over the active units (NaN for an empty gate)
+    ``qmax_c``   largest eigenvalue of the active block Q_c of Q; ‖M_c‖ = qmax_c/pN (eq. Mspec)
+    ``h_c``      population step of the task under the run's clock (``model.task_h``; ``p.h`` for SGD)
+
+    The host derives from them the task duration Λ_c = η h_c n, the exponents λ_c = Λ_c ā²_c and
+    λᵃ_c = Λ_c qmax_c/pN, the bounds of eq. (lama) and the left side of eq. (popstab)
+    (``scripts/run_weight_norms.py``).
+    """
+    N, D = state.W.shape
+    k_teach, k_head, _ = model.task_keys(state.key, state.t)
+    _, g = model.draw_task(k_teach, N, D, p.pN, p.gated)
+    Q = model.Q_diag(state.W)
+    a = jnp.where(p.use_heads == 1.0, model.draw_readout(k_head, Q, p), state.a)
+    n_c = g.sum()
+    Qbar = jnp.where(n_c > 0, (g * Q).sum() / jnp.maximum(n_c, 1.0), jnp.nan)
+    h = model.task_h(a, g, p, n_steps) if solver == "pop" else p.h
+    return jnp.stack([n_c, model.key_norm(a, g, p), Qbar, model.active_qmax(state.W, g, K), h])
+
 
 def leak_norms(state: State, p: Params) -> jnp.ndarray:
     """(3,) ``LEAK_KEYS`` of the task about to be trained, from the state BEFORE ``train_task``.
@@ -140,6 +171,8 @@ def gauge_task(state: State, p: Params, *, n_steps: int, solver: str) -> tuple[S
     a = jnp.where(p.use_heads == 1.0, head, state.a)
     state = state._replace(w=w_t, g=g_t, a=a)
     t = state.t
+    if solver == "pop":                                          # the task clock, as model.train_block
+        p = p._replace(h=model.task_h(a, g_t, p, n_steps))
     step = _step_fn(p, solver, k_stream)
 
     def body(s, i):
@@ -181,17 +214,19 @@ def signal_kernel(n_steps: int, solver: str, n_tasks: int, K: Optional[int] = No
 
 @functools.lru_cache(maxsize=None)
 def norms_kernel(n_steps: int, solver: str, n_tasks: int, K: Optional[int] = None, closed: bool = False) -> Callable:
-    """``f(state, p) -> (state, X)`` with ``X`` (n_tasks, B, 8): the ``NORM_KEYS`` after each task, then the
-    ``LEAK_KEYS`` of that task from the state before it was trained."""
+    """``f(state, p) -> (state, X)`` with ``X`` (n_tasks, B, 13): the ``NORM_KEYS`` after each task, then the
+    ``LEAK_KEYS`` and the ``CLOCK_KEYS`` of that task from the state before it was trained."""
     vf = jax.vmap(functools.partial(train_task, n_steps=n_steps, solver=solver, K=K, closed=closed))
     vn = jax.vmap(task_norms)
     vl = jax.vmap(leak_norms)
 
     def run(state, p):
+        vc = jax.vmap(functools.partial(clock_norms, n_steps=n_steps, solver=solver,
+                                        K=state.W.shape[1] if K is None else K))
         def body(s, _):
-            leak = vl(s, p)
+            leak, clk = vl(s, p), vc(s, p)
             s = vf(s, p)
-            return s, jnp.concatenate([vn(s, p), leak], -1)
+            return s, jnp.concatenate([vn(s, p), leak, clk], -1)
         return jax.lax.scan(body, state, None, length=n_tasks)
 
     return jax.jit(run, donate_argnums=(0,))
@@ -295,9 +330,9 @@ def first_and_steady_signal(runs: Sequence, T: int, n_follow: int, chunk: Option
 
 
 def norms_over_tasks(runs: Sequence, T: int, chunk: Optional[int] = None) -> dict:
-    """``{key: (B, T) array}`` of ``NORM_KEYS`` after each of ``T`` tasks and of ``LEAK_KEYS`` before each
-    (``run_weight_norms.py``)."""
-    keys = NORM_KEYS + LEAK_KEYS
+    """``{key: (B, T) array}`` of ``NORM_KEYS`` after each of ``T`` tasks and of ``LEAK_KEYS`` and
+    ``CLOCK_KEYS`` before each (``run_weight_norms.py``)."""
+    keys = NORM_KEYS + LEAK_KEYS + CLOCK_KEYS
     r0 = runs[0]
     state, p, ok, kc = _batch(runs, T)
     if state is None:
@@ -308,7 +343,7 @@ def norms_over_tasks(runs: Sequence, T: int, chunk: Optional[int] = None) -> dic
         state, x = norms_kernel(r0.n_steps, r0.solver, n, *kc)(state, p)
         X.append(np.asarray(x))
         prog.add(n)
-    X = _expand(np.concatenate(X, 0), ok)                        # (T, B, 8)
+    X = _expand(np.concatenate(X, 0), ok)                        # (T, B, 13)
     return {q: X[:, :, i].T for i, q in enumerate(keys)}
 
 

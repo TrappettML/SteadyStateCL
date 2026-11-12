@@ -1,7 +1,12 @@
 #!/usr/bin/env python
 """Gauge comparison (PLAN.md §12.10): Δ_i per step with and without the projection, one figure per cell.
 
-    python scripts/run_gauge_comp.py [--N 100] [--kappa 1] [--delta0 0] [--lam 4] [--seeds 1] [--tasks T] [--gpus]
+    python scripts/run_gauge_comp.py [--N 100] [--kappa 1] [--delta0 0] [--lam 4] [--seeds 1] [--tasks T]
+                                     [--clock realized|nominal] [--gpus]
+
+Check 1 of the write-up and its eq. (popdrift): a population step changes Δ_i at second order,
+ΔΔ_i = h²η[(W_i·r_c)²/D² − a_i²|r_c|²/D] ≤ 0 for Δ_i ≥ 0, an O(h) amount per task that accumulates over the
+stream when it is not projected away; with the projection after every step Δ_i = Δ₀ to machine precision.
 
 One figure per cell (N, κ, δ₀, λ), ``results/gauge_comp/figures/gauge_comp_N{N}_k{κ}_d0{δ₀}_lam{λ}.png``:
 two rows × one column, x = global training step (log), y = the per-unit
@@ -41,7 +46,7 @@ import _path  # noqa: F401
 from mup import experiments as X
 from mup import plotting as P
 from mup import pool
-from mup.config import Config, READOUT_ORDER, Run, make_runs
+from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -184,6 +189,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--tasks", type=int, default=None, help="tasks to run (default: the config's T_burn + T_meas)")
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "gauge_comp"))
+    add_clock_arg(ap)
     pool.add_args(ap)
     args = ap.parse_args(argv)
 
@@ -191,7 +197,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = Config(**{**cfg.__dict__, "name": "gauge_comp", "N": list(args.N), "kappa": list(args.kappa),
                     "readout": list(args.readout), "delta0": list(args.delta0),
                     "lam": [args.lam if args.lam is not None else cfg.lam[0]], "seeds": args.seeds,
-                    "extra": (), "trace": False})
+                    "extra": (), "trace": False, **clock_override(args)})
     runs = make_runs(cfg)
     if not runs:
         print("no runs left after skipping κ outside [1, √N]; nothing to do", flush=True)

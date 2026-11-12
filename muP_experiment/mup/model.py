@@ -23,24 +23,28 @@ class Params(NamedTuple):
     eta : η_a = η_W = η
     h : population step in α (unused for SGD)
     pN : nominal active count κ√N (exactly N for an ungated run)
-    lam : λ = Λ ā² (bookkeeping only)
+    lam : hidden-layer learning per task λ = Λ ā²_nom; sets the task duration under clock (ii) (``task_h``)
     gated : 1 draws the gate ~ Bernoulli(pN/N); 0 activates every unit
     learn_a : 1 if the readout learns, 0 if frozen
     do_proj : 1 projects onto Δ_i = Δ₀ after every step
     use_heads : 1 for task-specific heads
     sigma0 : initial scale, W⁽⁰⁾_ij ~ N(0, σ₀²) (check 5; 1 in every sweep)
+    clock : task clock of the write-up ("Decision: the task clock"): 0 = (i) fixed nominal duration
+        Λ = λ/ā²_nom, the step ``h`` as given; 1 = (ii) fixed realized duration Λ_c = λ/ā²_c with ā²_c measured
+        at the start of each task (``task_h``; population solver)
     """
 
     Delta0: jnp.ndarray    # raw imbalance Δ₀ = δ₀/η
     eta: jnp.ndarray       # η_a = η_W = η
     h: jnp.ndarray         # population step in α (unused for SGD)
     pN: jnp.ndarray        # nominal active count κ√N
-    lam: jnp.ndarray       # λ = Λ ā²  (bookkeeping only)
+    lam: jnp.ndarray       # hidden-layer learning per task λ (sets Λ_c under clock (ii))
     gated: jnp.ndarray     # 1: gate ~ Bernoulli(pN/N); 0: all units active (pN = N)
     learn_a: jnp.ndarray   # 1: readout learns, 0: frozen
     do_proj: jnp.ndarray   # 1: project onto Δ_i = Δ₀ after every step
     use_heads: jnp.ndarray  # 1: task-specific heads
     sigma0: jnp.ndarray    # initial scale of W (1 unless check 5 sweeps it)
+    clock: jnp.ndarray     # 0: clock (i), nominal duration; 1: clock (ii), realized duration (task_h)
 
 
 class State(NamedTuple):
@@ -206,6 +210,80 @@ def imbalance(state: State, p: Params) -> jnp.ndarray:
     return state.a * state.a / p.eta - Q_diag(state.W) / p.eta
 
 
+def key_norm(a: jnp.ndarray, g: jnp.ndarray, p: Params) -> jnp.ndarray:
+    """
+    Key norm of a task, ā²_c = Σ_i g_i a_i² / pN (eq. rflow): the rate η ā²_c of the hidden channel.
+
+    The nominal count pN is in the denominator, as in u_c, not the realized n_c; 0 for an empty gate.
+
+    Parameters
+    ----------
+    a : (N,) readout of the task (the fresh head for task heads)
+    g : (N,) gate, 0/1 floats
+    p : Params
+
+    Returns
+    -------
+    0-d array
+    """
+    return (g * a * a).sum() / p.pN
+
+
+def task_h(a: jnp.ndarray, g: jnp.ndarray, p: Params, n_steps: int) -> jnp.ndarray:
+    """
+    Population step h of one task under the run's clock (write-up, "Decision: the task clock").
+
+    Clock (i), ``p.clock == 0``: ``p.h``, the same for every task (Λ = λ/ā²_nom, eq. clock_nom).
+    Clock (ii), ``p.clock == 1``: h_c = Λ_c/(η n) with Λ_c = λ/ā²_c and ā²_c = ``key_norm`` of the readout and
+    gate the task starts with (eq. clock_real), so the hidden channel advances by hη ā²_c = λ/n per step and
+    removes e^{−λ} over the task whatever the gate drew.  0 for an empty gate (nothing trains).
+
+    Parameters
+    ----------
+    a, g : (N,) readout and gate at the start of the task
+    p : Params
+    n_steps : int
+        Steps per task n (``config.task_duration``).
+
+    Returns
+    -------
+    0-d array
+    """
+    abar = key_norm(a, g, p)
+    h_real = jnp.where(abar > 0.0, p.lam / (p.eta * n_steps * jnp.where(abar > 0.0, abar, 1.0)), 0.0)
+    return jnp.where(p.clock == 1.0, h_real, p.h)
+
+
+def active_qmax(W: jnp.ndarray, g: jnp.ndarray, K: int) -> jnp.ndarray:
+    """
+    Largest eigenvalue of the active block Q_c = W_c W_cᵀ/D of Q (write-up, "Readout exponent").
+
+    The nonzero eigenvalues of the readout-channel operator M_c are those of Q_c divided by pN (eq. Mspec),
+    so ‖M_c‖ = ``active_qmax``/pN and the readout exponent is λᵃ_c = Λ_c‖M_c‖.  One K × K Gram matrix and its
+    symmetric eigenvalues; the padding rows of the block are zeroed, which adds only zero eigenvalues.
+
+    Parameters
+    ----------
+    W : (N, D)
+    g : (N,) gate, 0/1 floats
+    K : int (static)
+        Rows of the active block (``block_rows``); N takes every row.
+
+    Returns
+    -------
+    0-d array
+        0 for an empty gate, NaN when more than ``K`` units are active (as ``train_block``).
+    """
+    N, D = W.shape
+    if K >= N:
+        Wb = g[:, None] * W
+    else:
+        idx = jnp.argsort(-g)[:K]
+        Wb = g[idx][:, None] * W[idx]
+    q = jnp.linalg.eigvalsh(Wb @ Wb.T / D)[-1]
+    return jnp.where(g.sum() > K, jnp.nan, q)
+
+
 # ----------------------------------------------------------------------------
 # steps
 # ----------------------------------------------------------------------------
@@ -358,10 +436,37 @@ def draw_readout(key: jnp.ndarray, Q: jnp.ndarray, p: Params) -> jnp.ndarray:
     Returns
     -------
     (N,) array
-        NaN where Δ₀ + Q_ii/η < 0 (infeasible δ₀; see ``protocol.feasible``).
+        NaN where the readout would be imaginary, δ₀ + Q_ii < 0 (``readout_infeasible``; the write-up's
+        condition δ₀ > −Q_ii ≈ −1): an explicit mark, read by ``protocol.feasible``, not the by-product of a
+        square root.  A negative argument within rounding of 0 (a unit the projection left at a_i = 0, whose
+        Q_ii = −δ₀ up to the last bits) gives a_i = 0.
     """
     eps = jax.random.rademacher(key, Q.shape, dtype=Q.dtype)
-    return eps * jnp.sqrt(p.eta * (p.Delta0 + Q / p.eta))
+    arg = p.Delta0 + Q / p.eta
+    a = eps * jnp.sqrt(p.eta * jnp.maximum(arg, 0.0))
+    return jnp.where(readout_infeasible(Q, p), jnp.nan, a)
+
+
+#: Relative rounding slack of the feasibility test δ₀ + Q_ii ≥ 0 (``readout_infeasible``).
+FEASIBLE_RTOL = 1e-12
+
+
+def readout_infeasible(Q: jnp.ndarray, p: Params) -> jnp.ndarray:
+    """
+    Units whose readout a_i² = η(Δ₀ + Q_ii/η) = δ₀ + Q_ii would be negative (write-up, "Initialization").
+
+    Parameters
+    ----------
+    Q : (N,) row norms Q_ii
+    p : Params
+
+    Returns
+    -------
+    (N,) bool array
+        True where Δ₀ + Q_ii/η < −``FEASIBLE_RTOL``·(|Δ₀| + Q_ii/η): below zero by more than rounding.
+    """
+    arg = p.Delta0 + Q / p.eta
+    return arg < -FEASIBLE_RTOL * (jnp.abs(p.Delta0) + Q / p.eta)
 
 
 def draw_task(key: jnp.ndarray, N: int, D: int, pN: jnp.ndarray, gated=1.0):
@@ -435,8 +540,8 @@ def draw_W0(key: jnp.ndarray, p: Params, N: int, D: int) -> jnp.ndarray:
     """
     W⁽⁰⁾ with rows ~ N(0, σ₀² I_D), the infeasible rows redrawn.
 
-    A row is infeasible when Δ₀ + Q_ii/η < 0, i.e. ``draw_readout`` would give
-    an imaginary a_i (δ₀ ≤ −Q_ii; at small D the row norms fluctuate by
+    A row is infeasible when Δ₀ + Q_ii/η < 0 (``readout_infeasible``), i.e. its
+    readout would be imaginary (δ₀ < −Q_ii; at small D the row norms fluctuate by
     ~√(2/D), so δ₀ = −0.75 fails for about a third of the seeds at N ≤ 20).
     Only those rows are redrawn (up to ``MAX_REDRAW`` times, each from a
     fresh fold of the key), so a feasible first draw is unchanged and no seed
@@ -454,7 +559,7 @@ def draw_W0(key: jnp.ndarray, p: Params, N: int, D: int) -> jnp.ndarray:
     (N, D) float64 array
     """
     def bad_rows(W):
-        return p.Delta0 + Q_diag(W) / p.eta < 0.0
+        return readout_infeasible(Q_diag(W), p)
 
     def cond(c):
         W, i = c
@@ -638,6 +743,9 @@ def train_block(W, a, g, w, p: Params, k_stream, *, n_steps: int, solver: str, K
     """
     ``n_steps`` solver steps, each followed by the row projection, on the block of the active rows.
 
+    The population step is ``task_h`` of the readout and gate the task starts with: ``p.h`` under clock (i),
+    λ/(η n ā²_c) under clock (ii) (the SGD rate η is the noise amplitude and is not rescaled; SGD runs clock (i)).
+
     The steps change ``W`` only through g⊙a and ``a`` only through g, so the
     inactive rows receive exactly zero and the projection leaves them alone:
     only the first ``K`` rows of ``argsort(−g)`` (the active units first, then
@@ -674,7 +782,8 @@ def train_block(W, a, g, w, p: Params, k_stream, *, n_steps: int, solver: str, K
         before its projection; ``logf_sum`` = Σ_steps mean_active log f,
         ``logf_max`` the largest |log f| over the steps; ``uc_before``,
         ``uc_after`` the student function before and after the last
-        projection; ``n_act``; and with ``traced`` ``rows`` (n_steps, 7).
+        projection; ``n_act``; ``h`` the population step of the task (``task_h``);
+        and with ``traced`` ``rows`` (n_steps, 7).
         Every array is NaN when more than ``K`` units are active.
     """
     assert n_steps >= 1
@@ -682,6 +791,8 @@ def train_block(W, a, g, w, p: Params, k_stream, *, n_steps: int, solver: str, K
     sqD = jnp.sqrt(D)
     n_act = g.sum()
     n_act1 = jnp.maximum(n_act, 1.0)
+    if solver == "pop":                                          # the task clock: h of this task (``task_h``)
+        p = p._replace(h=task_h(a, g, p, n_steps))
     full = K >= N
     if full:
         Wb, ab, m = W, a, g
@@ -779,7 +890,7 @@ def train_block(W, a, g, w, p: Params, k_stream, *, n_steps: int, solver: str, K
     bad = n_act > K
     nan = lambda x: jnp.where(bad, jnp.nan, x)
     out = dict(W=nan(W_out), a=nan(a_out), f=nan(f_out), f_last=nan(fl_out), Q_pre=nan(Q_pre), a_pre=nan(a_pre),
-               logf_sum=nan(lsum), logf_max=nan(lmax), n_act=n_act,
+               logf_sum=nan(lsum), logf_max=nan(lmax), n_act=n_act, h=p.h,
                uc_before=nan(uc_before), uc_after=nan(uc_after))
     if traced:
         out["rows"] = nan(rows)

@@ -1,7 +1,16 @@
 #!/usr/bin/env python
 """Training verification: the per-step loss of the task being trained at the start, middle and end of the stream.
 
-    python scripts/run_training_verify.py [--cell N,kappa,delta0 ...] [--seeds 4] [--lam 4] [--gpus]
+    python scripts/run_training_verify.py [--cell N,kappa,delta0 ...] [--seeds 4] [--lam 4] [--clock realized|nominal] [--gpus]
+
+What the write-up predicts for these curves ("Decision: the task clock"): with ρ_c = |r_c(end)|²/|r_c(0)|² the
+loss ratio over a task, the frozen readouts end every task at ρ_c = e^{−2λ} exactly under the default clock (ii)
+(up to the forward step's over-contraction, eq. lameff: e^{−2λ_eff}, λ_eff = −n ln(1 − λ/n)); for the learned
+ones the write-up states ρ_c ≤ e^{−2λ}, the surplus being the readout channel M_c.  That bound is eq. (rdecay)
+with ā²_c held at the value the task starts with; the exact statement is ρ_c ≤ e^{−2Λ_c⟨ā²_c⟩} with the time
+average over the task, so a learned readout whose key norm falls during the task can end a few per cent above
+e^{−2λ}.  Under ``--clock nominal`` the frozen readouts end at e^{−2λ_c} with λ_c of eq. (lamreal), which
+drifts with the settled norms.  The console prints the measured ρ_c of the last traced task beside e^{−2λ_eff}.
 
 For every cell (N, κ, δ₀) — by default the four
 ``100,2,1``, ``50,1,0``, ``20,1,4``, ``200,2,1`` — every readout × seed is
@@ -25,6 +34,7 @@ closed-form class, split over the GPUs (``--gpus``), ``--workers`` CPU
 processes or this process.
 """
 import argparse
+import math
 import os
 import sys
 import time
@@ -37,7 +47,8 @@ import _path  # noqa: F401
 from mup import experiments as X
 from mup import plotting as P
 from mup import pool
-from mup.config import Config, READOUT_ORDER, Run, make_runs
+from mup import theory as TH
+from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -162,11 +173,13 @@ def main(argv=None) -> int:
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--readout", nargs="*", default=list(READOUT_ORDER))
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "training_verify"))
+    add_clock_arg(ap)
     pool.add_args(ap)
     args = ap.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
     lam = args.lam if args.lam is not None else cfg.lam[0]
+    cfg = Config(**{**cfg.__dict__, **clock_override(args)})
     cells_ = runs_of([parse_cell(c) for c in args.cell], cfg, args.seeds, lam, list(args.readout))
     if not cells_:
         print("no runs left after skipping κ outside [1, √N]; nothing to do", flush=True)
@@ -174,7 +187,7 @@ def main(argv=None) -> int:
     g = groups(cells_)
     plan = pool.plan(args, [(v, k[-1]) for k, v in g.items()])
     r0 = next(iter(cells_.values()))[0]
-    print(f"training verification: cells={[c for c in cells_]} λ={lam} {r0.solver} n_steps={r0.n_steps} "
+    print(f"training verification: cells={[c for c in cells_]} λ={lam} {r0.solver} {r0.clock} clock n_steps={r0.n_steps} "
           f"seeds={args.seeds}  [{plan.describe()}]", flush=True)
     res = collect(cells_, plan)
 
@@ -182,9 +195,13 @@ def main(argv=None) -> int:
     for (N, k, d0), curves in res.items():
         run0 = cells_[(N, k, d0)][0]
         T = run0.T_burn + run0.T_meas
+        pred = math.exp(-2.0 * TH.lam_eff(lam, run0.n_steps))       # frozen readout, clock (ii): e^{−2λ_eff}, eq. (lameff)
         for ro, Y in curves.items():
+            with np.errstate(invalid="ignore", divide="ignore"):
+                rho = np.nanmean(Y[:, -1, -1] / Y[:, -1, 0])             # ρ_c of the last traced task, seed mean
             print(f"  N={N:4d} κ={k:5s} δ₀={d0:4g} {ro:15s} loss at task start → end: first {Y[:, 0, 0].mean():.3f} → "
-                  f"{Y[:, 0, -1].mean():.2e}, last {Y[:, -1, 0].mean():.3f} → {Y[:, -1, -1].mean():.2e}  ({Y.shape[0]} seeds)",
+                  f"{Y[:, 0, -1].mean():.2e}, last {Y[:, -1, 0].mean():.3f} → {Y[:, -1, -1].mean():.2e}  "
+                  f"ρ_c(last) = {rho:.2e} (e^(−2λ_eff) = {pred:.2e}, {run0.clock} clock)  ({Y.shape[0]} seeds)",
                   flush=True)
         if curves:
             outs.append(figure(curves, run0, T, os.path.join(args.out, f"loss_N{N}_k{P.fmt(k)}_d0{P.fmt(d0)}")))

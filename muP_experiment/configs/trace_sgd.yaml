@@ -11,3 +11,5 @@ eta: [0.05]
 trace: true
 trace_points: 200
 batch_size: 64
+# task clock: SGD runs the nominal clock (i), n = round(λ D/(η ā²_nom)) steps per task (write-up, "SGD rate η")
+clock: nominal

@@ -16,7 +16,7 @@ run in this order, every parameter written out, by `run_all.sh`
 | `scripts/run_gauge_comp.py` | Δᵢ per step, projection off / on | §6.1 |
 | `scripts/run_szero.py` | S₀(t): the first teacher's signal against task | §6.2 |
 | `scripts/run_stask.py` | S_T(τ): a steady-state teacher's signal against age | §6.3 |
-| `scripts/run_Nscaling.py` | m½ against N and κ, simulation vs N ln 2 | §6.4 |
+| `scripts/run_Nscaling.py` | m½ against N and κ, simulation vs the half-life of each readout's equation (`mup/theory.py`) | §6.4 |
 | `scripts/run_weight_norms.py` | weight norms against task and against N | §6.5 |
 | `scripts/run_imbalance_comp.py` | weight norms and m½ across δ₀ | §6.6 |
 | `scripts/run_training_verify.py` | per-step loss at the start, middle and end of the stream | §6.7 |
@@ -170,11 +170,16 @@ and call `make_runs`.  What the config fixes:
 - Task duration (`task_duration`): `ā² = 1 + δ₀`, `α_task = λ/(η ā²)`,
   `h = min(h_max, pop_contraction/(η ā²))` with `pop_contraction = 0.1`,
   `n_steps = ⌈α_task/h⌉`, `h = α_task/n_steps`.  At λ = 4: 40 steps per
-  task for every δ₀.  Known bias: for the gated learned readouts at
-  δ₀ ≤ 0 the settled ā² is 3–6× the nominal `1 + δ₀`, so the step `hη ā²`
-  is larger than 0.1 there (a −9 % to −26 % bias of the gated-shared m½ at
-  N = 100 was measured in a 2026-11-06 review); left as is, an author's
-  decision.
+  task for every δ₀.  This `h` is the step of clock (i) (`clock:
+  nominal`).  Under the default clock (ii) (`clock: realized`, since
+  2026-11-11, §10) `n_steps` is kept and every task takes
+  `h_c = λ/(η n ā²_c)` from its own key norm (`model.task_h`), so
+  `hη ā²_c = λ/n ≤ 0.1` holds for the realized norm.  Under clock (i) the
+  known bias remains: for the gated learned readouts at δ₀ ≤ 0 the settled
+  ā² is λ_c/λ = ā_act/(1 + δ₀) times the nominal `1 + δ₀` (eq. abarss), so
+  the step `hη ā²` is larger than 0.1 there (a −9 % to −26 % bias of the
+  gated-shared m½ at N = 100 was measured in a 2026-11-06 review) and
+  eq. popstab can fail (`make_runs` notes it).
 - Stream length: `T_per_N: 7` → `T_burn = T_meas = max(T_min, round(7N))`
   for every κ (so a run is 14N tasks; `T_factor` is the older
   `10N/κ_s²` form, unused when `T_per_N > 0`).  Burn-in is a concept of
@@ -297,7 +302,10 @@ Common shape: `cells`/`groups` (which runs are trained together and which
 figure they belong to) → `make_jobs` (one `(key, kwargs, cost)` per piece
 of a group) → `collect` (`pool.run_jobs`, then reassemble per condition
 from `Run.label()` or `(N, kappa_label, readout, seed)`) → `figure`
-(`plotting`) → `main` (argparse with `pool.add_args`, config override,
+(`plotting`; since 2026-11-11 the half-lives are those of the seed-mean
+curve by default, `--stat`, and the equations of `mup/theory.py` are
+overlaid: §10, where the per-seed wording of the subsections below is
+superseded) → `main` (argparse with `pool.add_args`, config override,
 `pool.plan`, banner, loop over cells).  Every script prints its wall time
 from after the imports at exit.  Figures are written by `plotting.save`,
 which appends `.png`, writes `figdata` as `.npz` beside it, and **warns**
@@ -401,8 +409,10 @@ a warning as a bug in the figure.
   `styles` row.  `fig_theory` (`mhalf_theory_{kind}_{tag}`, one panel per
   gated readout, 3.0 × 2.8 in): traces = κ via `kappa_shades(i, n,
   readout)`, solid simulation with error bars, dotted `theory(N, κ,
-  kind)`: `nln2` → N ln 2, `nk2` → N ln 2/κ².  `mhalf_{tag}.npz` holds
-  the per-seed arrays by `N{N}_k{κ}_{readout}`.
+  kind, readout, λ, δ₀)`: `eq` (default) → `theory.mhalf`, the root of
+  the readout's own Σ(m) = ½; `nln2` → N ln 2, `nk2` → N ln 2/κ².
+  `mhalf_{tag}.npz` holds the statistic's arrays by `N{N}_k{κ}_{readout}`,
+  the per-seed ones under `seed_…` and the equation under `theory_…`.
 - Result (2026-11-02, δ₀ = 0, λ = 4, 4 seeds, no seed censored): at κ = 1
   every gated readout grows as m½ ∝ N from N = 5 to 100 (log–log slope
   ≈ 1); task heads sits on N ln 2 at every N (67 ± 7 at N = 100 vs 69),
@@ -604,3 +614,40 @@ regenerate.
 - 2026-11-06: the sweep-based scripts moved to `old/` (Scope above);
   `run_all.sh` runs the experiment scripts in the note's order with every
   parameter written out.
+- 2026-11-11: code audited against the write-up as revised 2026-11-10
+  (run-dependent statements replaced by derived expressions).  Changes:
+  - `mup/theory.py`: one function per equation label — Σ(m) of each
+    readout (S_heads, S_frozen, S_learned) and its half-life, the
+    steady-state norms (abarss, Qss), the key drift (delta_est), the
+    readout-exponent bounds (lama, lama0), popstab, lameff, the burn-in in
+    half-lives, the synaptic θ̄ (syn_theta, syn_heads).  The scripts draw
+    these instead of N ln 2; the learned-readout curve uses the closed-form
+    norms, no recorded ones.
+  - Task clock.  `Config.clock` = `realized` (clock (ii), the write-up's
+    default) or `nominal` (clock (i)); `Params.clock`, `model.task_h`:
+    h_c = λ/(η n ā²_c) with ā²_c = Σ g a²/pN at the start of the task, n
+    unchanged, so batching is unchanged.  Synaptic gating uses the mean
+    rate over input coordinates.  SGD is always nominal.  `Run.clock`
+    defaults to `nominal` so batch files written before today read back as
+    what they ran; result schema 4.  Clock (i) is bit for bit the old
+    dynamics (`tests/test_reproducible.py`, the stored hash).  Clock (iii)
+    is not implemented.
+  - Per-task scalars `abar_c`, `Qbar_c`, `qmax_c`, `lam_c`, `lam_a`,
+    `popstab` (`protocol.CLOCK_KEYS`; `experiments.CLOCK_KEYS` for
+    `run_weight_norms.py`, which draws `exponents_vs_N`).  `abar2` keeps
+    its meaning, the mean of a² over the active units; the write-up's ā²_c
+    is `abar_c` = (n_c/pN)·`abar2`.
+  - `make_runs` notes the conditions that fail eq. popstab at the estimated
+    steady state and a burn-in under `burn_halflives` half-lives of the
+    slowest readout; it refuses δ₀ ≤ −σ₀² (was −1 whatever σ₀).
+    `model.draw_readout` marks δ₀ + Q_ii < 0 explicitly and maps a
+    rounding-negative argument to a = 0.
+  - Half-life statistic.  This reverses the 2026-11-06 entry for the
+    half-life only: the default is again the half-life of the seed-mean
+    curve, Σ(m) = ⟨S(m)⟩/⟨S(0)⟩ (eq. Sigma), now with a jackknife s.e.
+    (`mup/halflife.py`, `--stat mean`), because that is the root the
+    equations predict; `--stat seed` keeps the per-seed mean and both are
+    saved.  `mup/results.py` and the scripts in `old/` are unchanged and
+    still per-seed.
+  - "learning per task" → "hidden-layer learning per task" for λ in
+    labels, docstrings, configs and the README.

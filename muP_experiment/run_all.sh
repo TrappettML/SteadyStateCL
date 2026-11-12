@@ -28,7 +28,9 @@ cd "$(dirname "$0")" || exit 1
 # ---------------------------------------------------------------------------
 PY=${PY:-python}
 PLACE=${PLACE---gpus}                    # every card of the node, planned by mup.pool
-LAM=4                                    # learning per task λ (configs/stage1.yaml: lam [4.0])
+LAM=4                                    # hidden-layer learning per task λ (configs/stage1.yaml: lam [4.0])
+CLOCK=realized                           # task clock: realized = (ii), Λ_c = λ/ā²_c (write-up default); nominal = (i)
+STAT=mean                                # half-life: mean = root of the seed-mean curve Σ(m) = ½ (write-up); seed = per-seed mean
 SEEDS=20                                 # seeds 0 … SEEDS−1
 N_GRID="10 20 50"            # widths of Nscaling, weight_norms, imbalance_comp (D = 4N)
 KAPPAS="1 2 4"                           # κ of the same three; the note: "different kappa values (1,2,4)"
@@ -45,7 +47,7 @@ declare -A CMD
 #           50,1,0 and 20,1,4; the N = 50 cell is sqrtN here, as in the note.
 # ---------------------------------------------------------------------------
 CMD[training_verify]="scripts/run_training_verify.py --cell 100,2,1 50,sqrtN,0 20,1,4 200,2,1
-    --lam $LAM --seeds $SEEDS"
+    --lam $LAM --seeds $SEEDS --clock $CLOCK"
 
 # ---------------------------------------------------------------------------
 # 2. Exact gauge projection                             scripts/run_gauge_comp.py
@@ -53,29 +55,32 @@ CMD[training_verify]="scripts/run_training_verify.py --cell 100,2,1 50,sqrtN,0 2
 #    "Make the N = 100 and the κ be 1".  δ₀ is not given in the note: 0.
 #    Runs the config's stream, T_burn + T_meas = 1400 tasks at N = 100.
 # ---------------------------------------------------------------------------
-CMD[gauge_comp]="scripts/run_gauge_comp.py --N 100 --kappa 1 --delta0 0 --lam $LAM --seeds $SEEDS"
+CMD[gauge_comp]="scripts/run_gauge_comp.py --N 100 --kappa 1 --delta0 0 --lam $LAM --seeds $SEEDS --clock $CLOCK"
 
 # ---------------------------------------------------------------------------
 # 3. Half-life of a signal                              scripts/run_szero.py
 #    Note: S₀(t) against task t, "fixed N=100, and Δ0 = 0, and κ = 1".
 # ---------------------------------------------------------------------------
-CMD[szero]="scripts/run_szero.py --N 100 --kappa 1 --delta0 0 --lam $LAM --seeds $SEEDS --tasks 1400"
+CMD[szero]="scripts/run_szero.py --N 100 --kappa 1 --delta0 0 --lam $LAM --seeds $SEEDS --tasks 1400
+    --clock $CLOCK --stat $STAT"
 
 # ---------------------------------------------------------------------------
 # 4. Burn-in vs steady state (sTask)                    scripts/run_stask.py
 #    Note: "train for T=1400 ... then goes for τ = 1000 more tasks", same cell as szero.
 # ---------------------------------------------------------------------------
-CMD[stask]="scripts/run_stask.py --N 100 --kappa 1 --delta0 0 --lam $LAM --seeds $SEEDS --T 1400 --tau 1000"
+CMD[stask]="scripts/run_stask.py --N 100 --kappa 1 --delta0 0 --lam $LAM --seeds $SEEDS --T 1400 --tau 1000
+    --clock $CLOCK --stat $STAT"
 
 # ---------------------------------------------------------------------------
 # 5. Half-life vs N                                     scripts/run_Nscaling.py
 #    Note: train T, follow the memory of task T for T more; m½ against N; dotted
 #    theory, solid simulation; one panel per method, κ = 1, 2, 4 as colours.
-#    --theory nln2 draws N ln 2 (nk2: N ln 2 / κ²).
+#    --theory eq draws the half-life of each readout's equation of the write-up,
+#    (S_heads), (S_frozen), (S_learned); nln2 draws N ln 2, nk2 N ln 2 / κ².
 #    CHECK: the note gives no widths: N_GRID above.
 # ---------------------------------------------------------------------------
 CMD[Nscaling]="scripts/run_Nscaling.py --N $N_GRID --kappa $KAPPAS --delta0 0 --lam $LAM --seeds $SEEDS
-    --theory nln2"
+    --theory eq --clock $CLOCK --stat $STAT"
 
 # ---------------------------------------------------------------------------
 # 6. Weight norms                                       scripts/run_weight_norms.py
@@ -83,7 +88,8 @@ CMD[Nscaling]="scripts/run_Nscaling.py --N $N_GRID --kappa $KAPPAS --delta0 0 --
 #    CHECK: the note gives no widths or κ: N_GRID and KAPPAS above.  The GPU run of
 #           2026-11-06 used N = 10 20 50 100 200, κ = 1 2 4 8 and 20 seeds.
 # ---------------------------------------------------------------------------
-CMD[weight_norms]="scripts/run_weight_norms.py --N $N_GRID --kappa $KAPPAS --delta0 0 --lam $LAM --seeds $SEEDS"
+CMD[weight_norms]="scripts/run_weight_norms.py --N $N_GRID --kappa $KAPPAS --delta0 0 --lam $LAM --seeds $SEEDS
+    --clock $CLOCK"
 
 # ---------------------------------------------------------------------------
 # 7. Weight imbalance                                   scripts/run_imbalance_comp.py
@@ -92,7 +98,7 @@ CMD[weight_norms]="scripts/run_weight_norms.py --N $N_GRID --kappa $KAPPAS --del
 #    (configs/stage1.yaml uses −0.75 −0.5 0 1 4 16; the script default is 0 1 2 4).
 # ---------------------------------------------------------------------------
 CMD[imbalance_comp]="scripts/run_imbalance_comp.py --N $N_GRID --kappa $KAPPAS --delta0 -0.5 -0.25 0 1 2 4 --lam $LAM
-    --seeds $SEEDS"
+    --seeds $SEEDS --clock $CLOCK --stat $STAT"
 
 ORDER=(training_verify gauge_comp szero stask Nscaling weight_norms imbalance_comp)   # the note's order
 

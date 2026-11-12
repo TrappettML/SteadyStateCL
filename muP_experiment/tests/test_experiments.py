@@ -293,4 +293,10 @@ def test_loss_curves_match_stream_trace(small_runs):
     for j, t in enumerate(tasks):
         np.testing.assert_allclose(L[:, j, -1], ref["L_end"][t], rtol=1e-9, atol=1e-12)
         np.testing.assert_allclose(L[:, j, 1:], ref["trace"][:, t, :, TRACE_QUANT.index("loss")], rtol=1e-5, atol=1e-7)
-    assert np.all(L[:, :, 0] > L[:, :, -1])                     # every task is learned
+    # Every task is learned, except a gated task whose gate came up empty: at N = 10, κ = 1 that is
+    # (1 − 1/√10)^10 ≈ 2 % of gated tasks; it has no gradient, so its curve is exactly flat.
+    # Whether one occurs among these tasks depends on the backend's random stream (CPU vs GPU).
+    flat = np.all(L == L[:, :, :1], axis=2)
+    gated = np.array([r.gated == 1.0 for r in runs])
+    assert not flat[~gated].any() and flat.sum() <= 2, flat
+    assert np.all((L[:, :, 0] > L[:, :, -1]) | flat)

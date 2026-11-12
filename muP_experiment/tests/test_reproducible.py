@@ -1,4 +1,7 @@
-"""A 5-task run at N = 10 hashes to a stored value.
+"""A 5-task run at N = 10 under clock (i) hashes to a stored value.
+
+The stored hash predates the task clock (2026-11-11): it is taken under ``clock="nominal"`` and over the
+result keys of that date, so it proves that clock (i) still runs the dynamics it always did, bit for bit.
 
 Regenerate ``tests/reference_hash.txt`` deliberately (delete it and rerun) when the
 kernels change.  If the hash differs on another machine, that is FMA/compiler
@@ -12,20 +15,23 @@ import numpy as np
 import pytest
 
 from mup.config import Config, make_runs
-from mup.protocol import run_stream
+from mup.protocol import CLOCK_KEYS, run_stream
 
 REF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference_hash.txt")
 
 
 def _hash():
     cfg = Config(N=[10], readout=["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"],
-                 delta0=[1.0], lam=[1.0], seeds=1, T_factor=0.25, T_min=5)
+                 delta0=[1.0], lam=[1.0], seeds=1, T_factor=0.25, T_min=5,
+                 clock="nominal")      # clock (i): the dynamics the stored hash was made with
     from conftest import one_batch
     runs = one_batch(make_runs(cfg))
     assert runs[0].T_burn + runs[0].T_meas == 10
     res = run_stream(runs)
     h = hashlib.sha256()
     for k in sorted(res):
+        if k in CLOCK_KEYS:            # scalars added on 2026-11-11; left out so the stored hash still pins the dynamics
+            continue
         h.update(k.encode())
         h.update(np.ascontiguousarray(np.asarray(res[k], dtype=np.float64)).tobytes())
     return h.hexdigest()

@@ -11,9 +11,18 @@ where unit ("hidden-layer") gating has γ_cij = g_ci for every j.  The populatio
 and the projection onto Δ_i = Δ₀ (``model.project_rows``, with the norm of the whole row) runs on all N units
 after every step.  Everything else is the unit-gated run of the same ``config.Run``: the same ``State`` and
 ``Params``, the same run key, hence the same W⁽⁰⁾, initial readout, teachers (``draw_mask`` draws w_c from the
-key ``model.draw_task`` uses) and fresh heads, and the same task clock (h and n_steps of the run, the fixed
-nominal duration Λ = λ/(1 + δ₀)), so a synaptic run and its unit-gated twin differ in the mask alone and are
-compared at equal task duration.  Only the gated readouts have a synaptic form (``gated_shared``,
+key ``model.draw_task`` uses) and fresh heads, and the same step count n.  The task clock is the run's
+(``task_h``):
+
+clock (i), ``nominal``    the fixed duration Λ = λ/(1 + δ₀) of the unit-gated twin (its h), so the pair differs in
+    the mask alone and is compared at equal task duration: the condition of eq. (syn_Sigma), under which the
+    mean signals of the two gatings are equal at every age.
+clock (ii), ``realized``  (the default) Λ_c = λ/ā²_c at the MEAN rate over the input coordinates,
+    ā²_c = Σ_ij γ_cij a_i² / (pN D) (write-up, "Residual flow and learning per task" of the synaptic section).
+    Coordinate j then has the exponent λ ā²_cj/ā²_c ≈ λ n_cj/pN, a spread no clock removes, so S(0) = θ̄ of
+    eq. (syn_theta) and the heads decay as eq. (syn_heads) (``theory.syn_theta_bar``, ``theory.sigma_syn_heads``).
+
+Only the gated readouts have a synaptic form (``gated_shared``,
 ``gated_frozen``, ``task_heads``); ``State.g`` is unused and a stored head is the whole (N,) head, its mask
 being regenerated from the key like the teacher.  Population solver only.
 
@@ -72,6 +81,18 @@ def _project(a: jnp.ndarray, Q: jnp.ndarray, p: Params) -> tuple[jnp.ndarray, jn
     return jnp.where(on, jnp.sign(a) * jnp.sqrt(p.eta * Ap), a), Q * f * f, f
 
 
+def task_h(a: jnp.ndarray, M: jnp.ndarray, p: Params, n_steps: int) -> jnp.ndarray:
+    """Population step of one task under the run's clock — ``model.task_h`` with the mask on the synapse.
+
+    Clock (i): ``p.h``.  Clock (ii): h_c = λ/(η n ā²_c) with the mean rate over the input coordinates,
+    ā²_c = Σ_ij γ_ij a_i² / (pN D) (0 when no synapse is open); for a unit gate, γ_ij = g_i, this is
+    ``model.task_h``.
+    """
+    abar = (M * (a * a)[:, None]).sum() / (p.pN * M.shape[1])
+    h_real = jnp.where(abar > 0.0, p.lam / (p.eta * n_steps * jnp.where(abar > 0.0, abar, 1.0)), 0.0)
+    return jnp.where(p.clock == 1.0, h_real, p.h)
+
+
 def train_task(state: State, p: Params, *, n_steps: int, closed: bool = False) -> State:
     """One task of one run under synaptic gating — ``experiments.train_task`` with the mask on the synapse.
 
@@ -97,7 +118,7 @@ def train_task(state: State, p: Params, *, n_steps: int, closed: bool = False) -
     head = model.draw_readout(k_head, Q0, p)
     a = jnp.where(p.use_heads == 1.0, head, state.a)
     W = state.W
-    c = p.h * p.eta
+    c = task_h(a, M, p, n_steps) * p.eta
     t = state.t
     if closed:
         abar = (M * (a * a)[:, None]).sum(0) / p.pN                          # (D,) key norm of every coordinate
