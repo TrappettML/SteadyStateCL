@@ -442,6 +442,29 @@ curves, `{readout}` (n_seeds, 6, n_steps + 1), with `tasks`.
 Console: per readout the loss at the start and end of the first and the
 last traced task.
 
+### `run_loss_slope.py` — area under the current task's loss curve against task
+
+```
+python scripts/run_loss_slope.py [--N 100] [--kappa 1 2] [--delta0 0] [--lam 4] [--seeds 4] [--tasks T] [--gpus]
+```
+
+For every task of the stream the population loss of the task being
+trained is recorded before its first step and after each step, and the
+area between that curve and L = 0 is taken from the start of training on
+the task to its end (trapezoid rule, loss × steps;
+`experiments.loss_slopes`).  The loss is non-negative, so the area is
+positive, and it is smaller the lower the loss stays during the task.
+
+Output, in `results/loss_slope/figures/`: `loss_slope_N{N}_d0{δ₀}_lam{λ}.png`
+— one column per κ, x = task (log), y = the area, seed mean ± 1 s.e. band,
+one trace per readout; the ungated readouts are drawn in every column.
+`loss_slope_….npz` holds `area_k{κ}_{readout}`, `slope_…` (the
+least-squares slope of the curve per step), `loss_start_…` and
+`loss_end_…`, each (T, n_seeds), with `task`.
+
+Console: per readout the area of task 0 and its mean over the second half
+of the stream, beside n·L_start and the fitted slope.
+
 ## Readouts
 
 | key | gated | learns a | projection | heads | what it is |

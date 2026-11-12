@@ -300,3 +300,19 @@ def test_loss_curves_match_stream_trace(small_runs):
     gated = np.array([r.gated == 1.0 for r in runs])
     assert not flat[~gated].any() and flat.sum() <= 2, flat
     assert np.all((L[:, :, 0] > L[:, :, -1]) | flat)
+
+
+def test_loss_slopes_match_loss_curves(small_runs):
+    """The per-task area and slope are the trapezoid area and least-squares slope of that task's learning curve."""
+    T = 6
+    L = X.loss_curves(small_runs, list(range(T)), T, chunk=1)          # (B, T, n + 1)
+    S = X.loss_slopes(small_runs, T, chunk=4)
+    assert set(S) == set(X.SLOPE_KEYS) and all(v.shape == (T, len(small_runs)) for v in S.values())
+    steps = np.arange(L.shape[2])
+    ref = np.array([[np.polyfit(steps, L[b, t], 1)[0] for b in range(L.shape[0])] for t in range(T)])
+    np.testing.assert_allclose(S["slope"], ref, rtol=1e-9, atol=1e-13)
+    np.testing.assert_allclose(S["area"], (0.5 * (L[:, :, 1:] + L[:, :, :-1])).sum(2).T, rtol=1e-12)   # trapezoids (numpy 1.26 has no np.trapezoid)
+    np.testing.assert_allclose(S["loss_start"], L[:, :, 0].T, rtol=1e-12)
+    np.testing.assert_allclose(S["loss_end"], L[:, :, -1].T, rtol=1e-12)
+    assert np.all(S["slope"] <= 0.0) and np.all(S["area"] > 0.0)
+    assert np.all(S["area"] <= (len(steps) - 1) * S["loss_start"] * (1 + 1e-12))    # the loss never rises above its start

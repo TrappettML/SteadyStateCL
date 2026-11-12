@@ -20,6 +20,7 @@ run in this order, every parameter written out, by `run_all.sh`
 | `scripts/run_weight_norms.py` | weight norms against task and against N | §6.5 |
 | `scripts/run_imbalance_comp.py` | weight norms and m½ across δ₀ | §6.6 |
 | `scripts/run_training_verify.py` | per-step loss at the start, middle and end of the stream | §6.7 |
+| `scripts/run_loss_slope.py` | area under the current task's loss curve against task (not in `run_all.sh`) | §6.8 |
 
 **Old code lives in `old/`.** The scripts of the earlier, sweep-based
 version of the experiments (`run_sweep.py`, `analyze.py`, `plot_norms.py`,
@@ -499,6 +500,26 @@ a warning as a bug in the figure.
   marks between the panels; `plot_readout` + `band` (seed mean ± s.e.);
   `.npz`: `{readout}` (n_seeds, 6, n_steps + 1), `tasks`, `step`.
 
+### 6.8 `run_loss_slope.py` — area under the current task's loss curve against task
+
+- Cells `(N, κ, δ₀, λ)` and `groups` from `run_szero`; defaults N = 100,
+  δ₀ = 0, 4 seeds, κ = the config's (`1, 2`), the config's stream.
+- `experiments.loss_slopes(runs, T)`: `slope_kernel` scans `slope_task`
+  (`loss_task` reduced by `curve_area` and `fit_slope`) over every task →
+  `{key: (T, B)}` over `SLOPE_KEYS = (area, slope, loss_start, loss_end)`.
+  `area` is the trapezoid area between the n_steps + 1 points of the
+  learning curve and L = 0, in loss × steps: positive (the loss is ≥ 0),
+  n·L_start for a task that learns nothing, smaller for a task that starts
+  lower or is learned faster.  `slope` is the least-squares slope of the
+  same points per step (what the script plotted first; kept in the `.npz`).
+  Both are per step, not per unit α: under the realized clock the step
+  `h_c` differs between tasks and readouts.  Every task is stepped (no
+  closed form).  `tests/test_experiments.py` pins both to `loss_curves`.
+- Figure `loss_slope_N{N}_d0{δ₀}_lam{λ}`: `grid(1, n_κ, sharey="row")`, one
+  column per κ, x = t + 1 (log), y = seed-mean area ± s.e. band, one trace
+  per readout; the ungated readouts are the same runs in every column.
+  `.npz`: `{key}_k{κ}_{readout}` (T, n_seeds), `task`.
+
 ## 7. Plotting conventions used (`mup/plotting.py`)
 
 `apply_style()` first in every figure function.  Panels from
@@ -651,3 +672,9 @@ regenerate.
     still per-seed.
   - "learning per task" → "hidden-layer learning per task" for λ in
     labels, docstrings, configs and the README.
+- 2026-11-12: `scripts/run_loss_slope.py` added (§6.8) with
+  `experiments.fit_slope`, `slope_task`, `slope_kernel`, `loss_slopes` and
+  `SLOPE_KEYS`; no existing kernel changed.
+- 2026-11-12 (later): `run_loss_slope.py` plots the area under the task's
+  loss curve instead of its fitted slope (`experiments.curve_area`, `area`
+  first in `SLOPE_KEYS`); the slope stays in the `.npz`.

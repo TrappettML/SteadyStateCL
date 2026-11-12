@@ -420,6 +420,61 @@ def loss_curves(runs: Sequence, tasks: Sequence[int], T: int, chunk: Optional[in
     return _expand(np.stack(out, 1), ok, axis=0)
 
 
+#: Per-task summary of the learning curve (``slope_task``), in output order.
+SLOPE_KEYS = ("area", "slope", "loss_start", "loss_end")
+
+
+def fit_slope(L: jnp.ndarray) -> jnp.ndarray:
+    """Least-squares slope of ``L`` (…, n) against its index 0 … n − 1: the first-order (straight-line)
+    approximation of the curve, Σ_i (i − ī) L_i / Σ_i (i − ī)² (the mean of ``L`` drops out since Σ_i (i − ī) = 0)."""
+    n = L.shape[-1]
+    i = jnp.arange(n, dtype=L.dtype) - (n - 1) / 2.0
+    return (L * i).sum(-1) / (i * i).sum()
+
+
+def curve_area(L: jnp.ndarray) -> jnp.ndarray:
+    """Area between ``L`` (…, n) and 0 over its index 0 … n − 1 by the trapezoid rule: Σ_i L_i − (L_0 + L_{n−1})/2."""
+    return L.sum(-1) - 0.5 * (L[..., 0] + L[..., -1])
+
+
+def slope_task(state: State, p: Params, *, n_steps: int, solver: str, K: int) -> tuple[State, jnp.ndarray]:
+    """``loss_task`` reduced to (4,) ``SLOPE_KEYS``: the area between the task's learning curve and 0 over its
+    n_steps steps (``curve_area``, loss × steps), the slope per step of the straight line fitted to the curve
+    (``fit_slope`` over its n_steps + 1 points), and the loss before the first step and after the last."""
+    state, L = loss_task(state, p, n_steps=n_steps, solver=solver, K=K)
+    return state, jnp.stack([curve_area(L), fit_slope(L), L[0], L[-1]])
+
+
+@functools.lru_cache(maxsize=None)
+def slope_kernel(n_steps: int, solver: str, n_tasks: int, K: int) -> Callable:
+    """``f(state, p) -> (state, X)`` with ``X`` (n_tasks, B, 4) the ``SLOPE_KEYS`` of each task; state donated."""
+    vf = jax.vmap(functools.partial(slope_task, n_steps=n_steps, solver=solver, K=K))
+
+    def run(state, p):
+        return jax.lax.scan(lambda s, _: vf(s, p), state, None, length=n_tasks)
+
+    return jax.jit(run, donate_argnums=(0,))
+
+
+def loss_slopes(runs: Sequence, T: int, chunk: Optional[int] = None) -> dict:
+    """``{key: (T, B)}`` over ``SLOPE_KEYS`` for each of the ``T`` tasks of a stream (``run_loss_slope.py``).
+
+    Every task is stepped (never the closed form), as in ``loss_curves``; NaN columns for infeasible runs.
+    """
+    r0 = runs[0]
+    state, p, ok, (K, _) = _batch(runs, T)
+    if state is None:
+        return {q: np.full((T, len(runs)), np.nan) for q in SLOPE_KEYS}
+    X = []
+    prog = pool.Progress(T)
+    for n in chunks(T, chunk):
+        state, x = slope_kernel(r0.n_steps, r0.solver, n, K)(state, p)
+        X.append(np.asarray(x))
+        prog.add(n)
+    X = _expand(np.concatenate(X, 0), ok)                        # (T, B, 4)
+    return {q: X[:, :, i] for i, q in enumerate(SLOPE_KEYS)}
+
+
 def stream_batch(runs: Sequence, chunk: Optional[int] = None) -> dict:
     """``protocol.run_stream`` of one sweep batch (``validate.py``, ``run_sigma0.py``), reporting every tenth of its tasks."""
     T = runs[0].T_burn + runs[0].T_meas
