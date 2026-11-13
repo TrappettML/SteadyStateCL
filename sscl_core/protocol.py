@@ -21,10 +21,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import mup._x64  # noqa: F401  (enables x64)
-from mup import device, model
-from mup.model import Params, State
-from mup.observe import Moments, age_schedule, evaluate_probes
+import sscl_core._x64  # noqa: F401  (enables x64)
+from sscl_core import device, model
+from sscl_core.model import Params, State
+from sscl_core.observe import Moments, age_schedule, evaluate_probes
 
 #: Keys of PLAN.md §12.1 recorded both before (``_pre``) and after (``_post``) the last
 #: projection of a task.
@@ -47,8 +47,9 @@ TRACE_QUANT = ("Q_act_pre", "Q_act_post", "Q_all", "a2_act", "aQ_act", "logf", "
 
 def _step_fn(p: Params, solver: str, k_stream: jnp.ndarray) -> Callable:
     """Return ``step(state, i) -> state`` for the solver; ``i`` is the step index of the task."""
-    if solver == "sgd":
-        return lambda s, i: model.sgd_step(s, p, jax.random.fold_in(k_stream, i))
+    if solver.startswith("sgd"):
+        B = model.sgd_batch(solver)
+        return lambda s, i: model.sgd_step(s, p, jax.random.fold_in(k_stream, i), B)
     if solver == "pop":
         return lambda s, i: model.pop_step(s, p)
     raise ValueError(f"unknown solver {solver!r}")
@@ -173,7 +174,7 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
     post["heads_fro2"] = model.heads_fro2(state.heads, t + 1)
 
     # duration of the task in τ = ηα: n population steps of h (the task's own under clock (ii)), or n/D SGD steps
-    h_eta = p.eta * r["h"] if solver == "pop" else p.eta / D
+    h_eta = p.eta * r["h"] if solver == "pop" else p.eta * model.sgd_batch(solver) / D
     Lam_c = n_steps * h_eta
     # hη(ā²_c + tr M_c) ≥ hη(ā²_c + ‖M_c‖), tr M_c = (n_c/pN) Q̄_c: eq. (popstab) for a projected readout, where
     # ā²_c = (n_c/pN)(δ₀ + Q̄_c); the hidden channel alone, hη ā²_c, for a frozen one (no readout channel)
@@ -393,7 +394,7 @@ def trace_indices(n_steps: int, solver: str, n_points: int) -> np.ndarray:
     """
     if n_steps <= n_points:
         return np.arange(n_steps, dtype=np.int32)
-    if solver == "sgd":
+    if solver.startswith("sgd"):
         idx = np.unique(np.round(np.geomspace(1, n_steps - 1, n_points - 1)).astype(np.int64))
         idx = np.concatenate([[0], idx])
     else:

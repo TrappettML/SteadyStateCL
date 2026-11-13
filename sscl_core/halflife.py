@@ -25,7 +25,7 @@ from typing import Callable, Iterable
 
 import numpy as np
 
-from mup.theory import first_half_crossing
+from sscl_core.theory import first_half_crossing
 
 #: The statistics, in the order the scripts offer them (``add_arg``).
 STATS = ("mean", "seed")

@@ -10,7 +10,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-import mup._x64  # noqa: F401  (enables x64)
+import sscl_core._x64  # noqa: F401  (enables x64)
 
 
 class Params(NamedTuple):
@@ -287,16 +287,29 @@ def active_qmax(W: jnp.ndarray, g: jnp.ndarray, K: int) -> jnp.ndarray:
 # ----------------------------------------------------------------------------
 # steps
 # ----------------------------------------------------------------------------
-def sgd_step(state: State, p: Params, k: jnp.ndarray) -> State:
+def sgd_batch(solver: str) -> int:
+    """Samples per SGD step of a solver token: 1 for ``"sgd"``, B for ``"sgd{B}"`` (``config.solver_token``), 0 for
+    the population solver."""
+    if not solver.startswith("sgd"):
+        return 0
+    return int(solver[3:] or 1)
+
+
+def sgd_step(state: State, p: Params, k: jnp.ndarray, batch: int = 1) -> State:
     """
-    One online-SGD step, eqs. (sgdW)–(sgda), simultaneous update on the active units.
+    One SGD step, eqs. (sgdW)–(sgda), simultaneous update on the active units.
+
+    With ``batch`` = B > 1 the step is the SUM of the B single-sample updates of eqs. (sgdW)–(sgda), each computed
+    at the weights the step starts with, from B fresh inputs: per sample the drift and the noise are those of
+    online SGD at the same η, and a task takes B times fewer steps (B = 1 is the online step, bit for bit).
 
     Parameters
     ----------
     state : State
     p : Params
     k : PRNGKey
-        Key of this step's input x ~ N(0, I_D).
+        Key of this step's input x ~ N(0, I_D) (of its B inputs, drawn together as (B, D)).
+    batch : int (static)
 
     Returns
     -------
@@ -307,9 +320,16 @@ def sgd_step(state: State, p: Params, k: jnp.ndarray) -> State:
     W, a, g, w = state.W, state.a, state.g, state.w
     D = W.shape[1]
     sqD = jnp.sqrt(D)
+    ga = g * a
+    if batch > 1:
+        X = jax.random.normal(k, (batch, D), dtype=W.dtype)
+        hx = W @ X.T / sqD                                          # (N, B)
+        e = ga @ hx / p.pN - X @ w / sqD                            # (B,)
+        W_n = W - p.eta * ga[:, None] * (e @ X)[None, :] / sqD
+        a_n = a - p.learn_a * p.eta / D * g * (hx @ e)
+        return state._replace(W=W_n, a=a_n)
     x = jax.random.normal(k, (D,), dtype=W.dtype)
     hx = W @ x / sqD
-    ga = g * a
     e = ga @ hx / p.pN - w @ x / sqD
     W_n = W - p.eta * ga[:, None] * e * x[None, :] / sqD
     a_n = a - p.learn_a * p.eta / D * g * e * hx
@@ -766,7 +786,8 @@ def train_block(W, a, g, w, p: Params, k_stream, *, n_steps: int, solver: str, K
     p : Params
     k_stream : PRNGKey of the task's input stream (SGD)
     n_steps : int (static), ≥ 1
-    solver : {"pop", "sgd"} (static)
+    solver : {"pop", "sgd", "sgd{B}"} (static)
+        ``"sgd{B}"`` (``sgd_batch``): B fresh samples per step, their single-sample updates summed.
     K : int (static)
         Block rows (``block_rows``); N runs every row without a gather.
     closed : bool (static)
@@ -787,6 +808,7 @@ def train_block(W, a, g, w, p: Params, k_stream, *, n_steps: int, solver: str, K
         Every array is NaN when more than ``K`` units are active.
     """
     assert n_steps >= 1
+    n_batch = sgd_batch(solver)                                  # 0: population steps; B ≥ 1: SGD with B samples per step
     N, D = W.shape
     sqD = jnp.sqrt(D)
     n_act = g.sum()
@@ -808,7 +830,16 @@ def train_block(W, a, g, w, p: Params, k_stream, *, n_steps: int, solver: str, K
     def solve(Wb, ab, Qb, s, i):
         """One solver step on the lazy block: (W̃, a, Q) → (W̃, a, Q), s unchanged."""
         ma = m * ab
-        if solver == "sgd":
+        if n_batch > 1:                                             # the sum of B single-sample updates (``sgd_step``)
+            X = jax.random.normal(jax.random.fold_in(k_stream, i), (n_batch, D), dtype=W.dtype)
+            hx = s[:, None] * (Wb @ X.T) / sqD                      # (K, B)
+            e = ma @ hx / p.pN - X @ w / sqD                        # (B,)
+            c = p.eta / sqD
+            v = e @ X                                               # (D,): W_i ← W_i − c·a_i v
+            he = hx @ e                                             # (K,): W_i·v = √D (hx e)_i
+            a_new = ab - p.learn_a * p.eta / D * m * he
+            Q_new = Qb - (2.0 * c / D) * ma * (he * sqD) + (c * c / D) * ma * ma * (v @ v)
+        elif n_batch == 1:
             x = jax.random.normal(jax.random.fold_in(k_stream, i), (D,), dtype=W.dtype)
             hx = s * (Wb @ x) / sqD
             e = ma @ hx / p.pN - w @ x / sqD

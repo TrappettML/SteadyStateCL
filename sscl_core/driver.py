@@ -28,7 +28,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
-from mup import io
+from sscl_core import io
 
 #: Thread pinning for CPU workers (PLAN.md decision 5): XLA and BLAS single-threaded.
 PINNED_ENV = {
@@ -53,7 +53,7 @@ GPU_ENV = {
 GPU_MEM_SHARE = 0.9
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUN_SWEEP = os.path.join(os.path.dirname(HERE), "old", "run_sweep.py")
+RUN_SWEEP = os.path.join(os.path.dirname(HERE), "muP_experiment", "old", "run_sweep.py")   # archived sweep driver
 
 
 def visible_gpus() -> list[int]:

@@ -41,6 +41,11 @@ READOUT_LABEL = {
 READOUT_STYLE = {
     "gated_shared": "-", "learned_shared": "--", "gated_frozen": "-", "frozen": "--", "task_heads": "-",
 }
+#: the model ladder of ``scripts/run_nested.py`` (``sscl_core.nested.MODELS``); SGD is dashed because it lies on gradient flow
+MODEL_COLOR = {"sgd": "#E69F00", "gf": "#0072B2", "delta_matched": "#009E73", "delta_raw": "#CC79A7", "hebb": "#D55E00"}
+MODEL_LABEL = {"sgd": "SGD", "gf": "gradient flow", "delta_matched": "Δ-matched", "delta_raw": "Δ-raw", "hebb": "Hebb"}
+MODEL_STYLE = {"sgd": "--", "gf": "-", "delta_matched": "-", "delta_raw": ":", "hebb": "-"}
+MODEL_MARKER = {"sgd": "s", "gf": "o", "delta_matched": "^", "delta_raw": "v", "hebb": "D"}
 #: one sequential blue for width N when it is a trace rather than a column (light → dark)
 N_SHADES = ["#c6dbef", "#9ecae1", "#6baed6", "#3182bd", "#08519c", "#08306b"]
 GREY_REF, GREY_BURNIN, GREY_CAPTION, GREY_NA, RED_FLAG = "0.4", "0.92", "0.3", "0.85", "#CC0000"
@@ -511,7 +516,7 @@ def cell_title(fig, kappa=None, d0=None, lam=None, solver=None, eta=None, extra:
     if lam is not None:
         parts.append(rf"$\lambda$ = {fmt(lam)}")
     if solver is not None:
-        parts.append({"pop": "population", "sgd": "SGD"}.get(solver, solver) + (rf", $\eta$ = {fmt(eta)}" if eta is not None else ""))
+        parts.append({"pop": "population", "sgd": "SGD"}.get(solver, f"SGD, batch {solver[3:]}" if str(solver).startswith("sgd") else solver) + (rf", $\eta$ = {fmt(eta)}" if eta is not None else ""))
     if extra:
         parts.append(mathify(extra))
     w, h = fig.get_size_inches()
@@ -585,7 +590,7 @@ def readout_handles(readouts=None, solid: bool = False, marker: bool = False) ->
     marker : bool
         Marker handles (hollow for ungated) instead of lines.
     """
-    from mup.config import is_gated
+    from sscl_core.config import is_gated
     ros = [r for r in READOUT_COLOR if readouts is None or r in set(readouts)]
     out = []
     for r in ros:
@@ -635,6 +640,12 @@ def fig_legend(fig, readouts=None, styles=None, handles=None, solid: bool = Fals
     fig._mup["legend"] = leg
     _relayout(fig)
     return leg
+
+
+def model_handles(models, marker: bool = False) -> list:
+    """Legend handles of the nested-model ladder (``MODEL_COLOR``), in the order given."""
+    return [Line2D([], [], color=MODEL_COLOR[m], ls=MODEL_STYLE[m], lw=LW_TRACE, label=MODEL_LABEL[m],
+                   marker=MODEL_MARKER[m] if marker else None) for m in models]
 
 
 def label_cols_N(axes, Ns) -> None:
@@ -984,7 +995,7 @@ def dist_by_readout(ax, values_by_readout: dict, band: float | None = 3.0, clip:
     seed : int
         Jitter seed (deterministic).
     """
-    from mup.config import is_gated
+    from sscl_core.config import is_gated
     na = na or {}
     ros = [r for r in READOUT_COLOR if r in values_by_readout or r in na]
     rng = np.random.default_rng(seed)

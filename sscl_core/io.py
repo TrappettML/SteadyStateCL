@@ -10,7 +10,7 @@ from typing import Optional
 
 import numpy as np
 
-from mup.config import Config, Run, make_batches, make_runs
+from sscl_core.config import Config, Run, make_batches, make_runs
 
 SCHEMA_VERSION = 4   # 4: task clock (ii) by default and the start-of-task scalars protocol.CLOCK_KEYS (2026-11-11); 3: masked stored heads, κ-free age schedule, σ₀ (2026-11-06); 2: §12.1 norm scalars; 1: the original set
 
@@ -153,7 +153,7 @@ def save_traces(out_dir: str, batch_id: int, res: dict, runs: list[Run]) -> list
     list of str
         Paths written.
     """
-    from mup.protocol import TRACE_QUANT
+    from sscl_core.protocol import TRACE_QUANT
     tdir = traces_dir(out_dir)
     os.makedirs(tdir, exist_ok=True)
     paths = []

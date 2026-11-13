@@ -1,8 +1,8 @@
-"""float64 NumPy port of the single-run kernels of ``mup.model`` (PLAN.md §2–§3), JAX-free.
+"""float64 NumPy port of the single-run kernels of ``sscl_core.model`` (PLAN.md §2–§3), JAX-free.
 
 The reference of ``tests/test_npmodel.py`` (``run_Nscaling.py`` and
 ``run_weight_norms.py`` ran on it until 2026-11-05, when they moved to the
-JAX kernels of ``mup.experiments`` for the GPU node): a run is a plain
+JAX kernels of ``sscl_core.experiments`` for the GPU node): a run is a plain
 Python loop over tasks with no compilation, and the package's JAX modules
 are never imported.  A run's
 random stream is ``numpy.random.default_rng(run.rng_seed())``, so its draws
@@ -15,7 +15,7 @@ import math
 import numpy as np
 from scipy.linalg import blas
 
-from mup.config import Run
+from sscl_core.config import Run
 
 
 def Q_diag(W: np.ndarray) -> np.ndarray:

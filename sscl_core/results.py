@@ -15,9 +15,9 @@ import numpy as np
 
 import warnings
 
-from mup import io
-from mup.config import Run, is_gated
-from mup.observe import Moments, curves, half_life
+from sscl_core import io
+from sscl_core.config import Run, is_gated
+from sscl_core.observe import Moments, curves, half_life
 
 #: Condition key fields, in order.
 COND_KEYS = ("N", "kappa_label", "readout", "delta0", "lam", "solver", "eta")

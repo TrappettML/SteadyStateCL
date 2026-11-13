@@ -1,7 +1,7 @@
 """Batched kernels and job functions of the experiment scripts (PLAN.md §12.10–§12.13, §7.7).
 
 Every script in ``scripts/`` that trains networks reduces to jobs over
-``run_jobs`` (``mup.pool``): a job takes a list of ``config.Run`` sharing
+``run_jobs`` (``sscl_core.pool``): a job takes a list of ``config.Run`` sharing
 ``(N, D, solver, n_steps)`` — every readout, κ and seed of a cell or of an
 (N, T) group together — and runs them as ONE ``vmap`` batch, scanning
 ``chunk`` tasks per device call (``device.default_chunk``: 16 on a GPU, 1 on
@@ -29,11 +29,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import mup._x64  # noqa: F401  (enables x64)
-from mup import device, model, pool
-from mup.model import Params, State
-from mup.observe import Moments, curves
-from mup.protocol import _step_and_project, _step_fn, block_of, feasible, make_params, batched_init, run_stream
+import sscl_core._x64  # noqa: F401  (enables x64)
+from sscl_core import device, model, pool
+from sscl_core.model import Params, State
+from sscl_core.observe import Moments, curves
+from sscl_core.protocol import _step_and_project, _step_fn, block_of, feasible, make_params, batched_init, run_stream
 
 
 # ----------------------------------------------------------------------------
@@ -279,7 +279,7 @@ def _expand(X: np.ndarray, ok: np.ndarray, axis: int = 1) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------
-# job functions (``"mup.experiments:<name>"`` for ``pool.run_jobs``)
+# job functions (``"sscl_core.experiments:<name>"`` for ``pool.run_jobs``)
 # ----------------------------------------------------------------------------
 def signal_after_tasks(runs: Sequence, T_pre: int, n_follow: int, k: int, chunk: Optional[int] = None) -> np.ndarray:
     """Train ``T_pre`` tasks, then ``n_follow`` more recording probe ``k``'s signal after each: (n_follow, B).

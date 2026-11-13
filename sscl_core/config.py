@@ -5,12 +5,14 @@ import dataclasses
 import hashlib
 import itertools
 import math
+
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 import yaml
 
-from mup import theory
+from sscl_core import theory
 
 #: Task clocks of the write-up ("Decision: the task clock") → ``Params.clock``.
 #: "nominal": (i) every task lasts Λ = λ/ā²_nom, ā²_nom = 1 + δ₀.
@@ -70,8 +72,11 @@ class Config:
     burn_halflives : burn-in the config must cover, in half-lives of the slowest readout (task heads,
         N ln 2/(θν)); ``make_runs`` notes the runs that fall short (``theory.burn_in_halflives``)
     seeds : int (→ range) or explicit list
-    solver : "pop" or "sgd"
-    eta : per-run η (pop: 1; sgd: values with η ā² ≤ sgd_contraction)
+    solver : "sgd" (online SGD, the default) or "pop" (population-gradient steps)
+    eta : per-run η, numbers or "auto" (the default; ``resolve_eta``: sgd → sgd_contraction/(1 + δ₀), the largest
+        rate with η ā²_nom ≤ sgd_contraction; pop → 1)
+    sgd_batch : samples per SGD step B (default 1, online SGD); a step sums the B single-sample updates at the
+        same η, so a task takes n = round(λD/(η ā²_nom B)) steps (``model.sgd_step``); ignored by the population solver
     h_max, pop_contraction, sgd_contraction : step-size rules of §3.6
     D_factor, T_factor, T_per_N, T_min : D = D_factor·N; T_burn = T_meas = max(T_min, round(T_per_N·N)) when
         T_per_N > 0 (a fixed number of measured half-lives, PLAN.md §12.3), else max(T_min, round(T_factor·N/κ_s²))
@@ -88,11 +93,12 @@ class Config:
     delta0: Sequence[float] = (0.0,)
     lam: Sequence[float] = (1.0,)
     seeds: Any = 2                          # int (→ range) or explicit list
-    solver: str = "pop"                     # "pop" | "sgd"
-    eta: Sequence[float] = (1.0,)           # per-run η (pop: 1; sgd: values with η ā² ≤ 0.05)
+    solver: str = "sgd"                     # "sgd" (default) | "pop"
+    eta: Sequence[Any] = ("auto",)          # per-run η: numbers or "auto" (sgd: sgd_contraction/(1 + δ₀); pop: 1)
     h_max: float = 1.0                      # cap on the population step in α
     pop_contraction: float = 0.1            # h η ā² ≤ this
     sgd_contraction: float = 0.05           # η ā² ≤ this
+    sgd_batch: int = 1                      # samples per SGD step (their updates summed at the same η); 1 = online SGD
     D_factor: int = 4                       # D = D_factor · N
     T_factor: float = 10.0                  # T_burn = T_meas = T_factor · N / κ_s² (when T_per_N is 0)
     T_per_N: float = 0.0                    # > 0: T_burn = T_meas = T_per_N · N, independent of κ (PLAN.md §12.3 M4–M8, burn-in)
@@ -180,6 +186,8 @@ class Run:
     sigma0: float = 1.0                     # W⁽⁰⁾_ij ~ N(0, σ₀²); 1 unless check 5 sweeps it
     #: task clock (``CLOCKS``); "nominal" for batch files written before 2026-11-11, which ran clock (i)
     clock: str = "nominal"
+    #: samples per SGD step; ``solver`` is then the kernel token ``"sgd{B}"`` (``solver_token``).  0 for the population solver
+    sgd_batch: int = 1
 
     @property
     def clock_id(self) -> float:
@@ -251,7 +259,7 @@ class Run:
 
     def block_rows(self) -> int:
         """Rows of the active block the steps run on (``model.block_rows``)."""
-        from mup.model import block_rows
+        from sscl_core.model import block_rows
         return block_rows(self.N, self.pN, self.gated == 1.0)
 
     def rng_seed(self) -> int:
@@ -318,6 +326,33 @@ class Run:
         return cls(**d)
 
 
+def solver_token(solver: str, sgd_batch: int = 1) -> str:
+    """``Run.solver``, the static solver argument of every kernel: ``"pop"``, ``"sgd"`` (online, one sample per
+    step) or ``"sgd{B}"`` for B > 1 samples per step (``model.sgd_batch`` reads B back).  The batch is part of the
+    token because it sets array shapes, so kernels are compiled, cached and batched (``group_key``) per B."""
+    return f"sgd{int(sgd_batch)}" if solver == "sgd" and int(sgd_batch) > 1 else solver
+
+
+def resolve_eta(eta: Any, solver: str, delta0: float, cfg: Config) -> float:
+    """
+    The rate of a run from an entry of ``Config.eta``.
+
+    A number is returned as it is.  ``"auto"`` is the default rate of the solver: 1 for the population solver
+    (η only sets the unit of time there) and, for SGD, the largest rate ``task_duration`` accepts at this δ₀,
+    η = sgd_contraction/(1 + δ₀) (nudged down when rounding puts η ā²_nom above the bound), so every δ₀ of a
+    grid runs the same n = round(λD/sgd_contraction) steps per task.
+    """
+    if not (isinstance(eta, str) and eta.lower() == "auto"):
+        return float(eta)
+    if solver != "sgd":
+        return 1.0
+    abar2 = 1.0 + delta0
+    out = cfg.sgd_contraction / abar2
+    while out * abar2 > cfg.sgd_contraction:
+        out = float(np.nextafter(out, 0.0))
+    return out
+
+
 def task_duration(solver: str, lam: float, eta: float, delta0: float, cfg: Config, D: int) -> tuple[int, float, float]:
     """
     Steps per task from the deterministic ā²_nom = 1 + δ₀ (PLAN.md §3.6; write-up "Population step h").
@@ -327,7 +362,9 @@ def task_duration(solver: str, lam: float, eta: float, delta0: float, cfg: Confi
     step of clock (ii); under clock (ii) the step count n is kept and each task takes its own
     h_c = λ/(η n ā²_c) (``model.task_h``), so hη ā²_c = λ/n ≤ 0.1 holds for the realized key norm.
     The rule resolves the hidden channel only; the readout channel is covered by eq. (popstab)
-    (``Run.popstab``, checked in ``make_runs``).  SGD: n = round(λD/(η ā²_nom)), η ā²_nom ≤ ``sgd_contraction``.
+    (``Run.popstab``, checked in ``make_runs``).  SGD: n = round(λD/(η ā²_nom B)) with B = ``cfg.sgd_batch`` samples
+    per step, η ā²_nom ≤ ``sgd_contraction``; a step of B summed samples spans B/D of α, a population step of
+    h = B/D with sampling noise, so B must also keep (B/D) η ā²_nom ≤ ``pop_contraction`` (B ≤ 2D at the defaults).
 
     Parameters
     ----------
@@ -354,8 +391,11 @@ def task_duration(solver: str, lam: float, eta: float, delta0: float, cfg: Confi
     if solver == "sgd":
         if eta * abar2 > cfg.sgd_contraction:
             raise ValueError(f"SGD needs η ā² ≤ {cfg.sgd_contraction}; got η={eta}, δ₀={delta0}")
-        n_steps = max(1, int(round(alpha_task * D)))
-        return n_steps, 0.0, n_steps / D
+        B = int(cfg.sgd_batch)
+        if B < 1 or B / D * eta * abar2 > cfg.pop_contraction * (1 + 1e-12):
+            raise ValueError(f"sgd_batch = {B} needs 1 ≤ B and (B/D) η ā² ≤ {cfg.pop_contraction}; got D={D}, η={eta}, δ₀={delta0}")
+        n_steps = max(1, int(round(alpha_task * D / B)))
+        return n_steps, 0.0, n_steps * B / D
     if solver == "pop":
         h = min(cfg.h_max, cfg.pop_contraction / (eta * abar2))
         n_steps = int(math.ceil(alpha_task / h - 1e-12))
@@ -475,14 +515,15 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
                     if delta0 <= -sigma0 ** 2:
                         raise ValueError(f"δ₀ = {delta0} ≤ −σ₀² = {-sigma0 ** 2:g} makes the initial readout imaginary "
                                          f"(a_i² = δ₀ + Q_ii with Q_ii ≈ σ₀²)")
+                    eta = resolve_eta(eta, cfg.solver, delta0, cfg)
                     n_steps, h, alpha = task_duration(cfg.solver, lam, eta, delta0, cfg, D)
                     runs.append(Run(
                         N=N, D=D, kappa=kappa, readout=readout, delta0=float(delta0), lam=float(lam),
-                        seed=int(seed), solver=cfg.solver, eta=float(eta), h=float(h), n_steps=int(n_steps),
+                        seed=int(seed), solver=solver_token(cfg.solver, cfg.sgd_batch), eta=float(eta), h=float(h), n_steps=int(n_steps),
                         alpha_task=float(alpha), T_burn=T_half, T_meas=T_half, kappa_label=klabel, kappa_sched=float(kappa_s),
                         n_ages_geom=int(cfg.n_ages_geom), m_max_factor=float(cfg.m_max_factor),
                         trace=bool(cfg.trace), trace_points=int(cfg.trace_points), sigma0=float(sigma0),
-                        clock=clock,
+                        clock=clock, sgd_batch=int(cfg.sgd_batch) if cfg.solver == "sgd" else 0,
                     ))
     _note_checks(cfg, runs)
     return runs
@@ -594,12 +635,20 @@ def make_batches(runs: Sequence[Run], batch_size: int) -> list[list[Run]]:
 
 
 def add_clock_arg(ap) -> None:
-    """Add ``--clock`` to a script's argument parser (default: the config's, clock (ii) ``realized``)."""
+    """Add ``--clock`` (default: the config's, clock (ii) ``realized``) and ``--sgd_batch`` (default: the config's,
+    1) to a script's argument parser."""
+    ap.add_argument("--sgd_batch", type=int, default=None,
+                    help="samples per SGD step, their updates summed at the same η: a task takes B times fewer steps "
+                         "(default: the config's, 1 = online SGD; no effect on the population solver)")
     ap.add_argument("--clock", choices=list(CLOCKS), default=None,
                     help="task clock of the write-up: 'realized' = (ii), every task lasts Λ_c = λ/ā²_c with its own "
                          "key norm (the default); 'nominal' = (i), every task lasts Λ = λ/(1 + δ₀) (default: the config's)")
 
 
 def clock_override(args) -> dict:
-    """``{"clock": …}`` for a ``Config`` override when ``--clock`` was given, else ``{}``."""
-    return {"clock": args.clock} if getattr(args, "clock", None) else {}
+    """The ``Config`` overrides of ``add_clock_arg``: ``clock`` when ``--clock`` was given and ``sgd_batch`` when
+    ``--sgd_batch`` was."""
+    out = {"clock": args.clock} if getattr(args, "clock", None) else {}
+    if getattr(args, "sgd_batch", None) is not None:
+        out["sgd_batch"] = int(args.sgd_batch)
+    return out

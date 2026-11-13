@@ -1,6 +1,6 @@
 """Which backend JAX is running on, and the per-backend defaults of the task loop.
 
-Nothing here imports ``jax`` at module load beyond ``mup._x64`` (which only
+Nothing here imports ``jax`` at module load beyond ``sscl_core._x64`` (which only
 sets the x64 flag), so the config and plotting modules stay JAX-free.
 
 Environment variables read here:
@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-import mup._x64  # noqa: F401  (enables x64 before any array exists)
+import sscl_core._x64  # noqa: F401  (enables x64 before any array exists)
 
 #: Tasks per device call on a GPU.  One call per task leaves a V100/A100 idle
 #: between kernel launches and host syncs at the Stage-1 sizes (N ≤ 200);

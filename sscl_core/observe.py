@@ -6,8 +6,8 @@ import numpy as np
 
 import jax
 
-import mup._x64  # noqa: F401  (enables x64)
-from mup.model import Params, State, probe_task
+import sscl_core._x64  # noqa: F401  (enables x64)
+from sscl_core.model import Params, State, probe_task
 
 
 # ----------------------------------------------------------------------------

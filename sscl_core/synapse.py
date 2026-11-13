@@ -44,10 +44,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import mup._x64  # noqa: F401  (enables x64)
-from mup import experiments as X
-from mup import model, pool
-from mup.model import Params, State
+import sscl_core._x64  # noqa: F401  (enables x64)
+from sscl_core import experiments as X
+from sscl_core import model, pool
+from sscl_core.model import Params, State
 
 
 def draw_mask(k_teach: jnp.ndarray, N: int, D: int, pN: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:

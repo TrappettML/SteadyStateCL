@@ -53,7 +53,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from mup import theory
+from sscl_core import theory
 
 MODELS = ("sgd", "gf", "delta_matched", "delta_raw", "hebb")
 #: models whose readout moves, for which the key-drift split is defined
@@ -236,7 +236,7 @@ class FlowModel(_Clocked):
         return (Lam * self.cond.D / self.n_steps, 0.0) if self.solver == "sgd" else (1.0, Lam / self.n_steps)
 
     def train(self, t: int, g: np.ndarray, w: np.ndarray) -> None:
-        from mup import npmodel
+        from sscl_core import npmodel
         c = self.cond
         if not (g * self.a * self.a).sum() > 0.0:
             return
@@ -307,7 +307,7 @@ class HebbModel(_Clocked):
 def _jax_kernel(n_steps: int, solver: str, K: int):
     """Jitted, vmapped ``model.train_block`` for one task of a batch of runs: (W, a, g, w, params, key) → (W, a)."""
     import jax
-    from mup.model import train_block
+    from sscl_core.model import train_block
 
     def one(W, a, g, w, p, key):
         out = train_block(W, a, g, w, p, key, n_steps=n_steps, solver=solver, K=K)
@@ -327,8 +327,8 @@ class JaxTrainer:
     def __init__(self, models: Sequence["FlowModel"]):
         import jax
         import jax.numpy as jnp
-        import mup._x64  # noqa: F401
-        from mup.model import Params, block_rows
+        import sscl_core._x64  # noqa: F401
+        from sscl_core.model import Params, block_rows
         self.models, self._jnp, self._Params = list(models), jnp, Params
         m, c = self.models[0], self.models[0].cond
         self.K = block_rows(c.N, c.pN, True)
@@ -508,7 +508,7 @@ def run_seeds(cond: dict, seeds: Sequence[int], settings: dict, save: Optional[S
     Parameters
     ----------
     cond, settings : dict
-        Fields of ``Cond`` and ``Settings`` (plain dicts travel through ``mup.pool``).
+        Fields of ``Cond`` and ``Settings`` (plain dicts travel through ``sscl_core.pool``).
     seeds : sequence of int
     save : sequence of str, optional
         One path per seed: its result is pickled there (so a long sweep can be resumed;
@@ -520,7 +520,7 @@ def run_seeds(cond: dict, seeds: Sequence[int], settings: dict, save: Optional[S
         ``models``: {name: ``_summ``}; ``ages``; ``T_learn``; ``t_fork``; ``a_fork`` (the readout every
         frozen-key model uses); ``burn`` (``burn_in``); ``a2``, ``Q`` mean a_i² and Q_ii at the fork.
     """
-    from mup import pool
+    from sscl_core import pool
     c, st = Cond(**cond), Settings(**{**settings, "models": tuple(settings.get("models", MODELS))})
     if st.backend not in ("numpy", "jax"):
         raise ValueError(f"unknown backend {st.backend!r}")

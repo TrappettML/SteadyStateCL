@@ -23,8 +23,8 @@ whose card has nothing left takes another card's remaining jobs (largest
 first), so a card that finishes early still helps.  On the CPU every
 slot is its own "card".  Arguments and results travel as pickles;
 a job function is named ``"module:function"`` and must be importable in the
-worker (``mup.experiments`` holds the ones of the scripts).  Workers are
-``python -m mup.pool <dir>``.
+worker (``sscl_core.experiments`` holds the ones of the scripts).  Workers are
+``python -m sscl_core.pool <dir>``.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ import time
 import traceback
 from typing import Callable, Optional, Sequence
 
-from mup import driver
+from sscl_core import driver
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -189,8 +189,10 @@ def run_jobs(func: str, jobs: Sequence[tuple], gpus: Optional[list[int]] = None,
         where = f"GPU {gpus[s % len(gpus)]}" if gpus else f"slot {s}"
         env["MUP_POOL_WHERE"] = where
         env["MUP_POOL_SLOT"] = str(s)
+        # the worker imports what the script can: sscl_core (ROOT) and the experiment's own modules
+        env["PYTHONPATH"] = os.pathsep.join([p for p in sys.path if p] + [p for p in (env.get("PYTHONPATH"),) if p])
         logf = open(os.path.join(tmp, f"worker_{s}.log"), "w")
-        procs.append((subprocess.Popen([sys.executable, "-m", "mup.pool", tmp], env=env, cwd=ROOT,
+        procs.append((subprocess.Popen([sys.executable, "-m", "sscl_core.pool", tmp], env=env, cwd=ROOT,
                                        stdout=logf, stderr=subprocess.STDOUT), logf, where))
     if log:
         log(f"{len(jobs)} jobs on {slots} worker{'s' if slots != 1 else ''} "
@@ -385,7 +387,7 @@ class Plan:
 def job_bytes(runs: Sequence, T: int, chunk: int, out_per_task: float) -> int:
     """Device bytes a job of ``runs`` over ``T`` tasks needs: the batched state (``protocol.state_bytes``
     with ``T`` head slots) times ``MEM_FACTOR``, plus the stacked observable of one chunk."""
-    from mup.protocol import state_bytes
+    from sscl_core.protocol import state_bytes
     r = runs[0]
     P = max(T, r.T_burn + r.T_meas)
     per_run = state_bytes(r, 1) + 8 * r.N * (P - (r.T_burn + r.T_meas))
@@ -452,7 +454,7 @@ def plan(args: argparse.Namespace, groups: Sequence[tuple], out_per_task: float 
         workers, slots = 0, len(gpus) * per_gpu
         chunk = int(args.chunk) if args.chunk else 0
     if gpus:
-        from mup.experiments import job_cost
+        from sscl_core.experiments import job_cost
         cost = [job_cost(runs, T) for runs, T in groups]
         total = sum(cost) or 1.0
     pieces = []
@@ -483,6 +485,6 @@ def plan(args: argparse.Namespace, groups: Sequence[tuple], out_per_task: float 
 
 if __name__ == "__main__":
     # run the worker of the imported module, not of this ``__main__`` copy: ``report`` in the job functions
-    # reads ``mup.pool._REPORT``, which the worker sets
-    from mup import pool as _pool
+    # reads ``sscl_core.pool._REPORT``, which the worker sets
+    from sscl_core import pool as _pool
     sys.exit(_pool._worker(sys.argv[1]))
