@@ -12,6 +12,11 @@ replay method (``none`` dashed grey, the same runs in every capacity's figure), 
 and ½, the half-life m½ per method in the caption (``--stat``, ``sscl_core.halflife``).  The per-task arrays
 are written next to the figure as ``.npz``.  No equation is drawn: the write-up has none for replay.
 
+A second figure per cell, ``szero_area_N{N}_…png``: the area under that normalized curve from age 0 to n against
+n (``area_curve``; trapezoid rule, in tasks) — the tasks' worth of the memory kept over the first n tasks.  The
+half-life only sees where the curve first crosses ½, which here is within one task for every method; the area
+also counts the tail a replayed memory keeps.  Its ``.npz`` holds ``area_{method}`` and ``area_se_{method}`` (n,).
+
 Placement: every method and seed of one (N, C) is one ``vmap`` batch (``replay.signal_after_tasks`` with
 ``T_pre = 0, k = 0``), run as jobs over the GPUs (``--gpus``), CPU processes (``--workers``) or in this process.
 """
@@ -119,6 +124,63 @@ def figure(S: dict[str, np.ndarray], run0: R.RRun, cap: Optional[str], path: str
     return P.save(fig, path, figdata=figdata)
 
 
+def area_curve(Y: np.ndarray, stat: str = "mean") -> tuple[np.ndarray, np.ndarray]:
+    """Area under the normalized signal up to age n, for n = 0 … T − 1, and its s.e. over seeds: (T,), (T,).
+
+    A(n) = ∫₀ⁿ S(m)/S(0) dm by the trapezoid rule on the integer ages, in tasks: the number of tasks' worth of
+    the memory retained over the first n tasks (A(n) = n if nothing is forgotten; A(∞) is the mean lifetime of
+    an exponential decay, m½/ln 2).  ``stat = "mean"``: the area under the mean curve Σ = ⟨S⟩/⟨S(0)⟩, s.e. by
+    jackknife over seeds; ``"seed"``: the seed mean and s.e. of the area under each seed's own S/S(0).
+    """
+    cum = lambda c: np.concatenate([[0.0], np.cumsum(0.5 * (c[1:] + c[:-1]), 0)])
+    T, n = Y.shape
+    if stat == "mean":
+        A = cum(H.mean_curve(Y))
+        if n < 2:
+            return A, np.zeros(T)
+        tot = Y.sum(1, keepdims=True)
+        loo = (tot - Y) / (n - 1)                                   # (T, n): the mean curve without seed j
+        Aj = np.stack([cum(loo[:, j] / loo[0, j]) for j in range(n)], 1)
+        return A, np.sqrt((n - 1) / n * ((Aj - Aj.mean(1, keepdims=True)) ** 2).sum(1))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        Aj = np.stack([cum(Y[:, j] / Y[0, j]) for j in range(n)], 1)
+    return Aj.mean(1), (Aj.std(1, ddof=1) / np.sqrt(n) if n > 1 else np.zeros(T))
+
+
+def figure_area(S: dict[str, np.ndarray], run0: R.RRun, cap: Optional[str], path: str, stat: str, steady: Optional[int]) -> str:
+    """Area under the normalized signal up to n tasks against n (log x), one trace per method (± 1 s.e.);
+    arguments as ``figure``."""
+    P.apply_style()
+    fig, axes = P.grid(1, 1, panel=(5.2, 2.6))
+    ax = axes[0, 0]
+    figdata, last = {}, {}
+    for m, Y in S.items():
+        A, se = area_curve(Y, stat)
+        x = np.arange(1, len(A))                                    # A(0) = 0 is left off the log axis
+        P.band(ax, x, (A - se)[1:], (A + se)[1:], C.METHOD_COLOR[m])
+        C.plot_method(ax, x, A[1:], m)
+        figdata[f"area_{m}"], figdata[f"area_se_{m}"] = A, se
+        last[m] = (A[-1], se[-1])
+    n = max(Y.shape[0] for Y in S.values())
+    n_seeds = max(Y.shape[1] for Y in S.values())
+    figdata["n"] = np.arange(n)
+    P.ref_line(ax, 0.0)
+    P.logaxis(ax, "x")
+    sym = "S_0" if steady is None else "S_T"
+    ax.set_xlabel("$n$ (tasks after the first)" if steady is None else "$n$ (tasks after task $T$)")
+    ax.set_ylabel(rf"area under ${sym}(m)/{sym}(0)$, $m \leq n$ (tasks)")
+    extra = f"N = {run0.N}" + (f", {C.cap_text(cap)}, {C.MODE_LABEL[run0.mode]}" if cap else "")
+    P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=extra)
+    what = ("the mean curve (seed mean of the signal over its seed mean at age 0), band: jackknife ±1 s.e."
+            if stat == "mean" else "each seed's own signal over its value at age 0, seed mean, band: ±1 s.e.")
+    atxt = ", ".join(f"{C.METHOD_LABEL[m]} {a:.2f} ± {e:.2f}" for m, (a, e) in last.items())
+    P.caption(fig, f"area under {what} ({n_seeds} seeds), from age 0 to n by the trapezoid rule: the tasks' worth of "
+                   f"the memory kept over the first n tasks (n if nothing were forgotten; ½ if it were gone after "
+                   f"one task); at n = {n - 1}: {atxt}.")
+    P.fig_legend(fig, handles=C.method_handles(list(S)))
+    return P.save(fig, path, figdata=figdata)
+
+
 def report_and_draw(res: dict, runs: list, out: str, stem: str, stat: str, steady: Optional[int]) -> list[str]:
     """Print each cell's summary and write its figure; returns the PNG paths."""
     cells_, outs = C.cells(runs), []
@@ -126,8 +188,10 @@ def report_and_draw(res: dict, runs: list, out: str, stem: str, stat: str, stead
         print(f"cell N={N} C={cap} δ₀={d0} λ={lam}:")
         for m, Y in S.items():
             mean = Y.mean(1)
+            A, A_se = area_curve(Y, stat)
             print(f"  {C.METHOD_LABEL[m]:16s} S(0) = {mean[0]:.4f}  m½ = {mhalf_text(seed_signal(Y, stat)[2], Y.shape[0] - 1)}"
-                  f"  S(1)/S(0) = {mean[min(1, len(mean) - 1)] / mean[0]:+.3f}  S(end)/S(0) = {mean[-1] / mean[0]:+.3f}", flush=True)
+                  f"  S(1)/S(0) = {mean[min(1, len(mean) - 1)] / mean[0]:+.3f}  S(end)/S(0) = {mean[-1] / mean[0]:+.3f}"
+                  f"  area to n = {len(A) - 1}: {A[-1]:.2f} ± {A_se[-1]:.2f}", flush=True)
         if not S:
             continue
         cell = cells_[(N, cap, d0, lam)]
@@ -135,6 +199,9 @@ def report_and_draw(res: dict, runs: list, out: str, stem: str, stat: str, stead
         path = os.path.join(out, "figures", f"{stem}_N{N}_C{cap or 0}_d0{P.fmt(d0)}_lam{P.fmt(lam)}_{run0.mode}")
         outs.append(figure(S, run0, cap, path, stat, steady))
         print(f"wrote {outs[-1]} and {path}.npz")
+        apath = path.replace(f"{stem}_N", f"{stem}_area_N")
+        outs.append(figure_area(S, run0, cap, apath, stat, steady))
+        print(f"wrote {outs[-1]} and {apath}.npz")
     return outs
 
 
