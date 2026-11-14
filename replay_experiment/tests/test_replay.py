@@ -153,7 +153,8 @@ def test_scripts_run(tmp_path):
     assert run_loss_slope.main(small + ["--tasks", "6"] + out("ls")) == 0
     assert run_inter_vs_sleep.main(small + ["--T", "6", "--tau", "4"] + out("ivs")) == 0
     pngs = sorted(p.name for p in tmp_path.rglob("*.png"))
-    assert len(pngs) == 2 + 2 + 2 + 2 + 1 + 1 + 1, pngs
+    assert len(pngs) == 4 + 4 + 2 + 2 + 1 + 1 + 1, pngs               # szero and stask: signal and area per capacity
+    assert "stask_area_N10_C4D_d00_lam1_interleaved.png" in pngs
     assert "stask_N10_C4D_d00_lam1_interleaved.png" in pngs and "inter_vs_sleep_N10_d00_lam1.png" in pngs
 
 
@@ -169,3 +170,15 @@ def test_pool_on_gpus_matches_in_process():
     res = pool.run_jobs("sscl_core.replay:signal_after_tasks", jobs, gpus=gpus, per_gpu=1)
     for (_, kw, _), r in zip(jobs, res):
         np.testing.assert_allclose(r, R.signal_after_tasks(**kw), atol=1e-8, rtol=0)
+
+
+def test_area_curve():
+    """Area under the normalized curve: n for a constant signal, the trapezoid sum for a decay, both statistics."""
+    import run_szero
+    Y = np.ones((6, 3)) * np.array([1.0, 2.0, 4.0])
+    for stat in ("mean", "seed"):
+        A, se = run_szero.area_curve(Y, stat)
+        np.testing.assert_allclose(A, np.arange(6)); np.testing.assert_allclose(se, 0, atol=1e-12)
+    d = 0.5 ** np.arange(5)
+    A, _ = run_szero.area_curve(np.stack([d, 3 * d], 1), "mean")
+    np.testing.assert_allclose(A, [0, 0.75, 1.125, 1.3125, 1.40625])

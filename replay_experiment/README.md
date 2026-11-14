@@ -68,8 +68,8 @@ can all be fitted at once, above D they cannot), with m = 0.125D: 4 and
 | script | question | writes to |
 |---|---|---|
 | `scripts/run_training_verify.py` | is every task still learned under replay: the per-step loss of the task being trained (and through its sleep) at the start, middle and end of the stream | `results/training_verify/` |
-| `scripts/run_szero.py` | how fast is the FIRST task forgotten from a fresh start and an empty buffer: S₀(t) vs t | `results/szero/` |
-| `scripts/run_stask.py` | how fast is a task forgotten at steady state: S_T(τ) vs τ | `results/stask/` |
+| `scripts/run_szero.py` | how fast is the FIRST task forgotten from a fresh start and an empty buffer: S₀(t) vs t, and the area under that curve up to n tasks vs n | `results/szero/` |
+| `scripts/run_stask.py` | how fast is a task forgotten at steady state: S_T(τ) vs τ, and the area under that curve up to n tasks vs n | `results/stask/` |
 | `scripts/run_Nscaling.py` | how the steady-state half-life m½ scales with N, per method and replay size | `results/Nscaling/` |
 | `scripts/run_loss_slope.py` | does replay make a new task harder to learn: the area under the current task's loss curve against task | `results/loss_slope/` |
 | `scripts/run_weight_norms.py` | are the weight norms bounded, what does replay cost the task just trained, and how old are the samples each method keeps | `results/weight_norms/` |
@@ -81,6 +81,15 @@ grey, FIFO blue, random replace orange, priority replace green — and
 either one figure or one column per replay size.  `none` has no buffer,
 so it is trained once and drawn in every capacity's cell.  No equation is
 overlaid: the write-up has none for replay.
+
+**Area under the curve** (`run_szero.py`, `run_stask.py`; `*_area_*.png`).
+A(n) is the area under the normalized signal S(m)/S(0) from age 0 to n
+(trapezoid rule, in tasks): the tasks' worth of the memory kept over the
+first n tasks, n if nothing were forgotten and ½ if it were gone after one
+task.  The half-life is under one task for every method here (the ungated
+readout has one output, which the next task overwrites), so it does not
+see the tail that replay keeps; the area does.  Note it is relative to
+S(0), which replay itself lowers.
 
 ## Running
 
