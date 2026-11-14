@@ -23,7 +23,7 @@ The arrays are written next to the figure as ``loss_slope_….npz``: per column 
 ``experiments.fit_slope``: the quantity this script first plotted), ``loss_start_k{κ}_{readout}`` and
 ``loss_end_k{κ}_{readout}``, each (T, n_seeds), with ``task``.
 
-Placement (``mup.pool``): every readout and seed of a κ column is one ``vmap`` batch advanced ``--chunk``
+Placement (``sscl_core.pool``): every readout and seed of a κ column is one ``vmap`` batch advanced ``--chunk``
 tasks per device call with the area evaluated inside the scan (``experiments.loss_slopes``), over the GPUs
 (``--gpus``), ``--workers`` CPU processes, or this process.
 """
@@ -37,10 +37,10 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import plotting as P
-from mup import pool
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
+from sscl_core import experiments as X
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
 from run_szero import cells, groups
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
@@ -63,7 +63,7 @@ def collect(cells_: dict[tuple, list[Run]], T: int, plan: pool.Plan,
     every κ cell and trained once).
     """
     jobs = make_jobs(groups(cells_), T, plan.pieces)
-    res = pool.run_jobs("mup.experiments:loss_slopes", jobs, log=log, **plan.place)
+    res = pool.run_jobs("sscl_core.experiments:loss_slopes", jobs, log=log, **plan.place)
     cols = {}
     for (_, kw, _), out in zip(jobs, res):
         for j, r in enumerate(kw["runs"]):

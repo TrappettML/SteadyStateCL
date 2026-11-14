@@ -1,12 +1,12 @@
-"""``mup.npmodel.step_task`` (NumPy, in place on the active rows) against the JAX kernels of ``mup.model``."""
+"""``sscl_core.npmodel.step_task`` (NumPy, in place on the active rows) against the JAX kernels of ``sscl_core.model``."""
 import numpy as np
 import pytest
 
-import mup._x64  # noqa: F401  (enables x64)
+import sscl_core._x64  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 
-from mup import model, npmodel
+from sscl_core import model, npmodel
 
 
 class _FixedX:
@@ -87,7 +87,7 @@ def test_sgd_x_matches_model_draw():
 @pytest.mark.parametrize("readout", ["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"])
 def test_tasks_tracks_Q_and_u(readout):
     """Over a stream of tasks the tracked Q and u of ``tasks`` equal the values recomputed from the full W."""
-    from mup.config import Config, make_runs
+    from sscl_core.config import Config, make_runs
     cfg = Config(N=[12], readout=[readout], delta0=[0.0], lam=[2.0], seeds=1, solver="pop", T_min=4)
     run = make_runs(cfg)[0]
     rng, W, a = npmodel.init_run(run)

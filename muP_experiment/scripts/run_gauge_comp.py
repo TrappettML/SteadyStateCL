@@ -19,11 +19,11 @@ switched on (``do_proj = 1``); every other setting of the readout (gating,
 learned/frozen a, task heads) is what PLAN.md §4 defines.  One trace per
 readout; ``--seeds n`` runs seeds 0 … n − 1 as the other ``run_*`` scripts
 (default 1); N = 100 and κ = 1 by default; the task stream is the
-Stage-1 one (``configs/stage1.yaml``: λ = 4, population solver, T_burn =
+Stage-1 one (``configs/stage1.yaml``: λ = 4, online SGD, T_burn =
 T_meas = 7N) unless ``--tasks`` shortens it.  The per-step arrays are
 written next to the figure as ``gauge_comp_….npz``.
 
-Placement (``mup.pool``): the readouts of a cell, each listed with the
+Placement (``sscl_core.pool``): the readouts of a cell, each listed with the
 projection off and on, are one ``vmap`` batch advanced ``--chunk`` tasks per
 device call with the per-step statistics returned from the scan
 (``experiments.imbalance_over_steps``); the distinct (run, projection)
@@ -43,10 +43,10 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import plotting as P
-from mup import pool
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
+from sscl_core import experiments as X
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -116,7 +116,7 @@ def collect(cells_: dict[tuple, list[Run]], n_tasks: int, plan: pool.Plan,
             log: Callable[[str], None] = print) -> dict[tuple, dict[tuple, dict[str, np.ndarray]]]:
     """``{cell: traces}`` through ``pool.run_jobs`` over the distinct (run, do_proj) pairs."""
     jobs = make_jobs(groups(cells_), n_tasks)
-    res = pool.run_jobs("mup.experiments:imbalance_over_steps", jobs, log=log, **plan.place)
+    res = pool.run_jobs("sscl_core.experiments:imbalance_over_steps", jobs, log=log, **plan.place)
     rows_of = {}
     for (_, kw, _), R in zip(jobs, res):
         for j, (r, d) in enumerate(zip(kw["runs"], kw["do_proj"])):

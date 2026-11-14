@@ -13,9 +13,9 @@ import jax.numpy as jnp
 import numpy as np
 from conftest import small_runs  # noqa: F401
 
-from mup import model
-from mup.observe import age_schedule
-from mup.protocol import init_batch, run_task, batched_run_task, run_stream
+from sscl_core import model
+from sscl_core.observe import age_schedule
+from sscl_core.protocol import init_batch, run_task, batched_run_task, run_stream
 
 
 def _single(run, T, ages):

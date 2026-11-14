@@ -9,7 +9,7 @@ the teacher of task T for T more, m½ = the first crossing of ½ by the mean cur
 (``--stat mean``, the write-up's m½, jackknife s.e.; ``--stat seed`` averages per-seed half-lives) — with one
 more axis.  ``--synapse`` adds, for every gated readout, the same run with the gate on the synapse: a mask
 Γ_c ∈ {0, 1}^{N×D} of i.i.d. indicators at the density p = κ/√N of the unit gate, drawn per task and applied
-entrywise to W (``mup.synapse``).  A synaptic run starts from the W⁽⁰⁾ and readout of its unit-gated twin and
+entrywise to W (``sscl_core.synapse``).  A synaptic run starts from the W⁽⁰⁾ and readout of its unit-gated twin and
 sees the same teachers.  Without ``--synapse`` the script is ``run_Nscaling.py`` (unit gating only).  The
 ungated readouts have no gate and no synaptic form.
 
@@ -37,7 +37,7 @@ The values are written to ``mhalf_….npz`` beside the figures, keys ``N{N}_k{κ
 ``syn_N{N}_k{κ}_{readout}``, the per-seed half-lives under ``seed_…``.  The console prints every condition and,
 with ``--synapse``, the two gatings side by side with their ratio and the predicted θν/θ̄ for the heads.
 
-Placement (``mup.pool``): the unit-gated runs are the jobs of ``run_Nscaling.py``.  A synaptic step touches all
+Placement (``sscl_core.pool``): the unit-gated runs are the jobs of ``run_Nscaling.py``.  A synaptic step touches all
 N·D synapses (no block of active rows), so every κ of a width shares one ``vmap`` batch per
 ``synapse.group_key`` (the stepped readouts, the closed-form frozen one), advanced ``--chunk`` tasks per device
 call with S_T evaluated inside the scan (``synapse.signal_after_tasks``).  The two sets of jobs run one after
@@ -54,13 +54,13 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import halflife as H
-from mup import plotting as P
-from mup import pool
-from mup import synapse as S
-from mup import theory as TH
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
+from sscl_core import experiments as X
+from sscl_core import halflife as H
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core import synapse as S
+from sscl_core import theory as TH
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
 from run_Nscaling import GATED, THEORY_LABEL, _report, _stat, collect, cond_key, groups, reduce, theory
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
@@ -100,7 +100,7 @@ def collect_syn(runs: list[Run], plan: pool.Plan, unit: dict, unit_seed: dict, s
     """``(res, seed)`` of the gated runs under synaptic gating, as ``run_Nscaling.collect``; conditions at gate
     density 1 take their values from ``unit`` / ``unit_seed``, the unit-gated results."""
     jobs = syn_jobs(syn_groups(runs), plan.pieces)
-    res = pool.run_jobs("mup.synapse:signal_after_tasks", jobs, log=log, **plan.place)
+    res = pool.run_jobs("sscl_core.synapse:signal_after_tasks", jobs, log=log, **plan.place)
     cond = reduce(jobs, res, stat)
     run_of = {cond_key(r): r for r in runs if r.gated == 1.0}
     out, seed = {}, {}

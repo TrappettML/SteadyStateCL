@@ -9,7 +9,7 @@ ingredient makes the difference — SGD noise, the second layer, or error-correc
     python scripts/run_nested.py --N 32 --seeds 2 --delta0 0 10 --overlap 0.2 --rho 0 --no-ref-checks \\
                                  --out /tmp/nested                                     # laptop smoke run
 
-Five models (``mup/nested.py``), each removing one ingredient from the one above, on the same task stream
+Five models (``sscl_core/nested.py``), each removing one ingredient from the one above, on the same task stream
 from the same forked weights: SGD → gradient flow (no sampling noise) → Δ-matched (readout frozen, one
 relaxed projection per task at gradient flow's measured rate) → Δ-raw (the bare rate, nothing fitted) →
 Hebb (fixed-size writes with decay, no error correction; (b, γ) tuned once at the reference condition to
@@ -25,7 +25,7 @@ Measured per condition and model (seed mean ± s.e.): the memory curve M(τ) = 1
 a task, its lifetime τ½ (M = M(0)/2, jackknife s.e.), ε(0) = E_c(0), the best of an exponential, stretched
 exponential and power-law fit, and for SGD and gradient flow the key-drift fraction φ_key and the rate ratio ϱ.
 
-The decision rules are fixed in ``mup.nested`` (``coincide``: max |ΔM|/M_A(0) < 0.05, τ½ within 10 %, and the
+The decision rules are fixed in ``sscl_core.nested`` (``coincide``: max |ΔM|/M_A(0) < 0.05, τ½ within 10 %, and the
 difference within 2 s.e.m. on the age-averaged curve and on τ½) and applied to SGD vs gradient flow, gradient flow vs Δ-matched, Δ-matched vs
 Δ-raw and Δ-matched vs Hebb.
 
@@ -37,7 +37,7 @@ checks), and ``raw/`` (one pickle per condition and seed, read back by ``--reuse
 
 Placement.  ``--gpus [ids]`` runs SGD and gradient flow on the GPUs (``--backend jax``, chosen automatically):
 the seeds of a condition are one ``vmap`` batch through ``model.train_block``, one device call per task, and
-the conditions are spread over the cards by ``mup.pool`` (``--per-gpu`` processes per card, ``--split k`` to
+the conditions are spread over the cards by ``sscl_core.pool`` (``--per-gpu`` processes per card, ``--split k`` to
 cut every condition's seeds into k batches).  Without ``--gpus`` the NumPy kernel runs one (condition, seed)
 per CPU process (``--workers``).  The delta rules, Hebb and the probes are NumPy on the host in both; the Hebb
 stage always uses ``--workers``.
@@ -62,10 +62,10 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import driver
-from mup import nested as X
-from mup import plotting as P
-from mup import pool
+from sscl_core import driver
+from sscl_core import nested as X
+from sscl_core import plotting as P
+from sscl_core import pool
 
 _T0 = time.perf_counter()
 
@@ -138,7 +138,7 @@ def fork_jobs(conds, seeds, st: X.Settings, raw_dir: str, reuse: bool, pieces: i
 def run_forks(conds, seeds, res: dict, jobs: list, place: dict) -> dict:
     """``{cond: [run_seeds result per seed]}`` from the reused results and the jobs of ``fork_jobs``."""
     by_stem = {c.stem(): c for c in conds}
-    for ((stem, part), _, _), outs in zip(jobs, pool.run_jobs("mup.nested:run_seeds", jobs, log=print, **place)):
+    for ((stem, part), _, _), outs in zip(jobs, pool.run_jobs("sscl_core.nested:run_seeds", jobs, log=print, **place)):
         for s, out in zip(part, outs):
             res[(by_stem[stem], s)] = out
     return {c: [res[(c, s)] for s in seeds] for c in conds}
@@ -151,7 +151,7 @@ def run_hebbs(forks: dict, conds, gammas, st: X.Settings, place: dict) -> dict:
                          "t_fork": r["t_fork"], "gamma": float(g)}, 1.0 / g)
             for c in conds for g in gammas for i, r in enumerate(forks[c])]
     out = {}
-    for (key, _, _), r in zip(jobs, pool.run_jobs("mup.nested:run_hebb", jobs, **place)):
+    for (key, _, _), r in zip(jobs, pool.run_jobs("sscl_core.nested:run_hebb", jobs, **place)):
         out.setdefault(key[:2], []).append(r)
     return out
 

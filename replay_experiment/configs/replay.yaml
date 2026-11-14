@@ -1,0 +1,34 @@
+# replay_experiment: the μP student with every unit active and both layers learned (readout learned_shared),
+# trained by SGD on the task stream of muP_experiment, with a buffer of stored samples that is replayed.
+# The solver and stream keys are those of muP_experiment/configs/stage1.yaml (sscl_core.config.Config);
+# the replay keys at the bottom are read by scripts/common.py.  The only replay hyper-parameter the scripts
+# sweep is the replay size C (--capacity), where the μP scripts sweep κ.
+name: replay
+N: [10, 20, 50, 100]
+readout: [learned_shared]      # ungated, both layers learned, projection on; fixed for this experiment
+delta0: [0.0]
+lam: [4.0]                     # hidden-layer learning per task
+seeds: 8
+solver: sgd                    # replay stores samples, so the runs train by SGD (the population solver has none)
+eta: [auto]                    # 0.05/(1 + δ₀): n = 20λD/B = 320N/B steps per task
+sgd_batch: 16                  # fresh samples per SGD step
+D_factor: 4
+T_per_N: 7.0                   # T_burn = T_meas = 7N tasks, as Stage 1 of the μP experiment
+T_factor: 10.0
+batch_size: 64
+clock: nominal                 # SGD always runs the nominal clock
+
+# --- replay -------------------------------------------------------------------------------------------------
+# methods (the traces): none = no buffer; fifo / random / priority = which stored samples a task's new samples
+# overwrite (sscl_core/replay.py): the oldest, m at random, or the m with the smallest gradient norm.
+method: [none, fifo, random, priority]
+# replay sizes C, the buffer's capacity in samples: a number, or a multiple of the input dimension D (D samples
+# determine one teacher).  One small and one large: below D the buffer can be fitted exactly, above it cannot.
+capacity: ["0.5D", "4D"]
+# samples of each task stored after it (same notation): at 0.125D the small buffer holds the last 4 tasks
+# under FIFO and the large one the last 32
+write: "0.125D"
+# replayed samples per fresh sample: sleep runs replay_ratio·n steps after the task, interleaved adds
+# replay_ratio·B buffer samples to every step
+replay_ratio: 1.0
+replay_mode: sleep             # sleep | interleaved (--mode)

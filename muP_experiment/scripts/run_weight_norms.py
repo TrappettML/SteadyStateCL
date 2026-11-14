@@ -54,7 +54,7 @@ leading order and was not derived for the ungated readouts, which get no overlay
 
 The per-run curves are written to ``norms_….npz`` beside the figures.
 
-Placement (``mup.pool``): the runs of one width — every κ, readout and
+Placement (``sscl_core.pool``): the runs of one width — every κ, readout and
 seed, which share (N, D, n_steps, T) — form one ``vmap`` batch advanced
 ``--chunk`` tasks per device call with the norms evaluated inside the scan
 (``experiments.norms_over_tasks``, the JAX kernels of the sweep) and runs
@@ -74,11 +74,11 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import plotting as P
-from mup import pool
-from mup import theory as TH
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
+from sscl_core import experiments as X
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core import theory as TH
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -182,7 +182,7 @@ def exponents(d: dict[str, np.ndarray], run: Run) -> dict[str, np.ndarray]:
     """
     pN = float(run.pN)
     pop = run.solver == "pop"
-    h_eta = run.eta * d["h_c"] if pop else np.full_like(d["h_c"], run.eta / run.D)
+    h_eta = run.eta * d["h_c"] if pop else np.full_like(d["h_c"], run.eta * max(run.sgd_batch, 1) / run.D)
     Lam = run.n_steps * h_eta
     empty = d["n_c"] == 0
     nan = lambda x: np.where(empty, np.nan, x)
@@ -229,7 +229,7 @@ def make_jobs(groups_: dict[tuple, list[Run]], pieces: Sequence[int]) -> list[tu
 def collect(runs: list[Run], plan: pool.Plan, log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
     """``{(N, kappa_label, readout): {key: (n_seeds, T) array}}`` for every condition of ``runs``."""
     jobs = make_jobs(groups(runs), plan.pieces)
-    res = pool.run_jobs("mup.experiments:norms_over_tasks", jobs, log=log, **plan.place)
+    res = pool.run_jobs("sscl_core.experiments:norms_over_tasks", jobs, log=log, **plan.place)
     per_run = {}
     for (_, kw, _), d in zip(jobs, res):
         for j, r in enumerate(kw["runs"]):

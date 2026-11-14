@@ -1,4 +1,4 @@
-# Stage 1 (Table 1 of the plan): population solver (PLAN.md §8).
+# Stage 1 (Table 1 of the plan): online SGD since 2026-11-13 (was the population solver; PLAN.md §8, §10).
 # The scaling and weight-norm questions at one hidden-layer learning per task, λ = 4 (the hidden
 # channel alone leaves a residual of e^-4 ≈ 2 %, so every task is learned well; the readout's own
 # exponent λᵃ_c = Λ‖M_c‖ is derived from (λ, δ₀), not set).  The λ axis (hidden-layer learning per
@@ -14,8 +14,15 @@ readout: [gated_shared, learned_shared, gated_frozen, frozen, task_heads]
 delta0: [-0.75, -0.5, 0.0, 1.0, 4.0, 16.0]
 lam: [4.0]                 # hidden-layer learning per task; Stage 1: fixed, the λ sweep is a later stage
 seeds: 8
-solver: pop
-eta: [1.0]
+# solver: sgd = online SGD, one fresh sample per step (eqs. sgdW–sgda), n = round(λD/(η(1 + δ₀))) steps per task on
+# the nominal clock; pop = population-gradient steps (n = λ/pop_contraction = 40, the task clock below).
+solver: sgd
+# auto: sgd → sgd_contraction/(1 + δ₀) = 0.05/(1 + δ₀), so n = 20λD/B = 320N/B steps per task at every δ₀; pop → 1
+eta: [auto]
+# samples per SGD step: a step sums the updates of B fresh samples at the same η, so n = 320N/B steps per task;
+# 1 = online SGD (the write-up's eqs. sgdW–sgda).  --sgd_batch on any script overrides it.  16 since 2026-11-13:
+# 20N steps per task, 10–43× faster per task than B = 1 at N = 100 with the same end-of-task loss (PLAN.md §10)
+sgd_batch: 16
 h_max: 1.0
 # h ā² ≤ 0.1 (plan).  old/validate.py measures an O(h) Euler bias of
 # ΔS(0) ≈ +0.017 (frozen) / +0.005 (learned) at this value at N=10, λ=1;

@@ -14,14 +14,14 @@ import jax
 import numpy as np
 import pytest
 
-from mup.config import Config, make_runs
-from mup.protocol import CLOCK_KEYS, run_stream
+from sscl_core.config import Config, make_runs
+from sscl_core.protocol import CLOCK_KEYS, run_stream
 
 REF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference_hash.txt")
 
 
 def _hash():
-    cfg = Config(N=[10], readout=["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"],
+    cfg = Config(solver="pop", N=[10], readout=["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"],
                  delta0=[1.0], lam=[1.0], seeds=1, T_factor=0.25, T_min=5,
                  clock="nominal")      # clock (i): the dynamics the stored hash was made with
     from conftest import one_batch

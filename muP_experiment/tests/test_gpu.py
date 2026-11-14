@@ -33,10 +33,10 @@ import jax
 import jax.numpy as jnp
 
 from conftest import one_batch, small_runs  # noqa: F401
-from mup import device, driver, io
-from mup.config import Config, make_runs
-from mup.observe import age_schedule
-from mup.protocol import SCALARS, batched_run_tasks, init_batch, run_stream
+from sscl_core import device, driver, io
+from sscl_core.config import Config, make_runs
+from sscl_core.observe import age_schedule
+from sscl_core.protocol import SCALARS, batched_run_tasks, init_batch, run_stream
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GPUS = [d for d in jax.devices() if d.platform in ("gpu", "cuda", "rocm")]
@@ -44,7 +44,7 @@ pytestmark = pytest.mark.skipif(not GPUS, reason="no GPU visible to JAX")
 
 
 def _runs(N=20, seeds=2):
-    cfg = Config(N=[N], readout=["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"],
+    cfg = Config(solver="pop", N=[N], readout=["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"],
                  delta0=[1.0], lam=[1.0], seeds=seeds, T_factor=0.5, T_min=6)
     return one_batch(make_runs(cfg))
 
@@ -100,12 +100,12 @@ def test_chunked_equals_unchunked_on_gpu(small_runs):
 
 _CHILD = r'''
 import json, sys
-sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[1] + "/tests")
+sys.path.insert(0, sys.argv[1] + "/.."); sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[1] + "/tests")
 import numpy as np, jax
 from conftest import one_batch
-from mup.config import Config, make_runs
-from mup.protocol import run_stream
-cfg = Config(N=[20], readout=["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"],
+from sscl_core.config import Config, make_runs
+from sscl_core.protocol import run_stream
+cfg = Config(solver="pop", N=[20], readout=["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"],
              delta0=[1.0], lam=[1.0], seeds=2, T_factor=0.5, T_min=6)
 res = run_stream(one_batch(make_runs(cfg)))
 print(json.dumps({"backend": jax.default_backend(), "devices": [str(d) for d in jax.devices()],
@@ -171,13 +171,13 @@ def test_driver_spreads_batches_over_gpus(tmp_path, small_share):
 
 def test_pool_places_one_job_per_gpu(small_share):
     """``pool.run_jobs`` with ``gpus``: every card gets a job, results match in-process."""
-    from mup import experiments as X
-    from mup import pool
+    from sscl_core import experiments as X
+    from sscl_core import pool
     gpus = driver.visible_gpus() or list(range(len(GPUS)))
     runs = _runs(N=10, seeds=2)
     jobs = [((i,), {"runs": runs, "T_pre": 0, "n_follow": 4, "k": 0}, 1.0) for i in range(2 * len(gpus))]
     lines = []
-    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, gpus=gpus, per_gpu=1, log=lines.append)
+    res = pool.run_jobs("sscl_core.experiments:signal_after_tasks", jobs, gpus=gpus, per_gpu=1, log=lines.append)
     used = {ln.split("done on GPU ")[1].split()[0] for ln in lines if "done on GPU " in ln}
     assert len(used) == len(gpus), lines
     want = X.signal_after_tasks(runs, 0, 4, 0)

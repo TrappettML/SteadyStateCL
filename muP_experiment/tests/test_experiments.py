@@ -1,4 +1,4 @@
-"""``mup.experiments`` kernels against ``protocol.run_task``, and ``mup.pool`` placements."""
+"""``sscl_core.experiments`` kernels against ``protocol.run_task``, and ``sscl_core.pool`` placements."""
 import functools
 
 import jax
@@ -7,12 +7,12 @@ import numpy as np
 import pytest
 from conftest import one_batch, small_runs  # noqa: F401
 
-from mup import experiments as X
-from mup import model as M
-from mup import pool
-from mup.config import Config, make_runs
-from mup.observe import age_schedule
-from mup.protocol import batched_run_task, init_batch, run_stream
+from sscl_core import experiments as X
+from sscl_core import model as M
+from sscl_core import pool
+from sscl_core.config import Config, make_runs
+from sscl_core.observe import age_schedule
+from sscl_core.protocol import batched_run_task, init_batch, run_stream
 
 
 def _ref_states(runs, T):
@@ -122,9 +122,9 @@ def test_imbalance_over_steps_pins_with_projection(small_runs):
 
 
 def test_infeasible_runs_come_back_nan():
-    cfg = Config(N=[10], readout=["gated_shared"], delta0=[-0.75], lam=[1.0], seeds=6, T_factor=0.25, T_min=4)
+    cfg = Config(solver="pop", N=[10], readout=["gated_shared"], delta0=[-0.75], lam=[1.0], seeds=6, T_factor=0.25, T_min=4)
     runs = make_runs(cfg)
-    from mup.protocol import feasible
+    from sscl_core.protocol import feasible
     ok = feasible(runs)
     S = X.signal_after_tasks(runs, 0, 3, 0)
     assert S.shape == (3, len(runs))
@@ -138,15 +138,15 @@ def test_split_and_group():
 
 
 def _jobs():
-    cfg = Config(N=[10], readout=["gated_shared", "gated_frozen"], delta0=[0.0], lam=[1.0], seeds=2, T_factor=0.25, T_min=4)
+    cfg = Config(solver="pop", N=[10], readout=["gated_shared", "gated_frozen"], delta0=[0.0], lam=[1.0], seeds=2, T_factor=0.25, T_min=4)
     runs = one_batch(make_runs(cfg))
     return [("a", {"runs": runs[:2]}, 2.0), ("b", {"runs": runs[2:]}, 1.0)], runs
 
 
 def test_pool_in_process_and_subprocess_agree(tmp_path):
     jobs, runs = _jobs()
-    here = pool.run_jobs("mup.experiments:stream_batch", jobs, workers=1)
-    sub = pool.run_jobs("mup.experiments:stream_batch", jobs, workers=2, log=lambda m: None)
+    here = pool.run_jobs("sscl_core.experiments:stream_batch", jobs, workers=1)
+    sub = pool.run_jobs("sscl_core.experiments:stream_batch", jobs, workers=2, log=lambda m: None)
     for a, b in zip(here, sub):
         np.testing.assert_allclose(a["sum_s"], b["sum_s"], atol=1e-10, rtol=0)
         np.testing.assert_allclose(a["E0"], b["E0"], atol=1e-10, rtol=0)
@@ -157,9 +157,9 @@ def test_pool_in_process_and_subprocess_agree(tmp_path):
 def test_pool_reports_failures():
     jobs = [("bad", {"runs": []}, 1.0)]
     with pytest.raises((RuntimeError, IndexError)):
-        pool.run_jobs("mup.experiments:stream_batch", jobs, workers=2, log=lambda m: None)
+        pool.run_jobs("sscl_core.experiments:stream_batch", jobs, workers=2, log=lambda m: None)
     with pytest.raises(IndexError):
-        pool.run_jobs("mup.experiments:stream_batch", jobs, workers=1)
+        pool.run_jobs("sscl_core.experiments:stream_batch", jobs, workers=1)
 
 
 # ----------------------------------------------------------------------------
@@ -167,7 +167,7 @@ def test_pool_reports_failures():
 # ----------------------------------------------------------------------------
 def _runs(N=10, seeds=2):
     """``seeds`` frozen-readout runs of width ``N`` (one run per seed)."""
-    return make_runs(Config(N=[N], readout=["frozen"], delta0=[0.0], lam=[1.0], seeds=seeds, T_factor=0.5, T_min=6))
+    return make_runs(Config(solver="pop", N=[N], readout=["frozen"], delta0=[0.0], lam=[1.0], seeds=seeds, T_factor=0.5, T_min=6))
 
 
 def _args(**kw):
@@ -177,7 +177,7 @@ def _args(**kw):
 
 
 def test_plan_cpu_in_process_keeps_groups_whole():
-    from mup import pool
+    from sscl_core import pool
     groups = [(_runs(N=10, seeds=3), 20), (_runs(N=20, seeds=3), 40)]
     pl = pool.plan(_args(), groups)
     assert pl.gpus is None and pl.slots == 1 and pl.pieces == [1, 1] and pl.chunk == 1
@@ -185,7 +185,7 @@ def test_plan_cpu_in_process_keeps_groups_whole():
 
 
 def test_plan_gpu_fills_cards_without_overcutting(monkeypatch):
-    from mup import driver, pool
+    from sscl_core import driver, pool
     monkeypatch.setattr(driver, "gpu_memory_gb", lambda: 32.0)
     monkeypatch.setattr(driver, "visible_gpus", lambda: [])
     one = [(_runs(N=10, seeds=12), 20)]                       # 12 runs, 1 group
@@ -207,7 +207,7 @@ def test_plan_gpu_fills_cards_without_overcutting(monkeypatch):
 
 
 def test_plan_memory_split_is_a_multiple_of_the_cards(monkeypatch):
-    from mup import driver, pool
+    from sscl_core import driver, pool
     monkeypatch.setattr(driver, "visible_gpus", lambda: [0, 1, 2, 3])
     runs = _runs(N=10, seeds=12)
     one = pool.job_bytes(runs[:1], 20, 16, 8.0)
@@ -218,7 +218,7 @@ def test_plan_memory_split_is_a_multiple_of_the_cards(monkeypatch):
 
 
 def test_assign_balances_largest_first():
-    from mup import pool
+    from sscl_core import pool
     unit_of = pool.assign([8, 7, 6, 5, 4, 3, 2, 1], 4)
     load = [0] * 4
     for u, c in zip(unit_of, [8, 7, 6, 5, 4, 3, 2, 1]):
@@ -228,7 +228,7 @@ def test_assign_balances_largest_first():
 
 
 def test_group_key_separates_block_sizes_and_job_cost_has_overhead():
-    cfg = Config(N=[100], readout=["gated_shared", "gated_frozen", "learned_shared"], kappa=["1", "4"],
+    cfg = Config(solver="pop", N=[100], readout=["gated_shared", "gated_frozen", "learned_shared"], kappa=["1", "4"],
                  delta0=[0.0], lam=[1.0], seeds=1, T_factor=0.25, T_min=4)
     runs = make_runs(cfg)
     keys = {X.group_key(r) for r in runs}
@@ -242,7 +242,7 @@ def test_group_key_separates_block_sizes_and_job_cost_has_overhead():
 
 
 def test_plan_gpu_respects_memory(monkeypatch):
-    from mup import driver, pool
+    from sscl_core import driver, pool
     monkeypatch.setattr(driver, "gpu_memory_gb", lambda: 0.001)   # ~1 MB cards
     monkeypatch.setattr(driver, "visible_gpus", lambda: [0, 1, 2, 3])
     runs = _runs(N=10, seeds=12)
@@ -266,12 +266,12 @@ def test_plan_gpu_respects_memory(monkeypatch):
 
 
 def test_progress_lines_reach_the_log_in_process_and_from_workers(tmp_path):
-    from mup import pool
+    from sscl_core import pool
     runs = _runs(N=10, seeds=2)
     jobs = [((i,), {"runs": runs, "T_pre": 0, "n_follow": 20, "k": 0}, 1.0) for i in range(2)]
     for kw in ({}, {"workers": 2}):
         lines = []
-        pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=lines.append, chunk=5, **kw)
+        pool.run_jobs("sscl_core.experiments:signal_after_tasks", jobs, log=lines.append, chunk=5, **kw)
         prog = [ln for ln in lines if "task " in ln and "%" in ln]
         assert any("task 20/20 (100%)" in ln for ln in prog), lines
         if not kw:                                              # workers relay only the latest line per 0.5 s poll
@@ -283,7 +283,7 @@ def test_progress_lines_reach_the_log_in_process_and_from_workers(tmp_path):
 def test_loss_curves_match_stream_trace(small_runs):
     """The learning curve's end point is the stream's L_end of that task, and its steps are the trace's loss column."""
     import dataclasses
-    from mup.protocol import TRACE_QUANT, run_stream
+    from sscl_core.protocol import TRACE_QUANT, run_stream
     runs = [dataclasses.replace(r, trace=True, trace_points=1000) for r in small_runs]
     T = runs[0].T_burn + runs[0].T_meas
     ref = run_stream(runs, chunk=1)

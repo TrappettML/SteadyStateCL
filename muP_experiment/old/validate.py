@@ -5,7 +5,7 @@
 
 Each part is a small sweep; the batches of every requested part are run
 together as jobs over the GPUs (``--gpus auto``: one process per card),
-``--workers`` CPU processes or this process (``mup.pool``,
+``--workers`` CPU processes or this process (``sscl_core.pool``,
 ``experiments.stream_batch`` = ``protocol.run_stream``), largest first.
 Then each part prints a verdict and writes
 ``<out>/figures/{eta_halving,kaczmarz_collapse,cv_exponent}.png`` in
@@ -20,11 +20,11 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import plotting as P
-from mup import pool
-from mup.config import Config, make_batches, make_runs
-from mup.observe import cv_exponent
+from sscl_core import experiments as X
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core.config import Config, make_batches, make_runs
+from sscl_core.observe import cv_exponent
 
 
 def batches_of(cfgs: dict) -> list:
@@ -56,7 +56,7 @@ def run_all(cfgs: dict, place: dict, log) -> dict:
         s.e.m. of S across seeds (NaN for one seed).
     """
     jobs = [((name, i), {"runs": batch}, X.job_cost(batch, T)) for name, i, batch, T in batches_of(cfgs)]
-    res = pool.run_jobs("mup.experiments:stream_batch", jobs, log=log, **place)
+    res = pool.run_jobs("sscl_core.experiments:stream_batch", jobs, log=log, **place)
     return {name: X.seed_curves([(kw["runs"], r) for ((nm, _), kw, _), r in zip(jobs, res) if nm == name])
             for name in cfgs}
 

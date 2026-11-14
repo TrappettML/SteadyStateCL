@@ -27,7 +27,7 @@ cd "$(dirname "$0")" || exit 1
 # Shared settings
 # ---------------------------------------------------------------------------
 PY=${PY:-python}
-PLACE=${PLACE---gpus}                    # every card of the node, planned by mup.pool
+PLACE=${PLACE---gpus}                    # every card of the node, planned by sscl_core.pool
 LAM=4                                    # hidden-layer learning per task λ (configs/stage1.yaml: lam [4.0])
 CLOCK=realized                           # task clock: realized = (ii), Λ_c = λ/ā²_c (write-up default); nominal = (i)
 STAT=mean                                # half-life: mean = root of the seed-mean curve Σ(m) = ½ (write-up); seed = per-seed mean

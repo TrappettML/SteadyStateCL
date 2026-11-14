@@ -11,15 +11,15 @@ import numpy as np
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for p in (ROOT, os.path.join(ROOT, "scripts"), os.path.join(ROOT, "old")):
+for p in (os.path.dirname(ROOT), ROOT, os.path.join(ROOT, "scripts"), os.path.join(ROOT, "old")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from mup import io  # noqa: E402
-from mup.config import READOUT_ORDER, Run, is_gated  # noqa: E402
-from mup.observe import age_schedule  # noqa: E402
-from mup.protocol import SCALARS, TRACE_QUANT  # noqa: E402
-from mup.results import RunRecord  # noqa: E402
+from sscl_core import io  # noqa: E402
+from sscl_core.config import READOUT_ORDER, Run, is_gated  # noqa: E402
+from sscl_core.observe import age_schedule  # noqa: E402
+from sscl_core.protocol import SCALARS, TRACE_QUANT  # noqa: E402
+from sscl_core.results import RunRecord  # noqa: E402
 
 
 def _record(rng, N, readout, d0, lam, seed, T_factor=2.0, kappa=1.0):
@@ -91,7 +91,7 @@ def test_default_families_render_without_warnings(records, tmp_path):
     import analyze
     import plot_check2
     import plot_norms
-    from mup import plotting as P
+    from sscl_core import plotting as P
     fig_dir = str(tmp_path / "figures")
     out_dir = str(tmp_path / "sweep")
     skipped = ["N=10 k=1.0 gated_frozen d0=-0.75 lam=1.0 eta=1.0 seed=3"]
@@ -222,7 +222,7 @@ def test_cells_filter():
 
 
 def test_helpers():
-    from mup import plotting as P
+    from sscl_core import plotting as P
     assert P.fmt(4.0) == "4" and P.fmt("1.0") == "1" and P.fmt("sqrtN") == "sqrtN" and P.fmt(0.5) == "0.5"
     x = np.arange(20.0)
     Y = np.stack([x, x + 1])

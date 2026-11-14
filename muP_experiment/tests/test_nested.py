@@ -1,11 +1,11 @@
-"""``mup.nested``: the five-model ladder of ``scripts/run_nested.py`` — stream, update rules, statistics, one run."""
+"""``sscl_core.nested``: the five-model ladder of ``scripts/run_nested.py`` — stream, update rules, statistics, one run."""
 import dataclasses
 import math
 
 import numpy as np
 import pytest
 
-from mup import nested as X
+from sscl_core import nested as X
 
 
 def cond(**kw):
@@ -60,8 +60,8 @@ def test_raw_theta_is_the_frozen_population_flow(clock):
     """θ_c = 1 − exp(−Λ_c ā²_c) is what the project's population kernel removes with the readout frozen."""
     import jax
     import jax.numpy as jnp
-    import mup._x64  # noqa: F401
-    from mup.model import Params, train_block
+    import sscl_core._x64  # noqa: F401
+    from sscl_core.model import Params, train_block
     c = cond()
     s = X.Stream(c, 2)
     W, a = s.init()

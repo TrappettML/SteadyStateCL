@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 from conftest import state_with_task
 
-from mup import model
+from sscl_core import model
 
 
 def test_sgd_step_matches_autograd():

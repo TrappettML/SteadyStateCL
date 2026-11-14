@@ -12,7 +12,7 @@ and runs one chunk of the pilot batch on each GPU through
 ``protocol.batched_run_tasks`` (the same kernel ``run_sweep.py`` uses),
 comparing every GPU's result with the CPU's.  With ``--bench`` it starts
 one ``old/bench.py`` subprocess per GPU (``CUDA_VISIBLE_DEVICES=i``,
-the environment of ``mup.driver.worker_env``) so all cards run at the same
+the environment of ``sscl_core.driver.worker_env``) so all cards run at the same
 time, and prints each table.  Exit status is nonzero when a check fails.
 """
 import argparse
@@ -23,7 +23,7 @@ import time
 
 import _path  # noqa: F401
 
-from mup import driver
+from sscl_core import driver
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -44,10 +44,10 @@ def check_inprocess(N: int, B: int, chunk: int, self_test: bool = False) -> int:
     import jax.numpy as jnp
     import numpy as np
 
-    from mup import device
-    from mup.config import Config, make_runs
-    from mup.observe import age_schedule
-    from mup.protocol import batched_run_tasks, init_batch
+    from sscl_core import device
+    from sscl_core.config import Config, make_runs
+    from sscl_core.observe import age_schedule
+    from sscl_core.protocol import batched_run_tasks, init_batch
 
     fails = 0
 

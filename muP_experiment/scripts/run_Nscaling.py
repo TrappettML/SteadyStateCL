@@ -10,7 +10,7 @@ more while the teacher of task T is followed: S_T(m) = u_{T+m}·w_T*/|w_T*|²
 for m = 0 … T, with the gate of task T and its stored head (task heads)
 or the current shared readout.
 
-The half-life (``--stat``, ``mup.halflife``).  The default, ``mean``, is the write-up's m½: the mean curve
+The half-life (``--stat``, ``sscl_core.halflife``).  The default, ``mean``, is the write-up's m½: the mean curve
 Σ(m) = ⟨S_T(m)⟩/⟨S_T(0)⟩ over seeds (eq. Sigma) first crosses ½ at m½ (linear interpolation), with a jackknife
 standard error over seeds; this is the number the equations predict.  ``seed`` is the mean over seeds of each
 seed's own half-life, a different statistic (a noisy curve crosses ½ earlier on average) with censored seeds
@@ -32,7 +32,7 @@ left out; both go to the ``.npz``.  Two figures in ``results/Nscaling/figures/``
 The values are written to ``mhalf_….npz`` beside the figures: ``N{N}_k{κ}_{readout}`` (the statistic drawn),
 ``seed_N{N}_k{κ}_{readout}`` (the per-seed half-lives) and ``theory_N{N}_k{κ}_{readout}`` (``theory.mhalf``).
 
-Placement (``mup.pool``): the runs of one width — every κ, readout and
+Placement (``sscl_core.pool``): the runs of one width — every κ, readout and
 seed, which share (N, D, n_steps, T) — form one ``vmap`` batch advanced
 ``--chunk`` tasks per device call with S_T evaluated inside the scan
 (``experiments.signal_after_tasks``) and runs as a job, largest N first,
@@ -51,12 +51,12 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import halflife as H
-from mup import plotting as P
-from mup import pool
-from mup import theory as TH
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
+from sscl_core import experiments as X
+from sscl_core import halflife as H
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core import theory as TH
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -64,7 +64,7 @@ _T0 = time.perf_counter()        # wall clock from after the imports to the end 
 GATED = tuple(ro for ro in READOUT_ORDER if is_gated(ro))
 
 
-#: First crossing of half the initial value, linearly interpolated (``mup.halflife``); kept under this name for
+#: First crossing of half the initial value, linearly interpolated (``sscl_core.halflife``); kept under this name for
 #: the scripts that import it.
 half_life = H.half_life
 
@@ -144,7 +144,7 @@ def collect(runs: list[Run], plan: pool.Plan, stat: str = "mean",
     plan : pool.Plan
         Placement and pieces per width (``pool.plan`` over ``groups(runs)``).
     stat : {"mean", "seed"}
-        Half-life statistic (``mup.halflife``): the mean curve's (the write-up's m½) or the per-seed mean.
+        Half-life statistic (``sscl_core.halflife``): the mean curve's (the write-up's m½) or the per-seed mean.
     log : callable
         Progress sink.
 
@@ -156,7 +156,7 @@ def collect(runs: list[Run], plan: pool.Plan, stat: str = "mean",
         ``seed`` the per-seed half-lives of the same conditions.
     """
     jobs = make_jobs(groups(runs), plan.pieces)
-    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
+    res = pool.run_jobs("sscl_core.experiments:signal_after_tasks", jobs, log=log, **plan.place)
     cond = reduce(jobs, res, stat)
     run_of = {cond_key(r): r for r in runs}
     out, seed = {}, {}

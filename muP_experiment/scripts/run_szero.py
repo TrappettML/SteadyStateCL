@@ -15,7 +15,7 @@ decay of S₀(t) from there is the memory of that task.  One trace per readout o
 signal divided by its seed mean after task 0 (eq. Sigma; band: jackknife ±1 s.e.), and the half-life m½ in
 the caption is its first crossing of ½, the root of Σ = ½ that the theory predicts.  With ``--stat seed`` the
 trace is the seed mean of each seed's own S₀(t)/S₀(0) and m½ the mean of the per-seed half-lives, a different
-statistic (``mup.halflife``).  Dotted, in the readout's colour: the write-up's curve for the readouts whose
+statistic (``sscl_core.halflife``).  Dotted, in the readout's colour: the write-up's curve for the readouts whose
 equation holds from a fresh start, eq. (S_heads) for task heads and eq. (S_frozen) for the frozen ones
 (``theory.sigma``); the learned shared readout has no fresh-start curve (its key drift and leak-removal factor
 depend on norms that are still growing; ``run_stask.py`` draws eq. S_learned at steady state).
@@ -24,7 +24,7 @@ N = 100, κ = 1, δ₀ = 0 by default; solver, λ and step-size rule come from
 Stage-1 one, T_burn + T_meas tasks (1400 at N = 100), unless ``--tasks``.  The
 per-task arrays are written next to the figure as ``szero_….npz``.
 
-Placement (``mup.pool``): every readout and seed of a cell is one ``vmap``
+Placement (``sscl_core.pool``): every readout and seed of a cell is one ``vmap``
 batch advanced ``--chunk`` tasks per device call with S₀ evaluated inside
 the scan (``experiments.signal_after_tasks``) and runs as a job over the GPUs
 (``--gpus``: the four cards, several processes each, the cells split only
@@ -41,12 +41,12 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import halflife as H
-from mup import plotting as P
-from mup import pool
-from mup import theory as TH
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
+from sscl_core import experiments as X
+from sscl_core import halflife as H
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core import theory as TH
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -126,7 +126,7 @@ def collect(cells_: dict[tuple, list[Run]], T: int, plan: pool.Plan,
             log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
     """Run the distinct runs of every cell through ``pool.run_jobs`` and return ``{cell: {readout: (T, n_seeds)}}``."""
     jobs = make_jobs(groups(cells_), T, plan.pieces)
-    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
+    res = pool.run_jobs("sscl_core.experiments:signal_after_tasks", jobs, log=log, **plan.place)
     return per_cell(cells_, columns(jobs, res))
 
 
@@ -196,7 +196,7 @@ def figure(S0: dict[str, np.ndarray], run0: Run, path: str, stat: str = "mean") 
     return P.save(fig, path, figdata=figdata)
 
 
-#: First crossing of half the initial value, linearly interpolated (``mup.halflife``).
+#: First crossing of half the initial value, linearly interpolated (``sscl_core.halflife``).
 half_life = H.half_life
 
 #: What the trace is, per statistic (``what`` the signal, ``ref`` its reference point), for captions.
@@ -207,7 +207,7 @@ MHALF_TEXT = {"mean": "of the mean curve, ± jackknife s.e.", "seed": "of each s
 
 
 def seed_signal(Y: np.ndarray, stat: str = "mean") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Normalized signal and half-life of a (T, n_seeds) signal under a half-life statistic (``mup.halflife``).
+    """Normalized signal and half-life of a (T, n_seeds) signal under a half-life statistic (``sscl_core.halflife``).
 
     Returns
     -------

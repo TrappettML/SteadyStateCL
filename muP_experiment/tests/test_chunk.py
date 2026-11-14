@@ -6,7 +6,7 @@ setting); draws and integer outputs must match exactly, floats to 1e-10.
 import numpy as np
 from conftest import small_runs  # noqa: F401
 
-from mup.protocol import run_stream
+from sscl_core.protocol import run_stream
 
 
 def test_chunked_stream_matches(small_runs):
@@ -27,8 +27,8 @@ def test_chunked_stream_matches(small_runs):
 def test_chunked_trace_matches():
     import dataclasses
     from conftest import one_batch
-    from mup.config import Config, make_runs
-    cfg = Config(N=[10], readout=["gated_shared", "task_heads"], delta0=[1.0], lam=[1.0], seeds=1,
+    from sscl_core.config import Config, make_runs
+    cfg = Config(solver="pop", N=[10], readout=["gated_shared", "task_heads"], delta0=[1.0], lam=[1.0], seeds=1,
                  T_factor=0.5, T_min=5, trace=True, trace_points=4)
     runs = one_batch(make_runs(cfg))
     ref = run_stream(runs, chunk=1)

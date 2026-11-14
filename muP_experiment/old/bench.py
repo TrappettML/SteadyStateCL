@@ -3,7 +3,7 @@
 
     python old/bench.py --N 20 100 --B 1 8 32 64 128 [--solver pop|sgd] [--chunk 1 16]
 
-Run on the Xeon with the thread-pinning environment of mup.driver.PINNED_ENV to
+Run on the Xeon with the thread-pinning environment of sscl_core.driver.PINNED_ENV to
 choose B and the worker count.  On a GPU (``CUDA_VISIBLE_DEVICES=0``) sweep B
 up to ~1024 and ``--chunk`` (tasks per device call) to pick ``--batch-size``
 and ``--chunk`` for ``run_sweep.py``; ``old/gpu_check.py --bench`` runs
@@ -18,10 +18,10 @@ import _path  # noqa: F401
 
 import jax.numpy as jnp
 
-from mup import device
-from mup.config import Config, make_runs
-from mup.observe import age_schedule
-from mup.protocol import batched_run_task, batched_run_tasks, init_batch
+from sscl_core import device
+from sscl_core.config import Config, make_runs
+from sscl_core.observe import age_schedule
+from sscl_core.protocol import batched_run_task, batched_run_tasks, init_batch
 
 
 def bench(N, B, solver, n_tasks, eta, chunk=1):

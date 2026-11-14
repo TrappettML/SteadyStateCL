@@ -17,7 +17,7 @@ row 2, steady state      the teacher of task T followed for τ more tasks, m½ t
 
 (the two rows of ``run_halflife_lam.py``; half-lives linearly interpolated; ``--stat mean``, the default, is the
 write-up's m½, the first crossing of ½ by the mean curve over seeds, ``--stat seed`` the mean of the per-seed
-half-lives — ``mup.halflife``.)  Each row has its own colour bar, shared by its panels, with limits taken from
+half-lives — ``sscl_core.halflife``.)  Each row has its own colour bar, shared by its panels, with limits taken from
 that row's data: logarithmic when the row spans more than a factor ``LOG_RATIO``, linear otherwise.
 
 Safe (λ, δ₀).  A cell is run only when the write-up's conditions hold for its readout (``safety``):
@@ -43,7 +43,7 @@ N = 100, κ = 1 by default; solver and step rule from ``configs/stage1.yaml``.  
 (14 N tasks) and ``--tau`` to T.  The half-lives (the statistic drawn, the per-seed ones under ``…_seed``) and
 the safety table go to ``mhalf_lr_….npz``.
 
-Placement (``mup.pool``): n_steps is static in the kernels, so every λ is its own set of ``vmap`` batches, one
+Placement (``sscl_core.pool``): n_steps is static in the kernels, so every λ is its own set of ``vmap`` batches, one
 per ``experiments.group_key`` with every δ₀ and seed together (δ₀ < −0.9 has its own n_steps, hence its own
 batch).  Each batch is ONE stream of T + τ + 1 tasks (``experiments.first_and_steady_signal``).  The batches
 run as jobs, costliest first, over the GPUs (``--gpus``), over ``--workers`` CPU processes, or in this process.
@@ -59,11 +59,11 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import halflife as H
-from mup import plotting as P
-from mup import pool
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
+from sscl_core import experiments as X
+from sscl_core import halflife as H
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
 from run_Nscaling import _stat
 from run_halflife_lam import ROWS, cost, make_jobs, reduce_rows
 
@@ -111,7 +111,7 @@ def groups(runs: list[Run], n_tasks: int) -> dict[tuple, list[Run]]:
 def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, stat: str = "mean",
             log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
     """``{(readout, λ, δ₀): {"S0": (n_seeds,) m½ values of the first memory, "ST": those at steady state, "S0_seed",
-    "ST_seed": the per-seed half-lives}}`` (``run_halflife_lam.reduce_rows``; ``stat`` as ``mup.halflife``).
+    "ST_seed": the per-seed half-lives}}`` (``run_halflife_lam.reduce_rows``; ``stat`` as ``sscl_core.halflife``).
 
     Parameters
     ----------
@@ -130,7 +130,7 @@ def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, stat: str = "mea
         NaN for a censored or infeasible seed.
     """
     jobs = make_jobs(groups(runs, T + tau + 1), T, tau, plan.pieces)
-    res = pool.run_jobs("mup.experiments:first_and_steady_signal", jobs, log=log, **plan.place)
+    res = pool.run_jobs("sscl_core.experiments:first_and_steady_signal", jobs, log=log, **plan.place)
     red = reduce_rows(jobs, res, cond_key, stat)
     out = {}
     for key in sorted(red, key=lambda k: (READOUT_ORDER.index(k[0]), k[1], k[2])):

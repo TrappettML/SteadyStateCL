@@ -1,4 +1,4 @@
-"""``mup.theory`` against the numbers the write-up quotes, ``mup.halflife``, and the task clock / readout exponent
+"""``sscl_core.theory`` against the numbers the write-up quotes, ``sscl_core.halflife``, and the task clock / readout exponent
 of the kernels against the write-up's identities ("Step sizes and learning per task")."""
 import math
 
@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 
 from conftest import one_batch, params
-from mup import halflife as H
-from mup import model
-from mup import theory as T
-from mup.config import Config, make_runs, short_burn_in, unstable_runs
-from mup.protocol import run_stream
+from sscl_core import halflife as H
+from sscl_core import model
+from sscl_core import theory as T
+from sscl_core.config import Config, make_runs, short_burn_in, unstable_runs
+from sscl_core.protocol import run_stream
 
 
 # ----------------------------------------------------------------------------
@@ -183,7 +183,7 @@ def test_active_qmax_is_the_norm_of_M():
 
 @pytest.mark.parametrize("clock", ["realized", "nominal"])
 def test_recorded_exponents_obey_the_write_up(clock):
-    cfg = Config(N=[16], kappa=[2.0], readout=["gated_shared", "task_heads", "learned_shared"], delta0=[0.5], lam=[2.0],
+    cfg = Config(solver="pop", N=[16], kappa=[2.0], readout=["gated_shared", "task_heads", "learned_shared"], delta0=[0.5], lam=[2.0],
                  seeds=1, T_factor=0.25, T_min=4, clock=clock)
     runs = one_batch([r for r in make_runs(cfg) if r.gated == 1.0])
     res = run_stream(runs)
@@ -213,9 +213,9 @@ def test_recorded_exponents_obey_the_write_up(clock):
 # config: clock, contraction condition, burn-in, initialization
 # ----------------------------------------------------------------------------
 def test_clock_defaults_and_checks(capsys):
-    from mup.config import Run
-    assert Config().clock == "realized"
-    runs = make_runs(Config(N=[10], readout=["gated_shared"], seeds=1))
+    from sscl_core.config import Run
+    assert Config(solver="pop").clock == "realized"
+    runs = make_runs(Config(solver="pop", N=[10], readout=["gated_shared"], seeds=1))
     assert runs[0].clock == "realized" and runs[0].clock_id == 1.0 and "clock" not in runs[0].label()
     d = runs[0].to_dict()
     assert Run.from_dict(d).clock == "realized"
@@ -223,9 +223,10 @@ def test_clock_defaults_and_checks(capsys):
     assert Run.from_dict(d).clock == "nominal"                                  # batch files written before the clock ran (i)
     assert make_runs(Config(N=[10], readout=["gated_frozen"], seeds=1, solver="sgd", eta=[0.05]))[0].clock == "nominal"
     with pytest.raises(ValueError):
-        make_runs(Config(clock="stop"))
+        make_runs(Config(solver="pop", clock="stop"))
     capsys.readouterr()
     stage1 = Config.from_yaml("configs/stage1.yaml")
+    stage1 = Config(**{**stage1.__dict__, "solver": "pop"})                     # the Stage-1 grid under the population solver
     real = make_runs(stage1)
     assert not unstable_runs(real)                                              # eq. (popstab) holds under clock (ii)
     assert "popstab" not in capsys.readouterr().out
@@ -235,8 +236,8 @@ def test_clock_defaults_and_checks(capsys):
     assert "popstab" in capsys.readouterr().out
     assert not short_burn_in(real, 9.0) and short_burn_in(real, 9.95)           # 7θν/ln 2 = 9.9ν at λ = 4
     with pytest.raises(ValueError):
-        make_runs(Config(delta0=[-3.0], sigma0=[1.5]))                          # δ₀ ≤ −σ₀²
-    assert make_runs(Config(N=[10], readout=["frozen"], delta0=[-1.5], sigma0=[1.5], seeds=1))
+        make_runs(Config(solver="pop", delta0=[-3.0], sigma0=[1.5]))                          # δ₀ ≤ −σ₀²
+    assert make_runs(Config(solver="pop", N=[10], readout=["frozen"], delta0=[-1.5], sigma0=[1.5], seeds=1))
 
 
 def test_readout_guard():

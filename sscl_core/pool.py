@@ -391,6 +391,7 @@ def job_bytes(runs: Sequence, T: int, chunk: int, out_per_task: float) -> int:
     r = runs[0]
     P = max(T, r.T_burn + r.T_meas)
     per_run = state_bytes(r, 1) + 8 * r.N * (P - (r.T_burn + r.T_meas))
+    per_run += max((getattr(rr, "extra_state_bytes", 0) for rr in runs), default=0)   # e.g. a replay buffer (replay.RRun)
     return int(MEM_FACTOR * per_run * len(runs) + chunk * len(runs) * out_per_task)
 
 

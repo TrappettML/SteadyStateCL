@@ -20,7 +20,7 @@ row 2, steady state      the same network trains on; the teacher of task T is fo
 
 Both half-lives are linearly interpolated.  ``--stat mean`` (default) is the write-up's m½, the first crossing
 of ½ by the mean curve over seeds (eq. Sigma) with a jackknife s.e.; ``--stat seed`` is the mean ± 1 s.e. of
-the per-seed half-lives over the seeds that reach half (``mup.halflife``).  A curve that never reaches half
+the per-seed half-lives over the seeds that reach half (``sscl_core.halflife``).  A curve that never reaches half
 within its window (T tasks, row 1; τ tasks, row 2) is censored: left out and counted in the caption and on
 the console.  Dotted, in the readout's colour: the half-life of the readout's equation at each λ
 (``theory.mhalf``), which scales as 1/θ — eq. (S_heads), eq. (S_frozen) and, in the steady-state row,
@@ -34,7 +34,7 @@ task takes n_steps = 10 λ population steps at δ₀ = 0 (h ā² ≤ 0.1) and th
 axis still starts there.  The half-lives (the statistic drawn, and the per-seed ones under ``…_seed``) are
 written next to the figure as ``mhalf_vs_lam_….npz``.
 
-Placement (``mup.pool``): n_steps is static in the kernels, so every λ is its own set of ``vmap`` batches —
+Placement (``sscl_core.pool``): n_steps is static in the kernels, so every λ is its own set of ``vmap`` batches —
 per λ one batch per ``experiments.group_key`` (the stepped gated readouts, the closed-form frozen ones, the
 ungated ones), every seed together.  Each batch is ONE stream of T + τ + 1 tasks
 (``experiments.first_and_steady_signal``): its first T tasks are the life of the first memory and the burn-in
@@ -52,12 +52,12 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import halflife as H
-from mup import plotting as P
-from mup import pool
-from mup import theory as TH
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
+from sscl_core import experiments as X
+from sscl_core import halflife as H
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core import theory as TH
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
 from run_Nscaling import _stat
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
@@ -141,7 +141,7 @@ def _report(key: tuple, d: dict, T: int, tau: int) -> None:
 def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, stat: str = "mean",
             log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
     """``{(readout, λ): {"S0": (n_seeds,) m½ values of the first memory, "ST": those at steady state, "S0_seed",
-    "ST_seed": the per-seed half-lives}}`` (``reduce_rows``; ``stat`` as ``mup.halflife``).
+    "ST_seed": the per-seed half-lives}}`` (``reduce_rows``; ``stat`` as ``sscl_core.halflife``).
 
     Parameters
     ----------
@@ -162,7 +162,7 @@ def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, stat: str = "mea
         In (readout, λ) order; NaN for a censored or infeasible seed.
     """
     jobs = make_jobs(groups(runs, T + tau + 1), T, tau, plan.pieces)
-    res = pool.run_jobs("mup.experiments:first_and_steady_signal", jobs, log=log, **plan.place)
+    res = pool.run_jobs("sscl_core.experiments:first_and_steady_signal", jobs, log=log, **plan.place)
     red = reduce_rows(jobs, res, cond_key, stat)
     out = {}
     for key in sorted(red, key=lambda k: (READOUT_ORDER.index(k[0]), k[1])):

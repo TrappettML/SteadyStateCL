@@ -19,10 +19,10 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import plotting as P
-from mup.config import is_gated
-from mup.observe import half_life
-from mup.results import (by_kappa, condition_mhalf, drift_rate, group_by, half_stats, kappa_min, level_stats, load_runs,
+from sscl_core import plotting as P
+from sscl_core.config import is_gated
+from sscl_core.observe import half_life
+from sscl_core.results import (by_kappa, condition_mhalf, drift_rate, group_by, half_stats, kappa_min, level_stats, load_runs,
                          mhalf_by_condition, seed_curves, seed_mean, seed_sem, seed_stack)
 
 #: C2-A rows: (scalar key, quantile keys or None); labels come from plotting.QUANTITY_LABEL (§12.7 G2)
@@ -551,7 +551,7 @@ def _cv_gamma(records, age_index=1):
     dict
         ``{readout: (gamma, n_widths)}``; ``gamma`` NaN with fewer than two usable widths.
     """
-    from mup.observe import cv_exponent
+    from sscl_core.observe import cv_exponent
     out = {}
     for (ro,), recs_ro in group_by(records, ("readout",)).items():
         slopes, nN = [], 0

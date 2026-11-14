@@ -3,7 +3,7 @@ import jax
 import numpy as np
 from conftest import state_with_task
 
-from mup import model
+from sscl_core import model
 
 
 def _drift_pop(h, n_alpha=0.5):

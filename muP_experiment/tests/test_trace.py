@@ -3,8 +3,8 @@ import jax.numpy as jnp
 import numpy as np
 from conftest import small_runs  # noqa: F401
 
-from mup.observe import age_schedule
-from mup.protocol import SCALARS, TRACE_QUANT, batched_run_task, init_batch, trace_indices
+from sscl_core.observe import age_schedule
+from sscl_core.protocol import SCALARS, TRACE_QUANT, batched_run_task, init_batch, trace_indices
 
 
 def test_trace_matches_untraced(small_runs):

@@ -27,10 +27,10 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import io
-from mup import plotting as P
-from mup.config import is_gated
-from mup.results import by_kappa, group_by, kappa_min, load_runs, mhalf_by_condition, seed_mean, seed_stack, slice_groups
+from sscl_core import io
+from sscl_core import plotting as P
+from sscl_core.config import is_gated
+from sscl_core.results import by_kappa, group_by, kappa_min, load_runs, mhalf_by_condition, seed_mean, seed_stack, slice_groups
 
 #: F1/F2 rows: (scalar key, quantile keys or None); heads_fro2_post is appended when task heads are present
 ROWS = (("Q_act_pre", ("Q_q05", "Q_q95")), ("a2_act_post", None), ("aQ_act_post", ("aQ_q05", "aQ_q95")),

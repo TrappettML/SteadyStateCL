@@ -3,8 +3,8 @@ import jax
 import numpy as np
 from conftest import state_with_task
 
-from mup import model
-from mup.observe import evaluate_probes
+from sscl_core import model
+from sscl_core.observe import evaluate_probes
 import jax.numpy as jnp
 
 

@@ -10,9 +10,9 @@ import numpy as np
 import pytest
 from conftest import params, state_with_task
 
-from mup import model
-from mup.config import Config, make_batches, make_runs
-from mup.protocol import _step_and_project, _step_fn, run_stream
+from sscl_core import model
+from sscl_core.config import Config, make_batches, make_runs
+from sscl_core.protocol import _step_and_project, _step_fn, run_stream
 
 
 def _loop(st, p, k_stream, n_steps, solver):
@@ -32,7 +32,7 @@ def _loop(st, p, k_stream, n_steps, solver):
 
 
 @pytest.mark.parametrize("readout", ["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"])
-@pytest.mark.parametrize("solver", ["pop", "sgd"])
+@pytest.mark.parametrize("solver", ["pop", "sgd", "sgd4"])
 @pytest.mark.parametrize("delta0", [1.0, -0.3])
 def test_block_matches_explicit_loop(readout, solver, delta0):
     N, D, n_steps = 12, 48, 7
@@ -56,6 +56,32 @@ def test_block_matches_explicit_loop(readout, solver, delta0):
         np.testing.assert_allclose(r["Q_pre"], model.Q_diag(pre_state.W), rtol=1e-10, atol=0)
         np.testing.assert_allclose(r["a_pre"], pre_state.a, rtol=0, atol=1e-11)
         np.testing.assert_allclose(r["uc_before"], model.u_c(pre_state, p), rtol=0, atol=1e-11)
+
+
+@pytest.mark.parametrize("readout", ["gated_shared", "gated_frozen", "task_heads"])
+def test_batch_sgd_step_is_the_sum_of_single_sample_updates(readout):
+    """``sgd_step`` with B samples moves W and a by the sum of the B updates of eqs. (sgdW)–(sgda), each from the
+    weights the step starts with; B = 1 is the online step bit for bit."""
+    N, D, B = 12, 48, 5
+    st, p = state_with_task(seed=7, N=N, D=D, readout=readout, delta0=0.5, pN=4.0)
+    k = jax.random.PRNGKey(4)
+    got = model.sgd_step(st, p, k, B)
+    X = np.asarray(jax.random.normal(k, (B, D), dtype=st.W.dtype))
+    W, a, g, w = (np.asarray(v) for v in (st.W, st.a, st.g, st.w))
+    eta, pN, la = float(p.eta), float(p.pN), float(p.learn_a)
+    dW, da = np.zeros_like(W), np.zeros_like(a)
+    for x in X:
+        hx = W @ x / np.sqrt(D)
+        e = (g * a) @ hx / pN - w @ x / np.sqrt(D)
+        dW -= eta * (g * a)[:, None] * e * x[None, :] / np.sqrt(D)
+        da -= la * eta / D * g * e * hx
+    assert np.abs(dW).max() > 0
+    np.testing.assert_allclose(got.W, W + dW, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(got.a, a + da, rtol=0, atol=1e-12)
+    one = model.sgd_step(st, p, k, 1)
+    ref = model.sgd_step(st, p, k)
+    assert np.array_equal(one.W, ref.W) and np.array_equal(one.a, ref.a)
+    assert [model.sgd_batch(s) for s in ("pop", "sgd", "sgd32")] == [0, 1, 32]
 
 
 def test_block_overflow_is_nan_not_silent():
@@ -84,7 +110,7 @@ def test_block_rows_bounds_the_gate():
 
 
 def test_closed_runs_batch_apart_and_mixed_batches_step():
-    cfg = Config(N=[10], readout=["gated_shared", "gated_frozen", "frozen"], delta0=[0.0], seeds=2, batch_size=64)
+    cfg = Config(solver="pop", N=[10], readout=["gated_shared", "gated_frozen", "frozen"], delta0=[0.0], seeds=2, batch_size=64)
     runs = make_runs(cfg)
     for b in make_batches(runs, 64):
         assert len({r.closed for r in b}) == 1
@@ -104,9 +130,9 @@ def test_stored_heads_are_masked_and_pre_value_rescaled(small_runs):
 
 
 def test_infeasible_rows_are_redrawn_and_seeds_kept():
-    cfg = Config(N=[5], readout=["gated_shared"], delta0=[-0.75], seeds=12, T_min=2, T_factor=0.1)
+    cfg = Config(solver="pop", N=[5], readout=["gated_shared"], delta0=[-0.75], seeds=12, T_min=2, T_factor=0.1)
     runs = make_runs(cfg)
-    from mup.protocol import feasible, init_batch
+    from sscl_core.protocol import feasible, init_batch
     assert feasible(runs).all()                                    # every seed survives at D = 20, δ₀ = −0.75
     st, p = init_batch(runs)
     Q = np.asarray(jax.vmap(model.Q_diag)(st.W))
@@ -119,18 +145,18 @@ def test_infeasible_rows_are_redrawn_and_seeds_kept():
 
 
 def test_sigma0_scales_the_initial_W():
-    cfg = Config(N=[5], readout=["frozen"], delta0=[0.0], seeds=1, sigma0=[1.0, 2.0], T_min=2, T_factor=0.1)
+    cfg = Config(solver="pop", N=[5], readout=["frozen"], delta0=[0.0], seeds=1, sigma0=[1.0, 2.0], T_min=2, T_factor=0.1)
     runs = make_runs(cfg)
     assert len(runs) == 2 and runs[0].rng_seed() == runs[1].rng_seed() and runs[0].label() != runs[1].label()
-    from mup.protocol import init_batch
+    from sscl_core.protocol import init_batch
     st, _ = init_batch(runs)
     np.testing.assert_allclose(st.W[1], 2.0 * st.W[0])
 
 
 def test_changed_config_marks_batches_stale(tmp_path):
-    from mup import io
-    from mup.protocol import run_stream
-    cfg = Config(N=[5], readout=["gated_shared"], delta0=[0.0], seeds=2, T_min=2, T_factor=0.1, batch_size=64)
+    from sscl_core import io
+    from sscl_core.protocol import run_stream
+    cfg = Config(solver="pop", N=[5], readout=["gated_shared"], delta0=[0.0], seeds=2, T_min=2, T_factor=0.1, batch_size=64)
     batches = io.plan_sweep(cfg, str(tmp_path))
     io.save_batch(str(tmp_path), 0, run_stream(batches[0]), batches[0])
     assert io.pending_batches(str(tmp_path)) == []
@@ -141,9 +167,9 @@ def test_changed_config_marks_batches_stale(tmp_path):
 
 
 def test_load_runs_warns_on_duplicates(tmp_path):
-    from mup import io
-    from mup.results import load_runs
-    cfg = Config(N=[5], readout=["gated_shared"], delta0=[0.0], seeds=2, T_min=2, T_factor=0.1, batch_size=64)
+    from sscl_core import io
+    from sscl_core.results import load_runs
+    cfg = Config(solver="pop", N=[5], readout=["gated_shared"], delta0=[0.0], seeds=2, T_min=2, T_factor=0.1, batch_size=64)
     batches = io.plan_sweep(cfg, str(tmp_path))
     res = run_stream(batches[0])
     io.save_batch(str(tmp_path), 0, res, batches[0])

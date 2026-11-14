@@ -17,7 +17,7 @@ on each GPU, each seeing one device.  A GPU wants big ``vmap`` batches, so
 ``--batch-size`` overrides the YAML's (it is recorded in the manifest: keep it
 fixed for the life of a results directory, or use ``--out``/``--fresh``).
 ``--chunk`` sets the tasks scanned per device call (default 16 on a GPU, 1
-on the CPU; see ``mup.device``).
+on the CPU; see ``sscl_core.device``).
 """
 import argparse
 import dataclasses
@@ -27,8 +27,8 @@ import time
 
 import _path  # noqa: F401
 
-from mup import io
-from mup.config import Config
+from sscl_core import io
+from sscl_core.config import Config
 
 _T0 = time.perf_counter()        # wall clock from after the imports to the end of the script
 
@@ -73,7 +73,7 @@ def main(argv=None):
     out = args.out or os.path.join(_path.ROOT, "results", cfg.name)
     config_path = os.path.abspath(args.config)
     if args.chunk is not None:
-        os.environ["MUP_CHUNK"] = str(args.chunk)       # read by mup.device in this process
+        os.environ["MUP_CHUNK"] = str(args.chunk)       # read by sscl_core.device in this process
 
     if args.batch_id is not None:
         # one batch under the driver: the driver owns the manifest, so only write the batch file
@@ -83,7 +83,7 @@ def main(argv=None):
 
     gpus = None
     if args.gpus is not None:
-        from mup import driver
+        from sscl_core import driver
         if len(args.gpus) == 1 and args.gpus[0].lower() == "auto" or len(args.gpus) == 0:
             gpus = driver.visible_gpus()
             if not gpus:
@@ -98,7 +98,7 @@ def main(argv=None):
     n_runs = sum(len(b) for b in batches)
     print(f"{cfg.name}: {n_runs} runs in {len(batches)} batches → {out}")
     if args.dry_run:
-        from mup.protocol import feasible, state_bytes
+        from sscl_core.protocol import feasible, state_bytes
         n_skip = 0
         for i, b in enumerate(batches):
             r = b[0]
@@ -112,7 +112,7 @@ def main(argv=None):
 
     pending = io.pending_batches(out)          # after --fresh every batch is pending
     if args.workers > 0 or gpus:
-        from mup import driver
+        from sscl_core import driver
         res = driver.launch(config_path, out, args.workers, args.numa_nodes, args.threads, pending,
                             gpus=gpus, per_gpu=args.per_gpu, chunk=args.chunk)
         print(f"done: {len(res['done'])}, failed: {len(res['failed'])}")
@@ -141,8 +141,8 @@ def run_batch(out, i, batch, log_every, update_manifest=True):
     update_manifest : bool
         False under the driver, which owns the manifest.
     """
-    from mup.protocol import feasible, run_stream
-    from mup import device
+    from sscl_core.protocol import feasible, run_stream
+    from sscl_core import device
     r = batch[0]
     print(f"batch {i}: {len(batch)} runs  N={r.N} κ={r.kappa_label} {r.solver} n_steps={r.n_steps} T={r.T_burn + r.T_meas}"
           f"  [{device.describe()}]", flush=True)

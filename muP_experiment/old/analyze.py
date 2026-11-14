@@ -36,10 +36,10 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import plotting as P
-from mup.config import is_gated
-from mup.observe import cv_exponent, half_life
-from mup.results import (COND_KEYS, by_kappa, condition_mhalf, group_by, half_stats, kappa_min, level_stats, load_runs,
+from sscl_core import plotting as P
+from sscl_core.config import is_gated
+from sscl_core.observe import cv_exponent, half_life
+from sscl_core.results import (COND_KEYS, by_kappa, condition_mhalf, group_by, half_stats, kappa_min, level_stats, load_runs,
                          mhalf_by_condition, mhalf_stats, seed_curves, seed_mean, seed_mhalf, seed_sem, sem,
                          slice_groups)
 

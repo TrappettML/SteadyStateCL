@@ -31,7 +31,7 @@ names the equation label in the `.tex`):
   Σ(m) = ⟨S(m)⟩/⟨S(0)⟩ over seeds, m½ its first crossing of ½ (linear
   interpolation), jackknife s.e.  `--stat seed` gives the mean of per-seed
   half-lives, a different (smaller, noisier) statistic; both go to the `.npz`.
-- **Equations drawn, not N ln 2** (`mup/theory.py`): eq. `S_heads`,
+- **Equations drawn, not N ln 2** (`../sscl_core/theory.py`): eq. `S_heads`,
   `S_frozen`, `S_learned` with p = κ/√N, ν = 1 − (1 − p)^N, θ = 1 − e^(−λ);
   the key drift of `S_learned` comes from the closed-form steady-state norms
   eq. `abarss`, with no measured input.  The weight-norm figures overlay
@@ -58,6 +58,7 @@ names the equation label in the `.tex`):
 | `scripts/run_lr_comp.py` | how the half-life depends on both rate parameters, the hidden-layer learning per task λ and the imbalance δ₀ (the rate ratio η_a/η_W) (heat maps per readout), for the first memory and for a steady-state one | `results/lr_comp/` |
 | `scripts/run_halflife_kappa.py` | how the half-life depends on the gate scale κ, from κ = 1 to √N, for the first memory and for a steady-state one | `results/halflife_kappa/` |
 | `scripts/run_synapse_comp.py` | does gating synapses instead of hidden units change the half-life: m½ vs N, both gatings | `results/synapse_comp/` |
+| `scripts/run_nested.py` | is the student more than a palimpsest: five nested models (SGD, gradient flow, two delta rules, Hebb) on one task stream, with pre-set rules for when two forgetting curves coincide | `results/nested/` |
 | `scripts/run_training_verify.py` | is every task learned: the per-step loss at the start, middle and end of the stream | `results/training_verify/` |
 
 ## Setup
@@ -82,6 +83,33 @@ checks the cards.
 
 Every script takes the same grid and placement flags.  With no placement
 flag it runs in this process; `--gpus` alone is the whole GPU placement.
+
+**Solver (since 2026-11-13): online SGD by default.**  `configs/stage1.yaml`
+and the `Config` class both default to `solver: sgd` with `eta: [auto]`,
+i.e. η = 0.05/(1 + δ₀), one fresh sample per step, the nominal clock
+(`--clock realized` has no effect on SGD).  A task then takes
+n = λD/(0.05·B) = 320N/B steps at λ = 4 — 2000 at N = 100 with the
+config's batch of B = 16 samples per step (below), 32 000 with
+`--sgd_batch 1` — instead of the population solver's 40, so the larger
+grids below are GPU-node jobs and on the laptop need small N or `--tasks`.
+**Batch SGD: `--sgd_batch B`** (every script that takes `--clock`; or
+`sgd_batch: B` in the config; `configs/stage1.yaml` sets 16, the `Config`
+class default is 1).  A step then draws B fresh
+inputs and applies the sum of their B single-sample updates, each
+computed at the weights the step starts with, at the same η.  Per sample
+the drift and the noise are those of online SGD, and a task takes
+n = 320N/B steps.  B = 1 is online SGD bit for bit; B must keep
+(B/D)·η(1 + δ₀) ≤ 0.1, i.e. B ≤ 2D at the default rate, where a step is a
+population step with sampling noise.  The equivalence with online SGD is
+to leading order in B/D, so keep B well below D (say ≤ D/4) when the SGD
+noise itself is the object.  Runs with different B never share a batch
+(the kernel's solver name is `sgd{B}`).
+
+For the population solver set `solver: pop` in the config (or pass a
+`--config` that has it; `eta: [auto]` is then 1).  Synaptic gating
+(`--synapse`, `--synaptic`) is implemented for the population solver only
+and exits under the default.  The equations overlaid on the figures are
+the population-limit ones.
 
 ```bash
 # laptop, in-process, small
@@ -124,7 +152,7 @@ figure paths, and the total wall time.
 | `--readout …` | subset of `gated_shared learned_shared gated_frozen frozen task_heads` (default all). |
 | `--out DIR` | results directory (default `results/<script name>/`); figures go to `DIR/figures/`. |
 
-### Placement flags (all scripts, `mup/pool.py`)
+### Placement flags (all scripts, `../sscl_core/pool.py`)
 
 | flag | meaning |
 |---|---|
@@ -378,7 +406,7 @@ stream of T + τ + 1 tasks.  T defaults to T_burn + T_meas = 14 N and τ to
 T — 28 001 tasks per run at N = 1000; `--T` / `--tau` shorten it.
 
 `--synaptic` adds every gated readout with the gate on the synapse
-(`mup/synapse.py`, as `run_synapse_comp.py`: same initial weights,
+(`../sscl_core/synapse.py`, as `run_synapse_comp.py`: same initial weights,
 teachers, heads and task duration as the unit-gated twin), dash-dotted
 with open squares.  A synaptic step touches all N·D synapses at every κ,
 so at N = 1000 these runs dominate the cost.
@@ -398,7 +426,7 @@ python scripts/run_synapse_comp.py --synapse --N 10 20 --kappa 1 --seeds 2     #
 ```
 
 The experiment and flags of `run_Nscaling.py`.  `--synapse` also runs
-every gated readout with the gate on the synapse (`mup/synapse.py`: a
+every gated readout with the gate on the synapse (`../sscl_core/synapse.py`: a
 mask of i.i.d. indicators on the N × D weights at the density κ/√N of the
 unit gate, the projection on all N units) and adds it to both figures as
 a trace.  A synaptic run has the initial weights, teachers, fresh heads
@@ -423,6 +451,7 @@ ratio synaptic / unit.
 
 ```
 python scripts/run_training_verify.py [--cell N,kappa,delta0 ...] [--seeds 4] [--lam 4] [--gpus]
+                                      [--comp_opts] [--eta_sgd η] [--tasks T]
 ```
 
 For every cell (default `100,2,1`, `50,1,0`, `20,1,4`, `200,2,1`) every
@@ -441,6 +470,21 @@ curves, `{readout}` (n_seeds, 6, n_steps + 1), with `tasks`.
 
 Console: per readout the loss at the start and end of the first and the
 last traced task.
+
+`--comp_opts` compares the optimization methods: every cell is trained
+with the population solver and with online SGD from the same seeds, and
+`loss_comp_N{N}_k{κ}_d0{δ₀}.png` overlays the two, one colour per readout,
+population solid and SGD dotted, on x = fraction of the task's steps (the
+solvers take different numbers of steps per task).  SGD's rate is
+`--eta_sgd`, by default the largest allowed, 0.05/(1 + δ₀); SGD always
+runs the nominal clock.  The `.npz` adds `sgd_{readout}`.  SGD takes
+n = λD/(η(1 + δ₀)) steps per task (32 000 at N = 100 against 40), so on
+the laptop shorten the stream with `--tasks T` (any run; default the
+config's T_burn + T_meas):
+
+```bash
+python scripts/run_training_verify.py --cell 20,1,0 --tasks 40 --comp_opts
+```
 
 ### `run_loss_slope.py` — area under the current task's loss curve against task
 
@@ -465,6 +509,82 @@ least-squares slope of the curve per step), `loss_start_…` and
 Console: per readout the area of task 0 and its mean over the second half
 of the stream, beside n·L_start and the fitted slope.
 
+### `run_nested.py` — nested-model test: SGD, gradient flow, delta rules, Hebb
+
+```
+python scripts/run_nested.py [--N 256] [--D-factor 2] [--delta0 0 1 10] [--overlap 0.1 0.5] [--rho 0 0.7] [--lam 1] [--seeds 10] [--models …] [--no-ref-checks] [--reuse] [--workers K] [--gpus [ids]]
+python scripts/run_nested.py --gpus --workers 8                                                                # GPU node, the full design
+python scripts/run_nested.py --N 32 --seeds 2 --delta0 0 10 --overlap 0.25 --rho 0 --no-ref-checks --out /tmp/nested     # laptop, seconds
+```
+
+Does the gated shared readout forget like a simpler pattern memory, and
+if not, which ingredient makes the difference?  Five models
+(`../sscl_core/nested.py`), each removing one ingredient from the one above:
+
+| model | what it is | removes |
+|---|---|---|
+| `sgd` | the project's model, online SGD (`model.train_block` on the GPU, `npmodel.step_task` on the CPU; projection on) | nothing |
+| `gf` | the same network on the population loss, step hηā² = 0.02 | sampling noise |
+| `delta_matched` | readout frozen at the forked value; one relaxed projection per task, θ_c = 1 − exp(−ϱΛ_cā²_c), with ϱ gradient flow's measured exponent over its bare hidden-channel one | the second layer, except its effect on the rate |
+| `delta_raw` | the same with ϱ = 1: nothing fitted | the second layer |
+| `hebb` | W ← (1 − γ)W + bΛ_c k_c w_cᵀ; (b, γ) tuned once at the reference condition to gradient flow's ε(0) and τ½, then fixed | error correction |
+
+Protocol: gradient flow is burned in from the initialisation until the
+errors of recent tasks are stationary (≥ 10 half-lives of eq. S_learned,
+about 6 measured lifetimes at the reference condition; the report flags a
+fork whose drift is above 5 %), (W, a) is copied, and SGD, gradient flow
+and the delta rules train the same next tasks from the copy; Hebb is
+burned in separately on the same stream with the forked readout as its
+keys.  Every model reads the same teachers and gates, and the stream does
+not depend on δ₀ or λ.  `--overlap` is the gate density p (two gates share
+a fraction p of their units; κ = p√N).  At ρ > 0 the teachers are
+w = √ρ U z + √(1 − ρ) ξ with one shared direction (`--latent common`, cosine
+ρ between any two teachers) or the write-up's z on the sphere of R^r
+(`--latent sphere --rank r`).  Clock (ii) by default, so θ = 1 − e^(−λ) at
+every δ₀; SGD then takes η_c = c/ā²_c per task at its fixed step count
+(`--clock nominal` for clock (i)).
+
+Measured (exact population errors, no test samples): the memory curve
+M(τ) = 1 − E_c(τ)/E_∞ over the age τ, with E_∞ the same network's error on
+a task before it trains on it; the lifetime τ½ (M = M(0)/2, on the
+seed-mean curve, jackknife s.e.); ε(0); exponential, stretched-exponential
+and power-law fits; for SGD and gradient flow the key-drift fraction
+φ_key = (E_full − E_value)/(E_full − E(0)), E_value being the error
+through the key the task had when learned; and the rate ratio ϱ.
+
+Two curves coincide (`nested.coincide`) if max_τ |M_A − M_B|/M_A(0) < 0.05,
+τ½ agrees within 10 %, and the difference is within 2 s.e.m. across seeds
+(on the age-averaged curve and on τ½).  Applied to SGD vs gradient flow,
+gradient flow vs Δ-matched, Δ-matched vs Δ-raw and Δ-matched vs Hebb.
+
+Besides the grid δ₀ × p × ρ, three checks run at the reference condition
+(`--ref-delta0 1 --ref-overlap 0.1 --ref-rho 0`): `--ref-lam 1 5`,
+`--ref-N 128 256 512` and `--ref-D-factor 2 4`.
+
+Output, in `results/nested/`: `nested_report.md` (every number, every
+comparison, the decision table applied), `nested_summary.json`,
+`nested.npz`, `figures/nested_curves.png` (M(τ): rows (p, ρ), columns δ₀),
+`figures/nested_summary.png` (τ½, ε(0), φ_key, ϱ against δ₀),
+`figures/nested_reference.png`, `figures/nested_tau_vs_N.png`, and `raw/`
+(one pickle per condition and seed; `--reuse` reads them back, so the
+analysis and the Hebb stage can be redone without retraining).
+
+Placement: with `--gpus` SGD and gradient flow run on the device
+(`--backend jax`, chosen automatically): the seeds of a condition are one
+`vmap` batch through `model.train_block`, one device call per task
+(`nested.JaxTrainer`), and `sscl_core.pool` spreads the conditions over the
+cards (`--per-gpu` processes per card, default up to 3; `--split k` cuts
+each condition's seeds into k batches).  Without `--gpus` the NumPy
+kernel runs one (condition, seed) per CPU process (`--workers`).  The
+delta rules, Hebb and the probes are NumPy on the host either way, and
+the Hebb stage always uses `--workers`.  The two backends take the same
+population steps (`tests/test_nested.py` compares them); their SGD inputs
+are different draws, so a `raw/` file is tied to its backend.
+
+Cost: SGD takes λD/c steps per task (10 240 at D = 512, c = `--sgd-eta`
+0.05) and is nearly all of the wall time; everything else is seconds per
+run.  `--models gf delta_matched delta_raw hebb` is a first pass without it.
+
 ## Readouts
 
 | key | gated | learns a | projection | heads | what it is |
@@ -484,23 +604,24 @@ and in the caption.
 
 | path | what |
 |---|---|
-| `scripts/run_*.py` (the scripts above) | each: build the runs, group them into jobs, run the jobs through `mup.pool`, draw |
-| `mup/theory.py` | the write-up's closed forms, one function per equation label: Σ(m) of each readout and its half-life, the steady-state norms eq. abarss/Qss, the key drift, the readout-exponent bounds, eq. popstab, the burn-in in half-lives, the synaptic θ̄ |
-| `mup/halflife.py` | half-life statistics: the mean curve's m½ with its jackknife (the write-up's), the per-seed mean |
-| `mup/synapse.py` | synaptic gating: the masked task, probe and job function of `run_synapse_comp.py` |
-| `mup/experiments.py` | the batched kernels and job functions of the scripts: one task without observables, the per-task/per-step observables evaluated inside a `scan`, NaN columns for infeasible runs |
-| `mup/pool.py` | the jobs over GPUs, CPU processes or in-process; `--gpus` planning |
-| `mup/config.py` | `Config` (YAML), `Run`, readout table, task duration and clock, grid → runs, the contraction and burn-in checks |
-| `mup/model.py` | single-run kernels on a `State` pytree: init, SGD and population steps, the projection, the active-row block loop, the task clock (`task_h`) and the active-block spectrum (`active_qmax`) |
-| `mup/protocol.py` | the sweep kernel the experiments are checked against; batching and feasibility helpers |
-| `mup/device.py`, `mup/driver.py` | backend defaults (chunk size); worker environments (thread pinning, `CUDA_VISIBLE_DEVICES`) |
-| `mup/plotting.py` | the only style file: readout colours, panel grid, legend row, caption, `save` with its legibility checks |
+| `scripts/run_*.py` (the scripts above) | each: build the runs, group them into jobs, run the jobs through `sscl_core.pool`, draw |
+| `../sscl_core/theory.py` | the write-up's closed forms, one function per equation label: Σ(m) of each readout and its half-life, the steady-state norms eq. abarss/Qss, the key drift, the readout-exponent bounds, eq. popstab, the burn-in in half-lives, the synaptic θ̄ |
+| `../sscl_core/halflife.py` | half-life statistics: the mean curve's m½ with its jackknife (the write-up's), the per-seed mean |
+| `../sscl_core/synapse.py` | synaptic gating: the masked task, probe and job function of `run_synapse_comp.py` |
+| `../sscl_core/nested.py` | the nested-model test of `run_nested.py`: the task stream, the five models, probes, the coincidence rule, the Hebb tuning |
+| `../sscl_core/experiments.py` | the batched kernels and job functions of the scripts: one task without observables, the per-task/per-step observables evaluated inside a `scan`, NaN columns for infeasible runs |
+| `../sscl_core/pool.py` | the jobs over GPUs, CPU processes or in-process; `--gpus` planning |
+| `../sscl_core/config.py` | `Config` (YAML), `Run`, readout table, task duration and clock, grid → runs, the contraction and burn-in checks |
+| `../sscl_core/model.py` | single-run kernels on a `State` pytree: init, SGD and population steps, the projection, the active-row block loop, the task clock (`task_h`) and the active-block spectrum (`active_qmax`) |
+| `../sscl_core/protocol.py` | the sweep kernel the experiments are checked against; batching and feasibility helpers |
+| `../sscl_core/device.py`, `../sscl_core/driver.py` | backend defaults (chunk size); worker environments (thread pinning, `CUDA_VISIBLE_DEVICES`) |
+| `../sscl_core/plotting.py` | the only style file: readout colours, panel grid, legend row, caption, `save` with its legibility checks |
 | `configs/stage1.yaml` | the settings every script starts from |
 | `tests/` | `test_theory.py` (the closed forms against the numbers in the write-up; the clock, the readout exponent and its bounds, the half-life statistics), `test_experiments.py` (kernels vs the sweep kernel, the pool, the planner), `test_block.py`, `test_gpu.py`, and the kernel tests |
 
 Old code lives in `old/`: the scripts of the earlier, sweep-based version
 of the experiments (the sweep `run_sweep.py`, `analyze.py`, `plot_*.py`,
 `validate.py`, `bench.py`, `run_sigma0.py`, `gpu_check.py`), run as
-`python old/<script>.py`.  They and the `mup/` modules only they use
+`python old/<script>.py`.  They and the `../sscl_core/` modules only they use
 (`results.py`, `npmodel.py`, and most of `observe.py` and `io.py`) are not
 part of the current write-up and are not documented here.

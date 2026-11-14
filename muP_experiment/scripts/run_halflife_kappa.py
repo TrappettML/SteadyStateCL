@@ -20,13 +20,13 @@ The gated readouts are traces over κ.  The ungated ones (learned shared, frozen
 active, the κ = √N point of their gated counterpart — so each is one value, drawn as a dashed horizontal line
 with a ±1 s.e. band.  Half-lives are linearly interpolated.  ``--stat mean`` (default) is the write-up's m½, the
 first crossing of ½ by the mean curve over seeds (eq. Sigma) with a jackknife s.e.; ``--stat seed`` is the mean
-± 1 s.e. of the per-seed half-lives (``mup.halflife``).  A curve that never reaches half within its window
+± 1 s.e. of the per-seed half-lives (``sscl_core.halflife``).  A curve that never reaches half within its window
 (T tasks, row 1; τ tasks, row 2) is censored: left out and counted in the caption and on the console.
 Dotted, in a gated readout's colour: the half-life of its equation over κ (``theory.mhalf``: eqs. S_heads,
 S_frozen and, in the steady-state row, S_learned; ``run_halflife_lam.theory_mhalf``).  Dotted grey: N ln 2.
 
 ``--synaptic`` adds, for every gated readout, the same runs with the gate on the synapse (write-up Section
-"Synaptic gating", ``mup.synapse``): task c has a mask Γ_c ∈ {0, 1}^{N×D} of i.i.d. indicators with
+"Synaptic gating", ``sscl_core.synapse``): task c has a mask Γ_c ∈ {0, 1}^{N×D} of i.i.d. indicators with
 Pr = p = κ/√N applied entrywise to W, u_{c,j} = Σ_i γ_cij a_i W_ij / pN; the step is eq. (syn_pop) and the
 projection runs on all N units after every step.  A synaptic run has the W⁽⁰⁾, readout, teachers and fresh heads
 of its unit-gated twin.  Under ``--clock nominal`` (clock (i)) it also has its task duration, so the pair
@@ -43,7 +43,7 @@ N = 1000, δ₀ = 0 by default and λ the config's (4).  T defaults to the Stage
 The half-lives (the statistic drawn, and the per-seed ones under ``…_seed``) are written next to the figure as
 ``mhalf_vs_kappa_….npz``.
 
-Placement (``mup.pool``): a gated batch steps on the block of its active rows, about κ√N of the N, so every κ
+Placement (``sscl_core.pool``): a gated batch steps on the block of its active rows, about κ√N of the N, so every κ
 is its own ``vmap`` batch (``experiments.group_key``), all seeds together, and the cost grows with κ.  Each
 batch is ONE stream of T + τ + 1 tasks (``experiments.first_and_steady_signal``).  The batches run as jobs,
 costliest first, over the GPUs (``--gpus``: every card, several processes each, a batch split over cards as far
@@ -62,12 +62,12 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import halflife as H
-from mup import plotting as P
-from mup import pool
-from mup import synapse as S
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
+from sscl_core import experiments as X
+from sscl_core import halflife as H
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core import synapse as S
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
 from run_Nscaling import _stat
 from run_halflife_lam import ROWS, cost, make_jobs, reduce_rows, theory_mhalf
 from run_synapse_comp import CLOCK_TEXT
@@ -138,7 +138,7 @@ def _report(key: tuple, d: dict, T: int, tau: int) -> None:
 def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, synaptic: bool = False, stat: str = "mean",
             log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
     """``{(readout, κ label): {"S0": (n_seeds,) m½ values of the first memory, "ST": those at steady state,
-    "S0_seed", "ST_seed": the per-seed half-lives}}`` (``run_halflife_lam.reduce_rows``; ``stat`` as ``mup.halflife``).
+    "S0_seed", "ST_seed": the per-seed half-lives}}`` (``run_halflife_lam.reduce_rows``; ``stat`` as ``sscl_core.halflife``).
 
     Parameters
     ----------
@@ -152,7 +152,7 @@ def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, synaptic: bool =
         Placement and pieces per group (``pool.plan`` over ``groups(runs, T + tau + 1)``, or over
         ``syn_groups`` when ``synaptic``).
     synaptic : bool
-        Run the gated runs of ``runs`` with the gate on the synapse (``mup.synapse``) instead.
+        Run the gated runs of ``runs`` with the gate on the synapse (``sscl_core.synapse``) instead.
     log : callable
         Progress sink.
 
@@ -163,10 +163,10 @@ def collect(runs: list[Run], T: int, tau: int, plan: pool.Plan, synaptic: bool =
     """
     if synaptic:
         jobs = syn_jobs(syn_groups(runs, T + tau + 1), T, tau, plan.pieces)
-        res = pool.run_jobs("mup.synapse:first_and_steady_signal", jobs, log=log, **plan.place)
+        res = pool.run_jobs("sscl_core.synapse:first_and_steady_signal", jobs, log=log, **plan.place)
     else:
         jobs = make_jobs(groups(runs, T + tau + 1), T, tau, plan.pieces)
-        res = pool.run_jobs("mup.experiments:first_and_steady_signal", jobs, log=log, **plan.place)
+        res = pool.run_jobs("sscl_core.experiments:first_and_steady_signal", jobs, log=log, **plan.place)
     red = reduce_rows(jobs, res, cond_key, stat)
     kappa_of = {cond_key(r): r.kappa for _, kw, _ in jobs for r in kw["runs"]}
     out = {}

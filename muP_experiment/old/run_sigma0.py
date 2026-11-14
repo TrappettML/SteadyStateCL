@@ -18,7 +18,7 @@ from the σ₀ = 1 curve over the ages, per readout (each seed against its
 own σ₀ = 1 run, averaged over seeds).
 
 Placement as ``validate.py``: every σ₀'s batches run as jobs over the GPUs
-(``--gpus``), ``--workers`` CPU processes or this process (``mup.pool``).
+(``--gpus``), ``--workers`` CPU processes or this process (``sscl_core.pool``).
 """
 import argparse
 import os
@@ -29,10 +29,10 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import plotting as P
-from mup import pool
-from mup.config import Config, READOUT_ORDER, make_batches, make_runs
+from sscl_core import experiments as X
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core.config import Config, READOUT_ORDER, make_batches, make_runs
 
 
 def configs(args, cfg: Config) -> dict:
@@ -58,7 +58,7 @@ def batches_of(cfgs: dict) -> list:
 def run_all(cfgs: dict, place: dict, log) -> dict:
     """``{sigma0: {(N, readout, eta): curves}}`` (``experiments.seed_curves``) through ``pool.run_jobs``."""
     jobs = [((s0, i), {"runs": batch}, X.job_cost(batch, T)) for s0, i, batch, T in batches_of(cfgs)]
-    res = pool.run_jobs("mup.experiments:stream_batch", jobs, log=log, **place)
+    res = pool.run_jobs("sscl_core.experiments:stream_batch", jobs, log=log, **place)
     return {s0: X.seed_curves([(kw["runs"], r) for ((s, _), kw, _), r in zip(jobs, res) if s == s0]) for s0 in cfgs}
 
 

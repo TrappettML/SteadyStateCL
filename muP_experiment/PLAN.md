@@ -16,7 +16,7 @@ run in this order, every parameter written out, by `run_all.sh`
 | `scripts/run_gauge_comp.py` | Δᵢ per step, projection off / on | §6.1 |
 | `scripts/run_szero.py` | S₀(t): the first teacher's signal against task | §6.2 |
 | `scripts/run_stask.py` | S_T(τ): a steady-state teacher's signal against age | §6.3 |
-| `scripts/run_Nscaling.py` | m½ against N and κ, simulation vs the half-life of each readout's equation (`mup/theory.py`) | §6.4 |
+| `scripts/run_Nscaling.py` | m½ against N and κ, simulation vs the half-life of each readout's equation (`../sscl_core/theory.py`) | §6.4 |
 | `scripts/run_weight_norms.py` | weight norms against task and against N | §6.5 |
 | `scripts/run_imbalance_comp.py` | weight norms and m½ across δ₀ | §6.6 |
 | `scripts/run_training_verify.py` | per-step loss at the start, middle and end of the stream | §6.7 |
@@ -27,15 +27,15 @@ version of the experiments (`run_sweep.py`, `analyze.py`, `plot_norms.py`,
 `plot_check2.py`, `validate.py`, `bench.py`, `run_sigma0.py`,
 `gpu_check.py` with its helper `conftest_free.py`) were moved there on
 2026-11-06; they run as `python old/<script>.py` (`old/_path.py` puts the
-package root on `sys.path`, as `scripts/_path.py` does).  The `mup/`
-modules only they use (`mup/results.py`, `mup/npmodel.py`) and the
-sweep-only parts of `mup/observe.py`, `mup/io.py` and `mup/driver.py`
+package root on `sys.path`, as `scripts/_path.py` does).  The `../sscl_core/`
+modules only they use (`../sscl_core/results.py`, `../sscl_core/npmodel.py`) and the
+sweep-only parts of `../sscl_core/observe.py`, `../sscl_core/io.py` and `../sscl_core/driver.py`
 stay in the package, because `experiments.py` and `pool.py` import the
 rest of those three modules.  The old code keeps passing its tests
 (`tests/test_plotting.py` imports the old scripts from `old/`;
 `driver.launch` starts `old/run_sweep.py`) but is outside this document.
 Do not extend it for the write-up; add to the scripts in `scripts/` or to
-`mup/experiments.py`.
+`../sscl_core/experiments.py`.
 
 ## 1. Stack and machines
 
@@ -47,33 +47,33 @@ Do not extend it for the write-up; add to the scripts in `scripts/` or to
 | precision | float64 | float64 | float64 |
 
 The same code runs on all three; nothing is backend-specific except the
-chunk default (`mup/device.py`: 16 tasks per device call on a GPU, 1 on
-the CPU) and the worker environments (`mup/driver.py`).  Python 3.12 on the
+chunk default (`../sscl_core/device.py`: 16 tasks per device call on a GPU, 1 on
+the CPU) and the worker environments (`../sscl_core/driver.py`).  Python 3.12 on the
 CPU machines; the GPU node's Python is older, so the code avoids syntax
 newer than 3.9 (`Optional[...]`, not `X | None`, in annotations; `list[...]`
 generics are fine).
 
-`mup/_x64.py` sets `jax_enable_x64` and is imported first by every JAX
-module (`model`, `protocol`, `experiments`, `device`); `mup/__init__.py`,
+`../sscl_core/_x64.py` sets `jax_enable_x64` and is imported first by every JAX
+module (`model`, `protocol`, `experiments`, `device`); `../sscl_core/__init__.py`,
 `config.py`, `plotting.py` and `pool.py` do not import JAX, so a script's
 argument parsing and the pool's parent process stay JAX-free.
 
 ## 2. Files the scripts depend on
 
 ```
-scripts/_path.py            puts the package root on sys.path (import _path first)
+scripts/_path.py            puts this folder and the repo root (sscl_core/) on sys.path (import _path first)
 scripts/run_*.py            the experiment scripts (§6)
 run_all.sh                  runs them in the order of the table above, every parameter explicit
-mup/config.py               Config (YAML), Run, READOUTS, task_duration, make_runs
-mup/model.py                Params, State, steps, projection, init, train_block
-mup/protocol.py             run_task (the reference kernel), make_params, batched_init,
+../sscl_core/config.py               Config (YAML), Run, READOUTS, task_duration, make_runs
+../sscl_core/model.py                Params, State, steps, projection, init, train_block
+../sscl_core/protocol.py             run_task (the reference kernel), make_params, batched_init,
                             feasible, block_of, state_bytes, _step_fn, _step_and_project
-mup/experiments.py          train_task, probe_signal, task_norms, imbalance_stats,
+../sscl_core/experiments.py          train_task, probe_signal, task_norms, imbalance_stats,
                             the chunked kernels, the job functions, group_key, run_cost, split
-mup/pool.py                 run_jobs, Progress/report, add_args, plan, Plan
-mup/device.py               platform, default_chunk (MUP_CHUNK)
-mup/driver.py               PINNED_ENV, GPU_ENV, GPU_MEM_SHARE, worker_env, visible_gpus, gpu_memory_gb
-mup/plotting.py             style, READOUT_COLOR/LABEL/STYLE, grid, save, legend, caption, helpers
+../sscl_core/pool.py                 run_jobs, Progress/report, add_args, plan, Plan
+../sscl_core/device.py               platform, default_chunk (MUP_CHUNK)
+../sscl_core/driver.py               PINNED_ENV, GPU_ENV, GPU_MEM_SHARE, worker_env, visible_gpus, gpu_memory_gb
+../sscl_core/plotting.py             style, READOUT_COLOR/LABEL/STYLE, grid, save, legend, caption, helpers
 configs/stage1.yaml         the defaults every script starts from
 tests/test_experiments.py   kernels vs run_task; pool; planner
 tests/test_block.py         train_block vs the explicit loop; closed form; redraws
@@ -204,7 +204,7 @@ row redraws; at N ≤ 20 and δ₀ = −0.75 a seed can still fail.  Infeasible
 runs are dropped from the batch and returned as NaN; every script tolerates
 NaN columns (skips the readout or seed, counts it in the caption).
 
-## 4. `mup/experiments.py`: kernels and job functions
+## 4. `../sscl_core/experiments.py`: kernels and job functions
 
 Every script reduces to jobs for `pool.run_jobs`; a job is a list of
 `Run` sharing `group_key(r) = (N, D, solver, n_steps, closed)` (every κ,
@@ -236,7 +236,7 @@ Observables:
 - `imbalance_stats`: mean, min, max of `Δ_i` over active units and
   `max|Δ_i − Δ₀|`.
 
-Job functions (named `"mup.experiments:<name>"` for the pool; their
+Job functions (named `"sscl_core.experiments:<name>"` for the pool; their
 arguments and results must pickle):
 
 | function | arguments | returns |
@@ -255,7 +255,7 @@ default).  `pool.Progress` reports every tenth of the tasks.
 Helpers: `run_cost(r, T) = N·D·n_steps·T` orders the queue; `split(runs,
 pieces)` cuts a group into ≤ `pieces` contiguous parts.
 
-## 5. `mup/pool.py`: placement
+## 5. `../sscl_core/pool.py`: placement
 
 `run_jobs(func, jobs, gpus, per_gpu, workers, chunk, log, keep_dir)` with
 `jobs = [(key, kwargs, cost)]` returns results in job order:
@@ -263,14 +263,14 @@ pieces)` cuts a group into ≤ `pieces` contiguous parts.
 - in-process (`gpus=None, workers ≤ 1`): calls the function here, largest
   first; `MUP_CHUNK` set from `chunk`.
 - otherwise it writes a spool directory (`spec.pkl`, `job_i.pkl`), starts
-  `python -m mup.pool <dir>` workers with `driver.worker_env` (GPU: one
+  `python -m sscl_core.pool <dir>` workers with `driver.worker_env` (GPU: one
   card each via `CUDA_VISIBLE_DEVICES`, memory fraction
   `GPU_MEM_SHARE/per_gpu`; CPU: `PINNED_ENV`, single-threaded XLA/BLAS),
   and polls `prog_i.txt`/`done_i.txt`.  The `slots` largest jobs are
   pinned one per slot in order (slot `s` → card `s % len(gpus)`), the rest
   are claimed largest first through `claim_i` files.  A failed job's
   traceback (`err_i.txt`) or a dead worker raises `RuntimeError` after all
-  workers exit.  Workers run from `pool.ROOT` so `mup` imports.
+  workers exit.  Workers run from `pool.ROOT` (the folder that holds `sscl_core/`) and get the script's `sys.path` as `PYTHONPATH`, so `sscl_core` and an experiment's own modules import.
 
 `plan(args, groups, out_per_task, split)` turns the `add_args` options into
 a `Plan` (`gpus, per_gpu, workers, chunk, pieces, mem_gb`; `plan.place`
@@ -304,7 +304,7 @@ figure they belong to) → `make_jobs` (one `(key, kwargs, cost)` per piece
 of a group) → `collect` (`pool.run_jobs`, then reassemble per condition
 from `Run.label()` or `(N, kappa_label, readout, seed)`) → `figure`
 (`plotting`; since 2026-11-11 the half-lives are those of the seed-mean
-curve by default, `--stat`, and the equations of `mup/theory.py` are
+curve by default, `--stat`, and the equations of `../sscl_core/theory.py` are
 overlaid: §10, where the per-seed wording of the subsections below is
 superseded) → `main` (argparse with `pool.add_args`, config override,
 `pool.plan`, banner, loop over cells).  Every script prints its wall time
@@ -499,6 +499,18 @@ a warning as a bug in the figure.
   `axvline` at n + ½, y log with ≤ 6 ticks, inner spines removed and break
   marks between the panels; `plot_readout` + `band` (seed mean ± s.e.);
   `.npz`: `{readout}` (n_seeds, 6, n_steps + 1), `tasks`, `step`.
+- `--comp_opts` (2026-11-13): `runs_of` is called twice, `solver="pop"`
+  and `solver="sgd"` (η = `--eta_sgd` or `sgd_eta` = sgd_contraction/(1 + δ₀)
+  per cell); the SGD cells sit in the same dict under `(N, κ, δ₀, "sgd")`,
+  so `groups`/`collect` are unchanged (`group_key` separates the solvers).
+  `figure_comp` → `loss_comp_N{N}_k{κ}_d0{δ₀}`: the three panels with
+  `SOLVER_LS` (population solid, SGD dotted), x = step/n_steps per task
+  since n_steps differs (40 vs λD/(η ā²_nom)); `.npz` adds `sgd_{readout}`
+  and `step_sgd`.  The seeds are shared, so both solvers start from the
+  same W⁽⁰⁾, readout, teachers and gates.  SGD is on the nominal clock
+  (`make_runs`), the population solver on `--clock`: with the default the
+  two also differ in task duration.  `--tasks T` overrides the stream
+  length of either mode (`stream_T`).
 
 ### 6.8 `run_loss_slope.py` — area under the current task's loss curve against task
 
@@ -520,7 +532,7 @@ a warning as a bug in the figure.
   per readout; the ungated readouts are the same runs in every column.
   `.npz`: `{key}_k{κ}_{readout}` (T, n_seeds), `task`.
 
-## 7. Plotting conventions used (`mup/plotting.py`)
+## 7. Plotting conventions used (`../sscl_core/plotting.py`)
 
 `apply_style()` first in every figure function.  Panels from
 `grid(nrows, ncols, sharex, sharey, panel=(w, h))`; one `cell_title`
@@ -678,3 +690,77 @@ regenerate.
 - 2026-11-12 (later): `run_loss_slope.py` plots the area under the task's
   loss curve instead of its fitted slope (`experiments.curve_area`, `area`
   first in `SLOPE_KEYS`); the slope stays in the `.npz`.
+- 2026-11-13: `run_training_verify.py --comp_opts` (population vs SGD
+  learning curves, §6.7), with `--eta_sgd` and `--tasks`; without the flag
+  the script's output is unchanged.
+- 2026-11-13: `scripts/run_nested.py` and `mup/nested.py` added (the
+  nested-model test: SGD, gradient flow, Δ-matched, Δ-raw, Hebb from one
+  fork on one stream; `tests/test_nested.py`).  Two backends for SGD and gradient flow, both existing kernels unchanged:
+  `--gpus` → `model.train_block` vmapped over the seeds of a condition
+  (`nested.JaxTrainer`, jobs over the cards through `mup.pool`); CPU →
+  `npmodel.step_task` per run (9× faster per SGD step than the jitted
+  kernel on the laptop at N = 256, D = 512); `mup/plotting.py` gained the model
+  colours (`MODEL_COLOR`, `model_handles`).  Choices made there that the
+  design left open: gate overlap = gate density p; clock (ii) for every
+  model, with SGD at a per-task η_c = c/ā²_c; the Hebb write scales with
+  the task duration; the 2-s.e.m. criterion is tested on the age-averaged
+  curve and τ½, not at the age of the largest deviation.
+- 2026-11-13: **SGD is the default solver.**  `Config.solver = "sgd"`,
+  `Config.eta = ("auto",)` and `configs/stage1.yaml` (`solver: sgd`,
+  `eta: [auto]`); `config.resolve_eta` turns `"auto"` into
+  sgd_contraction/(1 + δ₀) for SGD (so n = round(λD/sgd_contraction) at
+  every δ₀) and 1 for the population solver.  No kernel changed.  The
+  sections above still describe the population runs: under SGD the clock
+  is nominal, nothing is closed-form, n_steps = 320N at λ = 4 (not 40),
+  and the per-step outputs of `run_gauge_comp` and `run_training_verify`
+  grow by the same factor (pass `--tasks`).  The tests that check the
+  population kernels, the closed form and the reference hash now pass
+  `solver="pop"` explicitly; `tests/test_config.py` pins the new default.
+  `configs/pilot.yaml` and `trace.yaml` stay population.  `run_all.sh`
+  names no solver, so it now runs SGD.
+- 2026-11-13: **batch SGD** (`Config.sgd_batch`, `--sgd_batch`, default 1).
+  A step sums the B single-sample updates of eqs. (sgdW)–(sgda) from B
+  fresh inputs at the weights it starts with, same η (`model.sgd_step`,
+  the SGD branch of `model.train_block`); `task_duration` gives
+  n = round(λD/(η ā²_nom B)) and refuses (B/D) η ā²_nom > `pop_contraction`.
+  B is static (it sets the shape of the input draw), so it travels in the
+  solver token: `Run.solver` is `"pop"`, `"sgd"` or `"sgd{B}"`
+  (`config.solver_token`, read back by `model.sgd_batch`), which keeps
+  every kernel signature, `group_key` and the kernel caches as they were;
+  test a solver with `== "pop"` or `.startswith("sgd")`, never
+  `== "sgd"`.  `Run.sgd_batch` holds B (0 for the population solver).
+  B = 1 takes the old code path, bit for bit.  `--sgd_batch` is added by
+  `config.add_clock_arg` and applied by `clock_override`, so every script
+  with `--clock` has it.  Λ_c of an SGD task is η n B/D (`protocol.run_task`,
+  `run_weight_norms.py`).  Tests: `test_block.py` (`sgd4` against the
+  explicit loop; the step against the summed single-sample updates),
+  `test_config.py`.  The write-up still defines one sample per step.
+- 2026-11-13: `configs/stage1.yaml` sets `sgd_batch: 16` (the `Config`
+  class default stays 1).  Laptop, N = 100, κ = 1, δ₀ = 0, λ = 4, s per
+  task for the gated / ungated group: B = 1 20.2 / 65.4, B = 4 2.6 / 2.1,
+  B = 16 2.0 / 1.5, B = 64 1.9 / 1.4, B = 400 1.9 / 1.3, population
+  0.21 / 0.26; loss_end/loss_start of the gated group 1.28e-3 at B = 1,
+  1.33e-3 at 16, 1.19e-3 at 400.  Past B ≈ 16 the time per task is flat.
+- 2026-11-13: the package `muP_experiment/mup/` moved, unchanged, to
+  `../sscl_core/` (import name `sscl_core`) so other experiments
+  (`knapsack_experiment/`, `replay_experiment/`) share it; each experiment
+  keeps `scripts/`, `configs/`, `tests/`, `results/`.  `scripts/_path.py`
+  now puts both this folder (`ROOT`) and the repo root (`REPO`) on
+  `sys.path`; job functions are named `"sscl_core.experiments:<name>"`;
+  pool workers are `python -m sscl_core.pool`, run from the repo root and
+  inherit the script's `sys.path` through `PYTHONPATH` (so a job function
+  may live in an experiment's own module).  `../sscl_core/__init__.py` remains as
+  an alias: `import mup.model` returns `sscl_core.model` itself.  Paths in
+  the entries above are the ones of their date.  No numerical change
+  (`tests/reference_hash.txt` untouched).
+- 2026-11-13: `../sscl_core/replay.py` added for `../replay_experiment/`
+  (sample replay on `learned_shared`; its docstring is the specification,
+  `../replay_experiment/README.md` the user notes).  It reuses
+  `experiments._batch`, `_expand`, `chunks`, `probe_signal` and the draws
+  of `model.train_block` (`replay.sgd_phase` is that function's SGD loop
+  for the ungated case with per-sample targets; method `none` reproduces
+  `experiments.signal_after_tasks`, `replay_experiment/tests`).  One
+  change to existing code: `pool.job_bytes` adds a run's optional
+  `extra_state_bytes` (the replay buffer, `replay.RRun`) to the planner's
+  memory estimate; runs without the attribute plan as before.  No
+  numerical change to this experiment.

@@ -1,20 +1,20 @@
-"""``mup.synapse`` (synaptic gating) against the unit-gated kernels at p = 1, a NumPy loop, and its own closed form."""
+"""``sscl_core.synapse`` (synaptic gating) against the unit-gated kernels at p = 1, a NumPy loop, and its own closed form."""
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from mup import experiments as X
-from mup import model as M
-from mup import synapse as S
-from mup.config import Config, make_runs
-from mup.protocol import init_batch
+from sscl_core import experiments as X
+from sscl_core import model as M
+from sscl_core import synapse as S
+from sscl_core.config import Config, make_runs
+from sscl_core.protocol import init_batch
 
 GATED = ["gated_shared", "gated_frozen", "task_heads"]
 
 
 def _runs(kappa, N=9, seeds=2, lam=1.0, delta0=0.5, readout=GATED, clock="realized"):
-    cfg = Config(name="t", N=[N], kappa=[kappa], readout=readout, delta0=[delta0], lam=[lam], seeds=seeds,
+    cfg = Config(solver="pop", name="t", N=[N], kappa=[kappa], readout=readout, delta0=[delta0], lam=[lam], seeds=seeds,
                  T_per_N=1.0, T_min=4, clock=clock, burn_halflives=0.0)
     return make_runs(cfg)
 

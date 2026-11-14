@@ -12,7 +12,7 @@ measurement window t ≥ T_burn) and the steady-state half-life m½ of the
 probe stored after T tasks (``experiments.signal_after_tasks`` with
 ``T_pre = T, k = T``; ``--stat mean``, the default, is the write-up's m½,
 the first crossing of ½ by the mean curve over seeds with a jackknife
-s.e., ``--stat seed`` the mean of the per-seed half-lives — ``mup.halflife``).
+s.e., ``--stat seed`` the mean of the per-seed half-lives — ``sscl_core.halflife``).
 δ₀ is the rate ratio η_a/η_W in equal-rate variables: at fixed λ it sets the
 readout's learning per task, λᵃ_c ∝ 1/(1 + δ₀), while λ holds the hidden
 layer's fixed (write-up, "Readout exponent").
@@ -43,7 +43,7 @@ Output, under ``--out`` (default ``results/imbalance_results``):
     with value (n_seeds, T) for the norm keys, ``_mhalf`` (n_seeds,) the
     values of the statistic drawn and ``_mhalf_seed`` the per-seed half-lives.
 
-Placement (``mup.pool``): the runs of one (width, δ₀-independent group)
+Placement (``sscl_core.pool``): the runs of one (width, δ₀-independent group)
 form one ``vmap`` batch per observable, split over the GPUs (``--gpus``),
 ``--workers`` CPU processes or this process as ``run_weight_norms.py``;
 the half-life jobs follow the norm jobs in a second pool.
@@ -58,12 +58,12 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import halflife as H
-from mup import plotting as P
-from mup import pool
-from mup import theory as TH
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
+from sscl_core import experiments as X
+from sscl_core import halflife as H
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core import theory as TH
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, is_gated, make_runs
 from run_Nscaling import _stat
 from run_weight_norms import ALL_KEYS, QUANT, Q_SCALED, fig_vs_N, norm_theory, q_scaled
 
@@ -108,13 +108,13 @@ def collect(runs: list[Run], plan_norms: pool.Plan, plan_mhalf: pool.Plan, stat:
     per_run: dict[tuple, dict] = {}
     log("weight norms:")
     jobs = make_jobs(g, plan_norms.pieces, "norms")
-    res = pool.run_jobs("mup.experiments:norms_over_tasks", jobs, log=log, **plan_norms.place)
+    res = pool.run_jobs("sscl_core.experiments:norms_over_tasks", jobs, log=log, **plan_norms.place)
     for (_, kw, _), d in zip(jobs, res):
         for j, r in enumerate(kw["runs"]):
             per_run[(cond_key(r), r.seed)] = {q: d[q][j] for q in ALL_KEYS}
     log("half-life:")
     jobs = make_jobs(g, plan_mhalf.pieces, "mhalf")
-    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan_mhalf.place)
+    res = pool.run_jobs("sscl_core.experiments:signal_after_tasks", jobs, log=log, **plan_mhalf.place)
     mh = H.by_condition([(r, S[:, j]) for (_, kw, _), S in zip(jobs, res) for j, r in enumerate(kw["runs"])],
                         cond_key, stat)
     for key in sorted({k for k, _ in per_run}, key=lambda k: tuple(str(x) for x in k)):

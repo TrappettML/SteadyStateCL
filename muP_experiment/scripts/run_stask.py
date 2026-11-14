@@ -15,7 +15,7 @@ x = τ + 1 on a log axis (τ = 0, the task just learned, at x = 1), y =
 S_T(τ)/S_T(0) so every trace starts at 1, one trace per readout of §4.  With ``--stat mean`` (default) the
 trace is the write-up's Σ(τ) = ⟨S_T(τ)⟩/⟨S_T(0)⟩ over seeds (eq. Sigma; band: jackknife ±1 s.e.) and the
 half-life m½ in the caption its first crossing of ½; with ``--stat seed`` the seed mean of each seed's own
-ratio and the mean of the per-seed half-lives (``run_szero.seed_signal``, ``mup.halflife``).  Dotted, in the
+ratio and the mean of the per-seed half-lives (``run_szero.seed_signal``, ``sscl_core.halflife``).  Dotted, in the
 readout's colour: the equation the write-up says to plot — eq. (S_heads), eq. (S_frozen) and eq. (S_learned)
 with the key drift of eqs. (delta_est) and (abarss), i.e. from the closed-form steady-state norms and no
 measured input (``theory.sigma``).  N = 100, κ = 1, δ₀ = 0 by default; solver, λ and step-size
@@ -25,7 +25,7 @@ next to the figure as ``stask_….npz``.
 Placement as ``run_szero.py``: every readout and seed of a cell is one
 ``vmap`` batch (``experiments.signal_after_tasks`` with ``T_pre = T, k = T``),
 run as jobs over the GPUs (``--gpus``, planned by ``pool.plan``), CPU
-processes or in this process (``mup.pool``).
+processes or in this process (``sscl_core.pool``).
 """
 import argparse
 import os
@@ -37,12 +37,12 @@ import numpy as np
 
 import _path  # noqa: F401
 
-from mup import experiments as X
-from mup import halflife as H
-from mup import plotting as P
-from mup import pool
-from mup import theory as TH
-from mup.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
+from sscl_core import experiments as X
+from sscl_core import halflife as H
+from sscl_core import plotting as P
+from sscl_core import pool
+from sscl_core import theory as TH
+from sscl_core.config import Config, READOUT_ORDER, Run, add_clock_arg, clock_override, make_runs
 from run_szero import (LINE_TEXT, MHALF_TEXT, by_readout, cells, columns, groups, mhalf_text, per_cell, seed_signal,
                        theory_curve)
 
@@ -64,7 +64,7 @@ def collect(cells_: dict[tuple, list[Run]], T: int, tau: int, plan: pool.Plan,
             log: Callable[[str], None] = print) -> dict[tuple, dict[str, np.ndarray]]:
     """``{cell: {readout: (tau + 1, n_seeds) array}}``; row τ is S_T after task T + τ."""
     jobs = make_jobs(groups(cells_), T, tau, plan.pieces)
-    res = pool.run_jobs("mup.experiments:signal_after_tasks", jobs, log=log, **plan.place)
+    res = pool.run_jobs("sscl_core.experiments:signal_after_tasks", jobs, log=log, **plan.place)
     return per_cell(cells_, columns(jobs, res))
 
 
