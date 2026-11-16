@@ -23,7 +23,7 @@ def test_stream_is_a_function_of_the_task_index():
     assert np.allclose(a * a - (W * W).sum(1) / W.shape[1], 1.0)        # a_i² − Q_ii = δ₀
 
 
-@pytest.mark.parametrize("latent,want", [("common", 0.7), ("sphere", 0.0)])
+@pytest.mark.parametrize("latent,want", [("common", 0.7), ("sphere", 0.0), ("fourier", 0.0)])
 def test_teacher_similarity(latent, want):
     c = cond(D=400, rho=0.7, latent=latent, rank=4)
     s = X.Stream(c, 0)
@@ -31,7 +31,9 @@ def test_teacher_similarity(latent, want):
     T = Wt @ Wt.T / c.D
     off = T[~np.eye(len(T), dtype=bool)]
     assert abs(np.diag(T).mean() - 1.0) < 0.02
-    assert abs(off.mean() - want) < 0.02                       # common: cosine ρ; sphere: ρ z·z′, zero mean
+    assert abs(off.mean() - want) < 0.02                       # common: cosine ρ; sphere, fourier: ρ z·z′, zero mean
+    if latent == "fourier":
+        assert abs((off ** 2).mean() - (0.7 ** 2 * 0.19 + (1 - 0.7 ** 2) / c.D)) < 0.02      # ⟨κ²⟩ = Σ w_k²/2
     if latent == "sphere":
         assert abs((off ** 2).mean() - (0.7 ** 2 / 4 + 1 / c.D)) < 0.02
 
@@ -69,7 +71,8 @@ def test_raw_theta_is_the_frozen_population_flow(clock):
     n = 400
     f = lambda v: jnp.asarray(v, dtype=jnp.float64)
     p = Params(Delta0=f(c.delta0), eta=f(1.0), h=f(c.lam / (1 + c.delta0) / n), pN=f(c.pN), lam=f(c.lam), gated=f(1.0),
-               learn_a=f(0.0), do_proj=f(0.0), use_heads=f(0.0), sigma0=f(1.0), clock=f(1.0 if clock == "realized" else 0.0))
+               learn_a=f(0.0), do_proj=f(0.0), use_heads=f(0.0), sigma0=f(1.0), clock=f(1.0 if clock == "realized" else 0.0),
+               shared=f(0.0))
     out = train_block(W, a, g.astype(float), w, p, jax.random.PRNGKey(0), n_steps=n, solver="pop", K=c.N)
     m = X.DeltaModel(c, W, a, clock=clock)
     m.train(0, g, w)

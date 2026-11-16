@@ -113,7 +113,7 @@ def _task(readout, clock, N=12, D=48, pN=4.0, lam=2.0, n_steps=20, delta0=0.5, s
     p = params(readout=readout, delta0=delta0, eta=1.0, h=lam / ((1.0 + delta0) * n_steps), pN=pN, clock=clock, lam=lam)
     key = jax.random.PRNGKey(seed)
     st = model.init_state(key, p, N, D, 4)
-    w, g = model.probe_task(key, 0, N, D, p.pN, p.gated)
+    w, g = model.probe_task(key, 0, N, D, p.pN, p.gated, p.shared)
     return st, p, w, g, n_steps
 
 

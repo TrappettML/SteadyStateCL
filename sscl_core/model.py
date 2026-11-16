@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 
 import sscl_core._x64  # noqa: F401  (enables x64)
+from sscl_core.config import FOURIER_W
 
 
 class Params(NamedTuple):
@@ -32,6 +33,9 @@ class Params(NamedTuple):
     clock : task clock of the write-up ("Decision: the task clock"): 0 = (i) fixed nominal duration
         Λ = λ/ā²_nom, the step ``h`` as given; 1 = (ii) fixed realized duration Λ_c = λ/ā²_c with ā²_c measured
         at the start of each task (``task_h``; population solver)
+    shared : shared fraction s = 1/(1 + ε²) of the teacher variance (write-up, "Teachers"; ``draw_teacher``):
+        the part of every teacher that is a function of its latent angle.  Two teachers have similarity
+        ρ = s·κ(Δθ), random through their angles.  0 draws independent teachers (ρ = 0, ``--rho_zero``)
     """
 
     Delta0: jnp.ndarray    # raw imbalance Δ₀ = δ₀/η
@@ -45,6 +49,7 @@ class Params(NamedTuple):
     use_heads: jnp.ndarray  # 1: task-specific heads
     sigma0: jnp.ndarray    # initial scale of W (1 unless check 5 sweeps it)
     clock: jnp.ndarray     # 0: clock (i), nominal duration; 1: clock (ii), realized duration (task_h)
+    shared: jnp.ndarray    # shared fraction s of the teacher variance; 0: independent teachers (ρ = 0)
 
 
 class State(NamedTuple):
@@ -489,9 +494,98 @@ def readout_infeasible(Q: jnp.ndarray, p: Params) -> jnp.ndarray:
     return arg < -FEASIBLE_RTOL * (jnp.abs(p.Delta0) + Q / p.eta)
 
 
-def draw_task(key: jnp.ndarray, N: int, D: int, pN: jnp.ndarray, gated=1.0):
+#: ``fold_in`` index of the run key that seeds the fixed teacher directions (no task index reaches it).
+BASIS_FOLD = 2**31 - 1
+
+
+def kernel(delta):
     """
-    Teacher w ~ N(0, I_D) and gate g_i ~ Bernoulli(pN/N), independent; g = 1 when ungated.
+    Similarity kernel κ(Δ) = Σ_k w_k cos(kΔ) of two latent angles Δ apart (``config.FOURIER_W``); κ(0) = 1, κ(π) = −0.4.
+
+    Parameters
+    ----------
+    delta : float or array
+        Angle difference θ_s − θ_t.
+
+    Returns
+    -------
+    array of the shape of ``delta``
+        The teacher similarity is ρ_st = ``shared``·κ(θ_s − θ_t) (plus O(D^-1/2) from the private parts).
+    """
+    return sum(wk * jnp.cos((k + 1) * delta) for k, wk in enumerate(FOURIER_W))
+
+
+def teacher_basis(run_key: jnp.ndarray, D: int) -> jnp.ndarray:
+    """
+    The fixed directions of a run's teacher family: rows u_{1,c}, u_{1,s}, u_{2,c}, …, with u_a·u_b = D δ_ab.
+
+    Normal vectors, orthonormalised in the order of the rows (L⁻¹B with BBᵀ/D = LLᵀ: unique, so the same on
+    every backend), so that the similarity of two teachers is the kernel at any D ≥ 2·len(FOURIER_W) and not
+    only up to O(D^-1/2).  A pure function of the run key: every task and every probe of a run regenerates
+    the same basis.
+
+    Parameters
+    ----------
+    run_key : PRNGKey of the run
+    D : int
+
+    Returns
+    -------
+    (2·len(FOURIER_W), D) float64 array
+    """
+    B = jax.random.normal(jax.random.fold_in(run_key, BASIS_FOLD), (2 * len(FOURIER_W), D), dtype=jnp.float64)
+    return jax.scipy.linalg.solve_triangular(jnp.linalg.cholesky(B @ B.T / D), B, lower=True)
+
+
+def task_angle(kw: jnp.ndarray) -> jnp.ndarray:
+    """Latent angle θ ~ Uniform(0, 2π) of a task, from the teacher key ``kw`` of ``draw_teacher``."""
+    return 2.0 * jnp.pi * jax.random.uniform(jax.random.fold_in(kw, 1), (), dtype=jnp.float64)
+
+
+def draw_teacher(kw: jnp.ndarray, D: int, run_key=None, shared=0.0) -> jnp.ndarray:
+    """
+    Teacher of one task (write-up, "Teachers"):
+
+        w = √s Σ_k √w_k (cos(kθ) u_{k,c} + sin(kθ) u_{k,s}) + √(1 − s) ξ,     θ ~ Uniform(0, 2π), ξ ~ N(0, I_D),
+
+    with s = ``shared`` = 1/(1 + ε²) the shared fraction, w_k = ``FOURIER_W`` and the u's fixed for the run
+    (``teacher_basis``, u_a·u_b = D δ_ab).  E|w|² = D for every s, and two teachers of a run have similarity
+    ρ_st = E_ξ[w_s·w_t]/D = s·κ(θ_s − θ_t) (``kernel``; the private parts add O(D^-1/2)): random through the
+    angles, zero on average over them.
+
+    At ``shared == 0`` (or without a run key) w = ξ, the same numbers as the independent teacher of the code
+    before 2026-11-15 (``--rho_zero``); ξ and the gate do not depend on ``shared``, so the two settings share
+    them.  (A compiled run at ``shared == 0`` agrees with the earlier code to rounding, about 1e-15, not bit
+    for bit: the compiler orders the arithmetic after the teacher differently.)
+
+    Parameters
+    ----------
+    kw : PRNGKey
+        Teacher key of the task (first half of ``k_teach``).
+    D : int
+    run_key : PRNGKey of the run, or None
+        Seeds the fixed directions; None draws the independent teacher.
+    shared : 0-d array or float in [0, 1]
+
+    Returns
+    -------
+    (D,) float64 array
+    """
+    xi = jax.random.normal(kw, (D,), dtype=jnp.float64)
+    if run_key is None:
+        return xi
+    th = task_angle(kw)
+    k = jnp.arange(1, len(FOURIER_W) + 1, dtype=jnp.float64)
+    amp = jnp.sqrt(jnp.asarray(FOURIER_W, dtype=jnp.float64))
+    coef = jnp.stack([amp * jnp.cos(k * th), amp * jnp.sin(k * th)], axis=1).reshape(-1)     # (c, s) per mode
+    sig = coef @ teacher_basis(run_key, D)
+    s = jnp.clip(shared, 0.0, 1.0)
+    return jnp.where(s > 0.0, jnp.sqrt(s) * sig + jnp.sqrt(1.0 - s) * xi, xi)
+
+
+def draw_task(key: jnp.ndarray, N: int, D: int, pN: jnp.ndarray, gated=1.0, run_key=None, shared=0.0):
+    """
+    Teacher w (``draw_teacher``) and gate g_i ~ Bernoulli(pN/N), the gate independent of the teacher; g = 1 when ungated.
 
     Parameters
     ----------
@@ -501,6 +595,10 @@ def draw_task(key: jnp.ndarray, N: int, D: int, pN: jnp.ndarray, gated=1.0):
         Nominal active count κ√N.
     gated : 0-d array or float
         1 draws the gate, 0 sets every unit active.
+    run_key : PRNGKey of the run, or None
+        Seeds the fixed directions of the teacher family; None draws w ~ N(0, I_D).
+    shared : 0-d array or float
+        Shared fraction of the teacher variance (``Params.shared``); 0 draws w ~ N(0, I_D).
 
     Returns
     -------
@@ -508,7 +606,7 @@ def draw_task(key: jnp.ndarray, N: int, D: int, pN: jnp.ndarray, gated=1.0):
         (D,) teacher and (N,) 0/1 gate.
     """
     kw, kg = jax.random.split(key)
-    w = jax.random.normal(kw, (D,), dtype=jnp.float64)
+    w = draw_teacher(kw, D, run_key, shared)
     g = (jax.random.uniform(kg, (N,), dtype=jnp.float64) < pN / N).astype(jnp.float64)
     g = jnp.where(gated == 1.0, g, jnp.ones_like(g))
     return w, g
@@ -533,7 +631,7 @@ def task_keys(key: jnp.ndarray, t) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarra
     return k_teach, k_head, k_stream
 
 
-def probe_task(key: jnp.ndarray, k, N: int, D: int, pN: jnp.ndarray, gated=1.0):
+def probe_task(key: jnp.ndarray, k, N: int, D: int, pN: jnp.ndarray, gated=1.0, shared=0.0):
     """
     Teacher and gate of task ``k`` of a run, regenerated from the run key (bit for bit the draws of ``run_task``).
 
@@ -542,14 +640,14 @@ def probe_task(key: jnp.ndarray, k, N: int, D: int, pN: jnp.ndarray, gated=1.0):
     key : PRNGKey of the run
     k : int or 0-d int array
     N, D : int
-    pN, gated : see ``draw_task``
+    pN, gated, shared : see ``draw_task``
 
     Returns
     -------
     (w_k, g_k)
         (D,) teacher and (N,) 0/1 gate.
     """
-    return draw_task(task_keys(key, k)[0], N, D, pN, gated)
+    return draw_task(task_keys(key, k)[0], N, D, pN, gated, key, shared)
 
 
 #: Attempts at redrawing the rows of W⁽⁰⁾ that make the initial readout imaginary.

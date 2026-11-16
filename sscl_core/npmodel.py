@@ -15,7 +15,7 @@ import math
 import numpy as np
 from scipy.linalg import blas
 
-from sscl_core.config import Run
+from sscl_core.config import FOURIER_W, Run
 
 
 def Q_diag(W: np.ndarray) -> np.ndarray:
@@ -36,6 +36,39 @@ def draw_readout(rng: np.random.Generator, Q: np.ndarray, eta: float, Delta0: fl
 def infeasible(Q: np.ndarray, eta: float, Delta0: float) -> np.ndarray:
     """Rows whose readout would be imaginary: Δ₀ + Q_ii/η < 0 beyond rounding (``model.readout_infeasible``)."""
     return Delta0 + Q / eta < -1e-12 * (abs(Delta0) + Q / eta)
+
+
+def fourier_coef(theta) -> np.ndarray:
+    """Latent vector z(θ) = (√w_k cos kθ, √w_k sin kθ)_k of a task angle (or an array of them, one row each).
+
+    |z| = 1 and z(θ)·z(θ′) = κ(θ − θ′) = Σ_k w_k cos k(θ − θ′), the similarity kernel (``config.FOURIER_W``)."""
+    th = np.asarray(theta, dtype=np.float64)[..., None]
+    k = np.arange(1, len(FOURIER_W) + 1)
+    amp = np.sqrt(np.asarray(FOURIER_W))
+    return np.stack([amp * np.cos(k * th), amp * np.sin(k * th)], axis=-1).reshape(th.shape[:-1] + (-1,))
+
+
+def kernel(delta) -> np.ndarray:
+    """κ(Δ) = Σ_k w_k cos(kΔ): κ(0) = 1, zero mean over a uniform angle, κ(π) = −0.4 (``model.kernel``)."""
+    d = np.asarray(delta, dtype=np.float64)
+    return sum(wk * np.cos((k + 1) * d) for k, wk in enumerate(FOURIER_W))
+
+
+def fourier_basis(rng: np.random.Generator, D: int) -> np.ndarray:
+    """(2·len(FOURIER_W), D) fixed directions u_{1,c}, u_{1,s}, u_{2,c}, … with u_a·u_b = D δ_ab: normal rows,
+    orthonormalised in order (``model.teacher_basis``)."""
+    B = rng.standard_normal((2 * len(FOURIER_W), D))
+    if D < B.shape[0]:
+        raise ValueError(f"the teacher family needs D ≥ {B.shape[0]} (D = {D})")
+    return np.linalg.solve(np.linalg.cholesky(B @ B.T / D), B)
+
+
+def teacher(xi: np.ndarray, theta: float, basis: np.ndarray, shared: float) -> np.ndarray:
+    """Teacher of latent angle ``theta`` (``model.draw_teacher``): √s Σ_k √w_k (cos kθ u_{k,c} + sin kθ u_{k,s}) + √(1 − s) ξ,
+    the rows of ``basis`` being u_{1,c}, u_{1,s}, u_{2,c}, … (``fourier_basis``); ``xi`` itself at ``shared`` = 0."""
+    if shared <= 0.0:
+        return xi
+    return math.sqrt(shared) * fourier_coef(theta) @ basis + math.sqrt(1.0 - shared) * xi
 
 
 def init_run(run: Run) -> tuple:
@@ -176,7 +209,10 @@ def tasks(run: Run, rng: np.random.Generator, W: np.ndarray, a: np.ndarray, n_ta
     """Generator over ``n_tasks`` tasks of one run: yields ``(t, W, a, g, w, fcum, Q, u)`` after each task.
 
     One task draws a teacher w and gate g (every unit active when
-    ungated), a fresh head when ``use_heads`` (else keeps ``a``), then runs
+    ungated; with ``run.shared`` > 0 the teacher is that of ``teacher``, its
+    angle and fixed directions from a generator of their own so that the
+    stream of ``rng`` is the same at every shared fraction), a fresh head
+    when ``use_heads`` (else keeps ``a``), then runs
     ``n_steps`` solver steps each followed by the row projection, exactly as
     ``protocol.run_task`` (``step_task``, in place on the active rows), with
     the population step of the run's task clock (``model.task_h``).
@@ -202,8 +238,11 @@ def tasks(run: Run, rng: np.random.Generator, W: np.ndarray, a: np.ndarray, n_ta
     W = np.array(W, dtype=np.float64, copy=True)
     a = np.array(a, dtype=np.float64, copy=True)
     Q = Q_diag(W)                                             # the one full pass; tracked from here on
+    shared = float(getattr(run, "shared", 0.0))
+    rng_th = np.random.default_rng([run.rng_seed(), 1])       # angles and fixed directions: off the main stream
+    basis = fourier_basis(rng_th, D) if shared > 0.0 else None
     for t in range(n_tasks):
-        w = rng.standard_normal(D)
+        w = teacher(rng.standard_normal(D), 2.0 * np.pi * rng_th.uniform(), basis, shared)
         g = (rng.uniform(size=N) < pN / N).astype(np.float64) if gated else np.ones(N)
         head = draw_readout(rng, Q, eta, Delta0)              # drawn every task to keep the rng stream fixed
         if use_heads:

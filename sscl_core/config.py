@@ -19,6 +19,10 @@ from sscl_core import theory
 #: "realized": (ii), the default: every task lasts Λ_c = λ/ā²_c, ā²_c its key norm at the start of the task.
 CLOCKS = {"nominal": 0.0, "realized": 1.0}
 
+#: Fourier weights w_k of the teacher-similarity kernel κ(Δ) = Σ_k w_k cos(kΔ), k = 1, 2, 3 (write-up, "Teachers").
+#: They sum to 1, so κ(0) = 1, and there is no k = 0 mode, so κ averages to zero over a uniform angle.
+FOURIER_W = (0.5, 0.3, 0.2)
+
 READOUTS = {
     #                  gated, learn_a, do_proj, use_heads        (PLAN.md §4)
     "gated_shared":   (1.0, 1.0, 1.0, 0.0),   # one a, learned every task; κ-sparse gates
@@ -85,6 +89,10 @@ class Config:
     n_ages_geom, m_max_factor : probe-age schedule (§5)
     trace, trace_points : per-step traces (§12.2), separate configs only
     sigma0 : initial scales W⁽⁰⁾_ij ~ N(0, σ₀²) (check 5; (1.0,) in every sweep)
+    shared : shared fraction s = 1/(1 + ε²) of the teacher variance (write-up, "Teachers"; ``model.draw_teacher``).
+        Every task draws a latent angle θ ~ Uniform(0, 2π) and two teachers have similarity ρ = s·κ(Δθ), so ρ is
+        random for every pair of tasks (zero on average, between −0.4s and s).  0 draws independent teachers,
+        ρ = 0, the setting of every run before 2026-11-15 (``--rho_zero``)
     """
     name: str = "pilot"
     N: Sequence[int] = (10, 20)
@@ -112,6 +120,7 @@ class Config:
     extra: Sequence[dict] = ()
     sigma0: Sequence[float] = (1.0,)        # initial scale of W (check 5 of the write-up sweeps it)
     clock: str = "realized"                 # task clock: "realized" = (ii) Λ_c = λ/ā²_c (default), "nominal" = (i) Λ = λ/ā²_nom
+    shared: float = 0.8                     # shared fraction of the teacher variance, ρ = shared·κ(Δθ); 0 = independent teachers (--rho_zero)
     #: burn-in in half-lives of the slowest readout that a sweep should cover: the write-up's T_burn = 7N is
     #: 7θν/ln 2 ≈ 10 of them (9.9ν at λ = 4, i.e. 9.4 at N = 5, κ = 1 and 9.9 from N = 20), so the note fires below 9
     burn_halflives: float = 9.0
@@ -188,6 +197,14 @@ class Run:
     clock: str = "nominal"
     #: samples per SGD step; ``solver`` is then the kernel token ``"sgd{B}"`` (``solver_token``).  0 for the population solver
     sgd_batch: int = 1
+    #: shared fraction of the teacher variance (``Config.shared``, ``Params.shared``); 0.0 = independent teachers,
+    #: which is what batch files written before 2026-11-15 ran (they have no such key)
+    shared: float = 0.0
+
+    @property
+    def teachers(self) -> str:
+        """The run's teacher family in words, for console headers: the shared fraction, or independent teachers."""
+        return f"teachers: shared fraction {self.shared:g}" if self.shared > 0.0 else "teachers: independent (rho_zero)"
 
     @property
     def clock_id(self) -> float:
@@ -270,7 +287,9 @@ class Run:
         solver, step size and η are left out so that η-halving and the
         population-vs-SGD validation (old/validate.py) compare the same
         task streams, and so is σ₀ (check 5 compares initial scales on the
-        same streams).
+        same streams).  The shared fraction is left out too: a run with similar
+        teachers and its ``--rho_zero`` twin have the same gates, initial weights
+        and private teacher parts ξ_t.
         """
         tag = f"{self.seed}|{self.N}|{self.kappa_label or self.kappa}|{self.readout}|{self.delta0}|{self.lam}"
         return int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "little")
@@ -292,7 +311,8 @@ class Run:
         return (f"N={self.N} k={self.kappa_label or self.kappa} {self.readout} "
                 f"d0={self.delta0} lam={self.lam} eta={self.eta} seed={self.seed}"
                 + (f" sigma0={self.sigma0}" if self.sigma0 != 1.0 else "")
-                + (" clock=nominal" if self.clock == "nominal" and self.solver == "pop" else ""))
+                + (" clock=nominal" if self.clock == "nominal" and self.solver == "pop" else "")
+                + (" rho_zero" if self.shared == 0.0 else ""))
 
     def to_dict(self) -> dict:
         """Fields plus the derived properties, JSON-serialisable (stored in every batch file)."""
@@ -483,7 +503,8 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
     Raises
     ------
     ValueError
-        Unknown readout or clock, δ₀ ≤ −σ₀², or an SGD η that violates the contraction rule.
+        Unknown readout or clock, a shared fraction outside [0, 1], δ₀ ≤ −σ₀², or an SGD η that violates the
+        contraction rule.
     """
     for readout in cfg.readout:
         if readout not in READOUTS:
@@ -491,6 +512,12 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
     if cfg.clock not in CLOCKS:
         raise ValueError(f"unknown clock {cfg.clock!r}; known: {list(CLOCKS)}")
     clock = "nominal" if cfg.solver == "sgd" else cfg.clock     # SGD: η is the noise amplitude, n is nominal
+    if not 0.0 <= float(cfg.shared) <= 1.0:
+        raise ValueError(f"shared fraction {cfg.shared!r} outside [0, 1]")
+    D_min = cfg.D_factor * min(list(cfg.N) + [int(e["N"]) for e in cfg.extra])
+    if cfg.shared > 0 and D_min < 2 * len(FOURIER_W):
+        raise ValueError(f"the teacher family has {2 * len(FOURIER_W)} fixed directions and needs D ≥ that many "
+                         f"(D = {D_min}); raise D or run independent teachers (shared: 0, --rho_zero)")
     if any(map(is_gated, cfg.readout)):
         _note_skipped_kappas(cfg)
     runs = []
@@ -524,6 +551,7 @@ def make_runs(cfg: Config, N_filter: Optional[Sequence[int]] = None) -> list[Run
                         n_ages_geom=int(cfg.n_ages_geom), m_max_factor=float(cfg.m_max_factor),
                         trace=bool(cfg.trace), trace_points=int(cfg.trace_points), sigma0=float(sigma0),
                         clock=clock, sgd_batch=int(cfg.sgd_batch) if cfg.solver == "sgd" else 0,
+                        shared=float(cfg.shared),
                     ))
     _note_checks(cfg, runs)
     return runs
@@ -634,9 +662,33 @@ def make_batches(runs: Sequence[Run], batch_size: int) -> list[list[Run]]:
     return batches
 
 
+def add_teacher_args(ap) -> None:
+    """Add ``--shared`` (default: the config's, 0.8) and ``--rho_zero`` (independent teachers) to a script's
+    argument parser."""
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--shared", type=float, default=None,
+                   help="shared fraction s = 1/(1 + ε²) of the teacher variance: every task draws a latent angle and "
+                        "two teachers have similarity ρ = s·κ(Δθ), random for every pair of tasks (default: the "
+                        "config's, 0.8)")
+    g.add_argument("--rho_zero", action="store_true",
+                   help="independent teachers w ~ N(0, I_D), ρ = 0 for every pair of tasks: the stream of every run "
+                        "before 2026-11-15 (the same as --shared 0)")
+
+
+def teacher_override(args) -> dict:
+    """The ``Config`` override of ``add_teacher_args``: ``shared`` = 0 under ``--rho_zero``, the value of
+    ``--shared`` when given, else nothing (the config's value stands)."""
+    if getattr(args, "rho_zero", False):
+        return {"shared": 0.0}
+    if getattr(args, "shared", None) is not None:
+        return {"shared": float(args.shared)}
+    return {}
+
+
 def add_clock_arg(ap) -> None:
-    """Add ``--clock`` (default: the config's, clock (ii) ``realized``) and ``--sgd_batch`` (default: the config's,
-    1) to a script's argument parser."""
+    """Add ``--clock`` (default: the config's, clock (ii) ``realized``), ``--sgd_batch`` (default: the config's,
+    1) and the teacher arguments ``--shared`` / ``--rho_zero`` (``add_teacher_args``) to a script's argument parser."""
+    add_teacher_args(ap)
     ap.add_argument("--sgd_batch", type=int, default=None,
                     help="samples per SGD step, their updates summed at the same η: a task takes B times fewer steps "
                          "(default: the config's, 1 = online SGD; no effect on the population solver)")
@@ -646,9 +698,10 @@ def add_clock_arg(ap) -> None:
 
 
 def clock_override(args) -> dict:
-    """The ``Config`` overrides of ``add_clock_arg``: ``clock`` when ``--clock`` was given and ``sgd_batch`` when
-    ``--sgd_batch`` was."""
+    """The ``Config`` overrides of ``add_clock_arg``: ``clock`` when ``--clock`` was given, ``sgd_batch`` when
+    ``--sgd_batch`` was, and ``shared`` when ``--shared`` or ``--rho_zero`` was (``teacher_override``)."""
     out = {"clock": args.clock} if getattr(args, "clock", None) else {}
+    out.update(teacher_override(args))
     if getattr(args, "sgd_batch", None) is not None:
         out["sgd_batch"] = int(args.sgd_batch)
     return out

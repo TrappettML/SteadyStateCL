@@ -19,12 +19,13 @@ from sscl_core.config import Config, make_runs
 from sscl_core.model import Params, init_state
 
 
-def params(readout="gated_shared", delta0=1.0, eta=0.1, h=0.05, pN=3.0, clock=0.0, lam=1.0):
+def params(readout="gated_shared", delta0=1.0, eta=0.1, h=0.05, pN=3.0, clock=0.0, lam=1.0, shared=0.0):
     from sscl_core.config import READOUTS
     gt, la, pr, uh = READOUTS[readout]
     f = lambda v: jnp.asarray(v, dtype=jnp.float64)
     return Params(Delta0=f(delta0 / eta), eta=f(eta), h=f(h), pN=f(pN), lam=f(lam),
-                  gated=f(gt), learn_a=f(la), do_proj=f(pr), use_heads=f(uh), sigma0=f(1.0), clock=f(clock))
+                  gated=f(gt), learn_a=f(la), do_proj=f(pr), use_heads=f(uh), sigma0=f(1.0), clock=f(clock),
+                  shared=f(shared))
 
 
 def state_with_task(seed=0, N=10, D=40, P=5, readout="gated_shared", **kw):
@@ -33,7 +34,7 @@ def state_with_task(seed=0, N=10, D=40, P=5, readout="gated_shared", **kw):
     p = params(readout=readout, **kw)
     key = jax.random.PRNGKey(seed)
     st = init_state(key, p, N, D, P)
-    w, g = probe_task(key, 0, N, D, p.pN, p.gated)
+    w, g = probe_task(key, 0, N, D, p.pN, p.gated, p.shared)
     st = st._replace(w=w, g=g)
     if readout == "task_heads":
         st = st._replace(heads=st.heads.at[0].set(st.a), a=draw_readout(task_keys(key, 0)[1], Q_diag(st.W), p))

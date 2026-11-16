@@ -326,7 +326,7 @@ def main(argv=None) -> int:
     plan = pool.plan(args, [(v, k[-1]) for k, v in g.items()])
     r0 = next(iter(cells_.values()))[0]
     what = "population vs SGD" if args.comp_opts else r0.solver
-    print(f"training verification: cells={[c for c in cells_ if len(c) == 3]} λ={lam} {what} {r0.clock} clock "
+    print(f"training verification: cells={[c for c in cells_ if len(c) == 3]} λ={lam} {what} {r0.clock} clock, {r0.teachers} "
           f"n_steps={sorted({r.n_steps for runs in cells_.values() for r in runs})} seeds={args.seeds}  "
           f"[{plan.describe()}]", flush=True)
     res = collect(cells_, plan, tasks=args.tasks)

@@ -277,7 +277,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     run0 = runs[0]
     plan = pool.plan(args, [(g, 2 * key[-1] + 1) for key, g in groups(runs).items()])
     print(f"half-life vs N, unit{' and synaptic' if args.synapse else ''} gating: N={args.N} κ={args.kappa} "
-          f"δ₀={run0.delta0} λ={run0.lam} {run0.solver} {run0.clock} clock seeds={args.seeds} statistic={args.stat}  "
+          f"δ₀={run0.delta0} λ={run0.lam} {run0.solver} {run0.clock} clock, {run0.teachers} seeds={args.seeds} statistic={args.stat}  "
           f"[{plan.describe()}]", flush=True)
     print("unit (hidden-layer) gating:", flush=True)
     res, seed = collect(runs, plan, args.stat)

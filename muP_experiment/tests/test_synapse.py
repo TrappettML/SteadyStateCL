@@ -47,7 +47,7 @@ def _numpy_stream(run, T, k):
     heads, out = {}, []
     for t in range(T):
         k_teach, k_head, _ = M.task_keys(key, t)
-        w, mask = (np.asarray(v) for v in S.draw_mask(k_teach, N, D, jnp.float64(pN)))
+        w, mask = (np.asarray(v) for v in S.draw_mask(k_teach, N, D, jnp.float64(pN), key, run.shared))
         if run.use_heads:
             a = np.asarray(M.draw_readout(k_head, jnp.asarray((W ** 2).sum(1) / D), jax.tree_util.tree_map(lambda v: v[0], p)))
         if run.clock == "realized":                    # clock (ii) at the mean rate over the input coordinates
@@ -68,7 +68,7 @@ def _numpy_stream(run, T, k):
         if run.use_heads:
             heads[t] = a.copy()
         if t >= k:
-            wk, mk = (np.asarray(v) for v in S.probe_mask(key, k, N, D, jnp.float64(pN)))
+            wk, mk = (np.asarray(v) for v in S.probe_mask(key, k, N, D, jnp.float64(pN), run.shared))
             ak = heads[k] if run.use_heads else a
             out.append(float(((ak @ (mk * W)) / pN) @ wk / (wk @ wk)))
     return np.array(out)

@@ -3,7 +3,8 @@
 ingredient makes the difference — SGD noise, the second layer, or error-correcting updates?
 
     python scripts/run_nested.py [--N 256] [--D-factor 2] [--delta0 0 1 10] [--overlap 0.1 0.5] [--rho 0 0.7]
-                                 [--lam 1] [--seeds 10] [--models sgd gf delta_matched delta_raw hebb]
+                                 [--rho_zero] [--latent fourier] [--lam 1] [--seeds 10]
+                                 [--models sgd gf delta_matched delta_raw hebb]
                                  [--no-ref-checks] [--reuse] [--workers K] [--gpus [ids]]
     python scripts/run_nested.py --gpus --workers 8                                    # GPU node
     python scripts/run_nested.py --N 32 --seeds 2 --delta0 0 10 --overlap 0.2 --rho 0 --no-ref-checks \\
@@ -14,7 +15,9 @@ from the same forked weights: SGD → gradient flow (no sampling noise) → Δ-m
 relaxed projection per task at gradient flow's measured rate) → Δ-raw (the bare rate, nothing fitted) →
 Hebb (fixed-size writes with decay, no error correction; (b, γ) tuned once at the reference condition to
 gradient flow's ε(0) and τ½ and held fixed).  ``--overlap`` is the gate density p, the fraction of units two
-tasks share (the project's κ = p√N).
+tasks share (the project's κ = p√N).  ``--rho`` is the shared fraction of the teacher variance: under the
+default ``--latent fourier`` every task draws a latent angle and two teachers have similarity ρ·κ(Δθ), random
+for every pair of tasks (write-up, "Teachers"); ``--rho_zero`` runs independent teachers only.
 
 Grid: ``--delta0`` × ``--overlap`` × ``--rho`` at one N, D = ``--D-factor``·N and λ.  At the reference
 condition (``--ref-delta0``, ``--ref-overlap``, ``--ref-rho``) three extra checks run unless
@@ -479,14 +482,19 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--delta0", type=float, nargs="+", default=[0.0, 1.0, 10.0], help="imbalance, rich (0) to lazy")
     ap.add_argument("--overlap", type=float, nargs="+", default=[0.1, 0.5],
                     help="gate density p: the fraction of units two tasks share (κ = p√N)")
-    ap.add_argument("--rho", type=float, nargs="+", default=[0.0, 0.7], help="teacher similarity")
+    ap.add_argument("--rho", type=float, nargs="+", default=[0.0, 0.7],
+                    help="shared fraction of the teacher variance (0 = independent teachers); what two teachers "
+                         "share at ρ > 0 is set by --latent")
+    ap.add_argument("--rho_zero", action="store_true",
+                    help="independent teachers only, ρ = 0 for every pair of tasks: the same as --rho 0 --ref-rho 0")
     ap.add_argument("--lam", type=float, default=1.0, help="hidden-layer learning per task λ of the main grid")
     ap.add_argument("--seeds", type=int, default=10)
     ap.add_argument("--models", nargs="+", default=list(X.MODELS), choices=X.MODELS,
                     help="models to run; gradient flow always runs (it makes the fork)")
-    ap.add_argument("--latent", choices=["common", "sphere"], default="common",
-                    help="teachers at ρ > 0: 'common' = one shared direction, cosine ρ between any two teachers; "
-                         "'sphere' = the write-up's z_k uniform on the unit sphere of R^rank")
+    ap.add_argument("--latent", choices=list(X.LATENTS), default="fourier",
+                    help="teachers at ρ > 0: 'fourier' (default) = the write-up's family, a latent angle per task "
+                         "and similarity ρ·κ(Δθ), random for every pair of tasks; 'common' = one shared direction, "
+                         "cosine ρ between any two teachers; 'sphere' = z_k uniform on the unit sphere of R^rank")
     ap.add_argument("--rank", type=int, default=4, help="latent rank r for --latent sphere")
     ap.add_argument("--ref-delta0", type=float, default=1.0)
     ap.add_argument("--ref-overlap", type=float, default=0.1)
@@ -513,6 +521,8 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", "nested"))
     pool.add_args(ap)
     args = ap.parse_args(argv)
+    if args.rho_zero:                                # independent teachers only
+        args.rho, args.ref_rho = [0.0], 0.0
 
     models = tuple(m for m in X.MODELS if m in set(args.models) | {"gf"})
     st = X.Settings(gf_step=args.gf_step, sgd_contraction=args.sgd_eta, burn=args.burn, burn_max=args.burn_max,

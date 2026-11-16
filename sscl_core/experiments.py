@@ -60,7 +60,7 @@ def train_task(state: State, p: Params, *, n_steps: int, solver: str, K: Optiona
     """
     N, D = state.W.shape
     k_teach, k_head, k_stream = model.task_keys(state.key, state.t)
-    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated)
+    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated, state.key, p.shared)
     head = model.draw_readout(k_head, model.Q_diag(state.W), p)
     a = jnp.where(p.use_heads == 1.0, head, state.a)
     t = state.t
@@ -75,7 +75,7 @@ def train_task(state: State, p: Params, *, n_steps: int, solver: str, K: Optiona
 def probe_signal(state: State, p: Params, k) -> jnp.ndarray:
     """S_k = u·w_k*/|w_k*|² of probe ``k`` (its teacher, gate and stored head or the shared readout) against the current W."""
     N, D = state.W.shape
-    wk, gk = model.probe_task(state.key, k, N, D, p.pN, p.gated)
+    wk, gk = model.probe_task(state.key, k, N, D, p.pN, p.gated, p.shared)
     ak = jnp.where(p.use_heads == 1.0, state.heads[k], state.a)
     u = (gk * ak) @ state.W / p.pN
     return (u * wk).sum() / (wk * wk).sum()
@@ -121,7 +121,7 @@ def clock_norms(state: State, p: Params, *, n_steps: int, solver: str, K: int) -
     """
     N, D = state.W.shape
     k_teach, k_head, _ = model.task_keys(state.key, state.t)
-    _, g = model.draw_task(k_teach, N, D, p.pN, p.gated)
+    _, g = model.draw_task(k_teach, N, D, p.pN, p.gated, state.key, p.shared)
     Q = model.Q_diag(state.W)
     a = jnp.where(p.use_heads == 1.0, model.draw_readout(k_head, Q, p), state.a)
     n_c = g.sum()
@@ -145,7 +145,7 @@ def leak_norms(state: State, p: Params) -> jnp.ndarray:
     """
     N, D = state.W.shape
     k_teach, k_head, _ = model.task_keys(state.key, state.t)
-    w, g = model.draw_task(k_teach, N, D, p.pN, p.gated)
+    w, g = model.draw_task(k_teach, N, D, p.pN, p.gated, state.key, p.shared)
     Q = model.Q_diag(state.W)
     a = jnp.where(p.use_heads == 1.0, model.draw_readout(k_head, Q, p), state.a)
     u = (g * a) @ state.W / p.pN
@@ -166,7 +166,7 @@ def gauge_task(state: State, p: Params, *, n_steps: int, solver: str) -> tuple[S
     """One task returning ``imbalance_stats`` after every step, (n_steps, 4); the loop of ``train_task``."""
     N, D = state.W.shape
     k_teach, k_head, k_stream = model.task_keys(state.key, state.t)
-    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated)
+    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated, state.key, p.shared)
     head = model.draw_readout(k_head, model.Q_diag(state.W), p)
     a = jnp.where(p.use_heads == 1.0, head, state.a)
     state = state._replace(w=w_t, g=g_t, a=a)
@@ -377,7 +377,7 @@ def loss_task(state: State, p: Params, *, n_steps: int, solver: str, K: int) -> 
     """
     N, D = state.W.shape
     k_teach, k_head, k_stream = model.task_keys(state.key, state.t)
-    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated)
+    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated, state.key, p.shared)
     head = model.draw_readout(k_head, model.Q_diag(state.W), p)
     a = jnp.where(p.use_heads == 1.0, head, state.a)
     t = state.t

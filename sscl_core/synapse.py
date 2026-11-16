@@ -50,10 +50,11 @@ from sscl_core import model, pool
 from sscl_core.model import Params, State
 
 
-def draw_mask(k_teach: jnp.ndarray, N: int, D: int, pN: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Teacher w ~ N(0, I_D), bit for bit that of ``model.draw_task``, and mask γ_ij ~ Bernoulli(pN/N), (N, D) 0/1 floats."""
+def draw_mask(k_teach: jnp.ndarray, N: int, D: int, pN: jnp.ndarray, run_key=None, shared=0.0) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Teacher w, bit for bit that of ``model.draw_task`` at the same ``run_key`` and ``shared`` (``model.draw_teacher``;
+    w ~ N(0, I_D) without a run key or at ``shared`` = 0), and mask γ_ij ~ Bernoulli(pN/N), (N, D) 0/1 floats."""
     kw, kg = jax.random.split(k_teach)
-    w = jax.random.normal(kw, (D,), dtype=jnp.float64)
+    w = model.draw_teacher(kw, D, run_key, shared)
     # 32 random bits per synapse against the threshold p·2³² (half the generator work of a float64 uniform;
     # p is resolved to 2⁻³²); p ≥ 1 opens every synapse exactly
     dens = pN / N
@@ -63,9 +64,9 @@ def draw_mask(k_teach: jnp.ndarray, N: int, D: int, pN: jnp.ndarray) -> tuple[jn
     return w, M
 
 
-def probe_mask(key: jnp.ndarray, k, N: int, D: int, pN: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+def probe_mask(key: jnp.ndarray, k, N: int, D: int, pN: jnp.ndarray, shared=0.0) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Teacher and mask of task ``k`` of a run, regenerated from the run key (the draws of ``train_task``)."""
-    return draw_mask(model.task_keys(key, k)[0], N, D, pN)
+    return draw_mask(model.task_keys(key, k)[0], N, D, pN, key, shared)
 
 
 def _project(a: jnp.ndarray, Q: jnp.ndarray, p: Params) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -113,7 +114,7 @@ def train_task(state: State, p: Params, *, n_steps: int, closed: bool = False) -
     """
     N, D = state.W.shape
     k_teach, k_head, _ = model.task_keys(state.key, state.t)
-    w, M = draw_mask(k_teach, N, D, p.pN)
+    w, M = draw_mask(k_teach, N, D, p.pN, state.key, p.shared)
     Q0 = model.Q_diag(state.W)
     head = model.draw_readout(k_head, Q0, p)
     a = jnp.where(p.use_heads == 1.0, head, state.a)
@@ -189,7 +190,7 @@ def signal_kernel(n_steps: int, n_tasks: int, closed: bool = False) -> Callable:
 
     def run(state, p, k):
         N, D = state.W.shape[1:]
-        wk, Mk = jax.vmap(lambda key, pN: probe_mask(key, k, N, D, pN))(state.key, p.pN)
+        wk, Mk = jax.vmap(lambda key, pN, sh: probe_mask(key, k, N, D, pN, sh))(state.key, p.pN, p.shared)
 
         def body(s, _):
             s = vf(s, p)

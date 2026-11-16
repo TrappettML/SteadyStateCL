@@ -142,7 +142,7 @@ def run_task(state: State, p: Params, ages: jnp.ndarray, trace_idx: Optional[jnp
     K = N if K is None else K
     k_teach, k_head, k_stream = model.task_keys(state.key, state.t)
 
-    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated)
+    w_t, g_t = model.draw_task(k_teach, N, D, p.pN, p.gated, state.key, p.shared)
     head = model.draw_readout(k_head, model.Q_diag(state.W), p)
     a = jnp.where(p.use_heads == 1.0, head, state.a)
     t = state.t
@@ -283,7 +283,7 @@ def make_params(runs: Sequence) -> Params:
     return Params(
         Delta0=col("Delta0"), eta=col("eta"), h=col("h"), pN=col("pN"), lam=col("lam"),
         gated=col("gated"), learn_a=col("learn_a"), do_proj=col("do_proj"), use_heads=col("use_heads"),
-        sigma0=col("sigma0"), clock=col("clock_id"),
+        sigma0=col("sigma0"), clock=col("clock_id"), shared=col("shared"),
     )
 
 

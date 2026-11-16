@@ -14,3 +14,4 @@ T_factor: 10.0
 batch_size: 64
 # task clock: SGD runs the nominal clock (i), n = round(λ D/(η ā²_nom)) steps per task (write-up, "SGD rate η")
 clock: nominal
+shared: 0.8                    # shared fraction of the teacher variance: similarity ρ = shared·κ(Δθ), random for every pair of tasks; 0 = independent teachers (--rho_zero)

@@ -321,7 +321,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     r0 = runs[0]
     n_cells = sum(1 for ran, _ in status.values() if ran)
     print(f"m½ over (λ, δ₀): N={args.N} κ={args.kappa} λ={lam_ok} δ₀={d0_ok} {r0.solver} "
-          f"n_steps={min(r.n_steps for r in runs)}…{max(r.n_steps for r in runs)} {r0.clock} clock T={T} τ≤{tau} "
+          f"n_steps={min(r.n_steps for r in runs)}…{max(r.n_steps for r in runs)} {r0.clock} clock, {r0.teachers} T={T} τ≤{tau} "
           f"seeds={args.seeds} statistic={args.stat} cells={n_cells}/{len(status)}  [{plan.describe()}]", flush=True)
     res = collect(runs, T, tau, plan, args.stat)
 

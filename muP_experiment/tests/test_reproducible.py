@@ -1,7 +1,10 @@
 """A 5-task run at N = 10 under clock (i) hashes to a stored value.
 
 The stored hash predates the task clock (2026-11-11): it is taken under ``clock="nominal"`` and over the
-result keys of that date, so it proves that clock (i) still runs the dynamics it always did, bit for bit.
+result keys of that date, and with independent teachers (``shared=0.0``, ``--rho_zero``), the stream of that
+date.  The teacher family of 2026-11-15 changed the compiled arithmetic after the teacher draw, so a run at
+``shared=0.0`` agrees with the earlier code to rounding (about 1e-15 on every result key) but not bit for bit:
+the stored hash must be regenerated once after that change.
 
 Regenerate ``tests/reference_hash.txt`` deliberately (delete it and rerun) when the
 kernels change.  If the hash differs on another machine, that is FMA/compiler
@@ -23,7 +26,8 @@ REF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference_hash.t
 def _hash():
     cfg = Config(solver="pop", N=[10], readout=["gated_shared", "learned_shared", "gated_frozen", "frozen", "task_heads"],
                  delta0=[1.0], lam=[1.0], seeds=1, T_factor=0.25, T_min=5,
-                 clock="nominal")      # clock (i): the dynamics the stored hash was made with
+                 clock="nominal",      # clock (i): the dynamics the stored hash was made with
+                 shared=0.0)           # independent teachers (ρ = 0, --rho_zero): the stream the stored hash was made with
     from conftest import one_batch
     runs = one_batch(make_runs(cfg))
     assert runs[0].T_burn + runs[0].T_meas == 10

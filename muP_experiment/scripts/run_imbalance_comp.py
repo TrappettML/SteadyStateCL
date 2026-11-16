@@ -297,7 +297,7 @@ def main(argv=None) -> int:
     d0s = sorted(set(cfg.delta0))
     klabels = [str(k) for k in args.kappa]
     readouts = [ro for ro in READOUT_ORDER if ro in args.readout]
-    print(f"imbalance comparison: N={args.N} κ={args.kappa} δ₀={d0s} λ={run0.lam} {run0.solver} {run0.clock} clock "
+    print(f"imbalance comparison: N={args.N} κ={args.kappa} δ₀={d0s} λ={run0.lam} {run0.solver} {run0.clock} clock, {run0.teachers} "
           f"seeds={args.seeds} statistic={args.stat}  [{plan_norms.describe()}]", flush=True)
     res = collect(runs, plan_norms, plan_mhalf, args.stat)
 

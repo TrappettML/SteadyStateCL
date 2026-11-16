@@ -106,7 +106,7 @@ def test_leak_norms_match_loop(small_runs):
     p0 = jax.tree_util.tree_map(lambda x: x[0], p)
     N, D = s.W.shape
     k_teach, k_head, _ = M.task_keys(s.key, s.t)
-    w, g = M.draw_task(k_teach, N, D, p0.pN, p0.gated)
+    w, g = M.draw_task(k_teach, N, D, p0.pN, p0.gated, s.key, p0.shared)
     a = np.where(float(p0.use_heads) == 1.0, np.asarray(M.draw_readout(k_head, M.Q_diag(s.W), p0)), np.asarray(s.a))
     V = (np.asarray(g) * a)[:, None] * np.asarray(s.W) / float(p0.pN)
     G = V @ V.T / D

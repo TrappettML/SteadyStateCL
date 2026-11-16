@@ -339,7 +339,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     plan = pool.plan(args, [(g, T + tau + 1) for g in groups(runs, T + tau + 1).values()])
     r0 = runs[0]
     print(f"m½ vs κ: N={args.N} κ={[lab for _, lab in kappas]} δ₀={r0.delta0} λ={r0.lam} {r0.solver} "
-          f"n_steps={r0.n_steps} {r0.clock} clock T={T} τ≤{tau} seeds={args.seeds} statistic={args.stat}  "
+          f"n_steps={r0.n_steps} {r0.clock} clock, {r0.teachers} T={T} τ≤{tau} seeds={args.seeds} statistic={args.stat}  "
           f"[{plan.describe()}]", flush=True)
     if args.synaptic:
         print("unit (hidden-layer) gating:", flush=True)

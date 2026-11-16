@@ -24,9 +24,29 @@ names the equation label in the `.tex`):
   task lasts Λ_c = λ/ā²_c with the key norm ā²_c = Σᵢ gᵢaᵢ²/pN it starts with,
   so the step is h_c = λ/(η n ā²_c) with n = ⌈λ/0.1⌉ unchanged.  Clock (i)
   (`--clock nominal`, eq. `clock_nom`: Λ = λ/(1 + δ₀) for every task) is what
-  every run before 2026-11-11 used and still reproduces bit for bit
-  (`tests/test_reproducible.py`).  SGD always runs clock (i).  Clock (iii),
-  the stopping rule, is not implemented.
+  every run before 2026-11-11 used (with `--rho_zero` it reproduces those
+  runs to rounding, `tests/test_reproducible.py`).  SGD always runs clock
+  (i).  Clock (iii), the stopping rule, is not implemented.
+- **Teachers are similar, with a random similarity for every pair of tasks**
+  (`shared: 0.8`, eqs. `teacher`, `kernel`; since 2026-11-15).  Every task
+  draws a latent angle θ ~ Uniform(0, 2π) and its teacher is
+
+      w = √s Σ_k √w_k (cos kθ · u_{k,c} + sin kθ · u_{k,s}) + √(1 − s) ξ,    ξ ~ N(0, I_D),
+
+  with Fourier weights w = (0.5, 0.3, 0.2), six directions u fixed for the
+  run (u_a·u_b = D δ_ab) and s = `shared` = 1/(1 + ε²) the shared fraction
+  of the teacher variance (`model.draw_teacher`).  Two teachers have
+  similarity ρ = s·κ(Δθ), κ(Δ) = Σ_k w_k cos(kΔ): s at equal angles, down to
+  −0.4 s at Δθ = π, and zero on average (κ has no constant mode).  The
+  gates stay independent of the teachers.  **`--rho_zero`** (or `--shared
+  0`, or `shared: 0` in the config) draws independent teachers, ρ = 0 for
+  every pair: the stream of every run before 2026-11-15.  A run and its
+  `--rho_zero` twin have the same gates, initial weights and private parts
+  ξ.  What the write-up predicts ("Similar teachers"): the mean signal, the
+  half-life of the mean curve, E(m) and the norms are the same at every s;
+  the signal of a single probe gains a variance that does not fall with N
+  (eq. `var_sim`; s.d. about 0.34 at s = 0.8), so curves need more seeds or
+  probes for the same error bar, and `--stat seed` is biased further.
 - **Half-life = root of the mean curve** (`--stat mean`, eq. `Sigma`):
   Σ(m) = ⟨S(m)⟩/⟨S(0)⟩ over seeds, m½ its first crossing of ½ (linear
   interpolation), jackknife s.e.  `--stat seed` gives the mean of per-seed
@@ -147,6 +167,8 @@ figure paths, and the total wall time.
 | `--delta0 …` | dimensionless imbalance δ₀ = ηΔ₀ = aᵢ² − Qᵢᵢ (> −1), the rate ratio η_a/η_W in equal-rate variables; a list for the cell scripts, one value for the scaling scripts. Default 0. |
 | `--lam λ` | hidden-layer learning per task (the frozen-readout exponent); default the config's first λ (4). |
 | `--clock realized\|nominal` | task clock: `realized` = (ii), Λ_c = λ/ā²_c per task (default, from the config); `nominal` = (i), Λ = λ/(1 + δ₀). |
+| `--shared s` | shared fraction of the teacher variance, 0 ≤ s ≤ 1: the similarity of two teachers is ρ = s·κ(Δθ), random for every pair of tasks (default: the config's `shared`, 0.8). Every script that takes `--clock` has it; `run_nested.py` has `--rho` in its place. |
+| `--rho_zero` | independent teachers, ρ = 0 for every pair of tasks (the same as `--shared 0`): what every run before 2026-11-15 used. Figures and `.npz` files do not carry the setting in their names, so give a `--rho_zero` run its own `--out`. The console header of every script prints it. |
 | `--stat mean\|seed` | half-life statistic (the half-life scripts): `mean` = first crossing of ½ by the seed-mean curve, the write-up's m½, jackknife s.e. (default); `seed` = mean of per-seed half-lives. |
 | `--seeds n` | number of seeds, 0 … n − 1 (`run_szero`, `run_stask`, `run_Nscaling`, `run_weight_norms`: default 4; `run_gauge_comp`: default 1, seed mean ± s.e. in one figure per cell). |
 | `--readout …` | subset of `gated_shared learned_shared gated_frozen frozen task_heads` (default all). |
@@ -512,7 +534,7 @@ of the stream, beside n·L_start and the fitted slope.
 ### `run_nested.py` — nested-model test: SGD, gradient flow, delta rules, Hebb
 
 ```
-python scripts/run_nested.py [--N 256] [--D-factor 2] [--delta0 0 1 10] [--overlap 0.1 0.5] [--rho 0 0.7] [--lam 1] [--seeds 10] [--models …] [--no-ref-checks] [--reuse] [--workers K] [--gpus [ids]]
+python scripts/run_nested.py [--N 256] [--D-factor 2] [--delta0 0 1 10] [--overlap 0.1 0.5] [--rho 0 0.7] [--rho_zero] [--latent fourier|common|sphere] [--lam 1] [--seeds 10] [--models …] [--no-ref-checks] [--reuse] [--workers K] [--gpus [ids]]
 python scripts/run_nested.py --gpus --workers 8                                                                # GPU node, the full design
 python scripts/run_nested.py --N 32 --seeds 2 --delta0 0 10 --overlap 0.25 --rho 0 --no-ref-checks --out /tmp/nested     # laptop, seconds
 ```
@@ -537,10 +559,14 @@ and the delta rules train the same next tasks from the copy; Hebb is
 burned in separately on the same stream with the forked readout as its
 keys.  Every model reads the same teachers and gates, and the stream does
 not depend on δ₀ or λ.  `--overlap` is the gate density p (two gates share
-a fraction p of their units; κ = p√N).  At ρ > 0 the teachers are
+a fraction p of their units; κ = p√N).  `--rho` is the shared fraction of
+the teacher variance.  At ρ > 0 the default `--latent fourier` is the
+write-up's family (a latent angle per task, similarity ρ·κ(Δθ), random for
+every pair of tasks and zero on average); the earlier families are
 w = √ρ U z + √(1 − ρ) ξ with one shared direction (`--latent common`, cosine
-ρ between any two teachers) or the write-up's z on the sphere of R^r
-(`--latent sphere --rank r`).  Clock (ii) by default, so θ = 1 − e^(−λ) at
+ρ between any two teachers, the default before 2026-11-15) or z on the
+sphere of R^r (`--latent sphere --rank r`).  `--rho_zero` runs independent
+teachers only (`--rho 0 --ref-rho 0`).  Clock (ii) by default, so θ = 1 − e^(−λ) at
 every δ₀; SGD then takes η_c = c/ā²_c per task at its fixed step count
 (`--clock nominal` for clock (i)).
 

@@ -158,7 +158,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     plan = pool.plan(args, [(g, T + args.tau + 1) for g in groups(cells_).values()])
     r0 = runs[0]
     print(f"S_T(τ) vs τ: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={r0.lam} {r0.solver} n_steps={r0.n_steps} "
-          f"{r0.clock} clock T={T} τ≤{args.tau} seeds={args.seeds} statistic={args.stat}  [{plan.describe()}]", flush=True)
+          f"{r0.clock} clock, {r0.teachers} T={T} τ≤{args.tau} seeds={args.seeds} statistic={args.stat}  [{plan.describe()}]", flush=True)
     res = collect(cells_, T, args.tau, plan)
 
     outs = []

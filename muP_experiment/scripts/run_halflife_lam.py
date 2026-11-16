@@ -291,7 +291,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     plan = pool.plan(args, [(g, T + tau + 1) for g in groups(runs, T + tau + 1).values()])
     r0 = runs[0]
     print(f"m½ vs λ: N={args.N} κ={args.kappa} δ₀={args.delta0} λ={lams} {r0.solver} "
-          f"n_steps={min(r.n_steps for r in runs)}…{max(r.n_steps for r in runs)} {r0.clock} clock T={T} τ≤{tau} "
+          f"n_steps={min(r.n_steps for r in runs)}…{max(r.n_steps for r in runs)} {r0.clock} clock, {r0.teachers} T={T} τ≤{tau} "
           f"seeds={args.seeds} statistic={args.stat}  [{plan.describe()}]", flush=True)
     res = collect(runs, T, tau, plan, args.stat)
 

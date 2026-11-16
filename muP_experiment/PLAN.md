@@ -88,8 +88,19 @@ tests/test_gpu.py           the cards (skipped without a GPU)
 class State(NamedTuple):   # one run; vmap adds the batch axis
     W: (N, D)   a: (N,)   g: (N,) 0/1   w: (D,)   heads: (P, N)   key: PRNGKey   t: int32
 class Params(NamedTuple):  # 0-d float64 each, vmapped to (B,)
-    Delta0, eta, h, pN, lam, gated, learn_a, do_proj, use_heads, sigma0
+    Delta0, eta, h, pN, lam, gated, learn_a, do_proj, use_heads, sigma0, clock, shared
 ```
+
+`shared` is the shared fraction of the teacher variance (write-up,
+"Teachers"; 0 = independent teachers, `--rho_zero`).  The teacher of task
+`t` is `model.draw_teacher(kw, D, run_key, shared)`: the private part ξ
+from the task's teacher key `kw` (the draw of the code before 2026-11-15),
+the angle θ from `fold_in(kw, 1)` (`task_angle`), and the six fixed
+directions from `fold_in(run_key, BASIS_FOLD)` (`teacher_basis`,
+orthonormalised by a Cholesky factor so that every backend gets the same
+basis).  Every caller passes the run key and `p.shared`: `draw_task`,
+`probe_task`, `synapse.draw_mask`, `synapse.probe_mask`.  The gate key is
+untouched, so the gate does not depend on `shared`.
 
 Derived: `key_vec = g ⊙ a`, `u_c = key_vec @ W / pN` (eq. student),
 `Q_ii = |W_i|²/D`, `Δ_i = (a_i² − Q_ii)/η` (eq. imb).  `pN = κ√N` is the
@@ -567,7 +578,10 @@ python -m pytest tests/test_gpu.py -v  # on the GPU node: backend, each card vs 
 T) via `one_batch`, which gives the ungated runs the gated runs' κ and T
 so all five readouts share one batch.  Changing a kernel changes
 `tests/reference_hash.txt` (test 6 of the sweep); delete it and rerun to
-regenerate.
+regenerate.  `tests/test_teachers.py` covers the teacher family: the
+kernel, the fixed basis, ρ = shared·κ(Δθ), `shared = 0` against the draw of
+the earlier code, the config default and legacy batch files, the
+`--shared` / `--rho_zero` flags, the NumPy reference and the nested stream.
 
 ## 9. Invariants and gotchas when changing things
 
@@ -764,3 +778,28 @@ regenerate.
   `extra_state_bytes` (the replay buffer, `replay.RRun`) to the planner's
   memory estimate; runs without the attribute plan as before.  No
   numerical change to this experiment.
+- 2026-11-15: **teacher similarity.**  The teachers were independent
+  (ρ = 0).  They are now the family of the write-up ("Teachers"): a latent
+  angle per task, w = √s U z(θ) + √(1 − s) ξ, similarity ρ = s·κ(Δθ) with
+  κ(Δ) = 0.5 cos Δ + 0.3 cos 2Δ + 0.2 cos 3Δ, so ρ is random for every pair
+  of tasks and zero on average.  `Config.shared` (default 0.8) →
+  `Run.shared` → `Params.shared` → `model.draw_teacher`; `--shared s` and
+  `--rho_zero` on every script that takes `--clock` (`config.add_teacher_args`,
+  `teacher_override`, inside `add_clock_arg` / `clock_override`), on the
+  replay scripts (`replay_experiment/scripts/common.py`) and, as `--rho` /
+  `--rho_zero` / `--latent fourier`, on `run_nested.py`; the knapsack stream
+  has `Config.latent = "fourier"`.  `Run.shared` defaults to 0, so a batch
+  file written before this date reads as what it ran.  `Run.rng_seed` leaves
+  `shared` out: a run and its `--rho_zero` twin share gates, W⁽⁰⁾ and ξ.
+  `--rho_zero` draws the same numbers as the earlier code, but the compiled
+  arithmetic after the teacher draw is ordered differently, so results agree
+  to rounding (≤ 4e-15 on every key of the 10-task reference run), not bit
+  for bit: **`tests/reference_hash.txt` must be regenerated once** (delete
+  it and rerun `tests/test_reproducible.py`, which now pins `shared=0.0`).
+  Numerical check of the write-up's statement (means unchanged, variance up):
+  task heads, λ = 4, κ = 1, N = 20 (768 seeds) and N = 50 (384 seeds), mean
+  S_T(m) at shared 0.8 against 0 within two s.e. at every age, excess
+  variance within 25 % of eq. `var_sim`.  Results on disk dated before
+  2026-11-15 are ρ = 0 runs; output names do not carry the setting, so a
+  `--rho_zero` run needs its own `--out`.  The teacher family needs
+  D ≥ 6 (`make_runs` raises below that unless `shared` is 0).

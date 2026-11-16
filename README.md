@@ -45,5 +45,14 @@ and placement flags; `--gpus` alone places a run on the GPU node, `--workers K`
 on CPU processes, nothing runs in-process.  See `muP_experiment/README.md`.
 Results go to `muP_experiment/results/` (ignored by git).
 
+**Teachers.**  Since 2026-11-15 the teachers of a stream are similar, with a
+similarity that is random for every pair of tasks: every task draws a latent
+angle θ and two teachers have ρ = s·κ(Δθ), κ(Δ) = 0.5 cos Δ + 0.3 cos 2Δ +
+0.2 cos 3Δ, with s the shared fraction of the teacher variance (`shared: 0.8`
+in the configs, `--shared s` on the scripts).  `--rho_zero` on any script
+draws independent teachers, ρ = 0 for every pair, as every run before that
+date did.  See `muP_experiment/README.md` and the write-up's "Teachers" and
+"Similar teachers".
+
 The tests of `sscl_core` are `muP_experiment/tests` (run from `muP_experiment/`); run them after any change
 to the shared package, whichever experiment the change is for.

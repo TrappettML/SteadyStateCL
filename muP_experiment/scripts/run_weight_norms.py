@@ -491,7 +491,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     run0 = runs[0]
     plan = pool.plan(args, [(g, key[-1]) for key, g in groups(runs).items()], out_per_task=8 * len(ALL_KEYS))
-    print(f"weight norms: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} {run0.clock} clock seeds={args.seeds}  "
+    print(f"weight norms: N={args.N} κ={args.kappa} δ₀={run0.delta0} λ={run0.lam} {run0.solver} {run0.clock} clock, {run0.teachers} seeds={args.seeds}  "
           f"[{plan.describe()}]", flush=True)
     res = collect(runs, plan)
 

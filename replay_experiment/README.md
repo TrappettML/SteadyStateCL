@@ -126,6 +126,7 @@ shared package are `../muP_experiment/tests`.
 | `--replay-ratio ρ` | replayed samples per fresh sample (default 1). |
 | `--write m` | samples of each task stored after it, as `--capacity` (default `0.125D`). |
 | `--delta0`, `--lam`, `--seeds`, `--sgd_batch`, `--out` | as in `muP_experiment`. |
+| `--shared s`, `--rho_zero` | teacher similarity, as in `muP_experiment`: every task draws a latent angle and two teachers have similarity ρ = s·κ(Δθ), random for every pair of tasks (default: the config's `shared`, 0.8); `--rho_zero` draws independent teachers, ρ = 0, the stream of every run before 2026-11-15. A stored sample (x, y) carries the label of its own task's teacher under either. |
 | `--T`, `--tau`, `--tasks` | stream lengths, per script (`--help`); in units of N where a script takes several widths (`run_Nscaling.py`, `run_weight_norms.py`). |
 
 The placement flags (`--gpus`, `--workers`, `--per-gpu`, `--chunk`,

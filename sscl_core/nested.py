@@ -33,9 +33,13 @@ the fork is probed at every age of ``age_grid``, so each age averages the same t
 Everything a model stores about a probe is three quadratic forms, uu = |u|²/D, uw = u·w/D, ww = |w|²/D, so
 E = uu − 2uw + ww, the project's signal is uw/ww, and the Hebb field (linear in b) is rescaled without a rerun.
 
-Teachers (write-up, "Teachers"): w_k = √ρ U z_k + √(1 − ρ) ξ_k.  ``latent="common"`` takes z_k = e₁ for every
-task, so two teachers have cosine ρ (the reading of "teacher similarity ρ" this experiment's predictions use);
-``latent="sphere"`` draws z_k uniformly on the unit sphere of R^r as the write-up does.
+Teachers.  ``latent="fourier"`` (the default) is the family of the write-up ("Teachers") and of
+``model.draw_teacher``: every task draws an angle θ ~ Uniform(0, 2π) and
+w = √ρ Σ_k √w_k (cos kθ u_{k,c} + sin kθ u_{k,s}) + √(1 − ρ) ξ, with ``Cond.rho`` the shared fraction: two
+teachers have similarity ρ·κ(Δθ), random for every pair of tasks and zero on average.  The two earlier
+families are w_k = √ρ U z_k + √(1 − ρ) ξ_k: ``latent="common"`` takes z_k = e₁ for every task, so two teachers
+have cosine ρ (a constant similarity; the default before 2026-11-15); ``latent="sphere"`` draws z_k uniformly on the unit sphere of R^r.  At ρ = 0 every family is the
+independent teacher (``--rho_zero``).
 
 The gate overlap of the experiment's design is the gate density p here: two independent gates share a
 fraction p of their units.  The project's gate scale is κ = p√N.
@@ -53,7 +57,10 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from sscl_core import theory
+from sscl_core import npmodel, theory
+
+#: teacher families at ρ > 0 (module docstring, "Teachers")
+LATENTS = ("fourier", "common", "sphere")
 
 MODELS = ("sgd", "gf", "delta_matched", "delta_raw", "hebb")
 #: models whose readout moves, for which the key-drift split is defined
@@ -74,7 +81,7 @@ class Cond:
     rho: float
     delta0: float
     lam: float
-    latent: str = "common"
+    latent: str = "fourier"
     rank: int = 1
 
     @property
@@ -157,11 +164,15 @@ class Stream:
         self.cond, self.seed = cond, seed
         tag = f"nested|{seed}|{cond.N}|{cond.D}|{cond.p}|{cond.rho}|{cond.latent}|{cond.rank}"
         self.base = int.from_bytes(hashlib.sha256(tag.encode()).digest()[:4], "little")
-        if cond.latent not in ("common", "sphere"):
-            raise ValueError(f"unknown latent {cond.latent!r}")
-        r = 1 if cond.latent == "common" else cond.rank
-        q, _ = np.linalg.qr(np.random.default_rng([self.base, 0]).standard_normal((cond.D, r)))
-        self.U = math.sqrt(cond.D) * q                                 # U = √D Ũ, Ũ orthonormal
+        if cond.latent not in LATENTS:
+            raise ValueError(f"unknown latent {cond.latent!r}; known: {list(LATENTS)}")
+        rng = np.random.default_rng([self.base, 0])
+        if cond.latent == "fourier":
+            self.U = npmodel.fourier_basis(rng, cond.D)                # rows u_{1,c}, u_{1,s}, u_{2,c}, …; u_a·u_b = D δ_ab
+        else:
+            r = 1 if cond.latent == "common" else cond.rank
+            q, _ = np.linalg.qr(rng.standard_normal((cond.D, r)))
+            self.U = math.sqrt(cond.D) * q                             # U = √D Ũ, Ũ orthonormal
 
     def task(self, t: int) -> tuple[np.ndarray, np.ndarray]:
         """(gate (N,) bool, teacher (D,)) of task ``t`` (any integer)."""
@@ -169,7 +180,9 @@ class Stream:
         rng = np.random.default_rng([self.base, 1, t + _OFFSET])
         w = rng.standard_normal(c.D)
         g = rng.random(c.N) < c.p
-        if c.rho > 0.0:
+        if c.rho > 0.0 and c.latent == "fourier":
+            w = npmodel.teacher(w, self.angle(t, rng), self.U, c.rho)
+        elif c.rho > 0.0:
             if c.latent == "common":
                 z = np.ones(1)
             else:
@@ -177,6 +190,16 @@ class Stream:
                 z /= np.linalg.norm(z)
             w = math.sqrt(c.rho) * self.U @ z + math.sqrt(1.0 - c.rho) * w
         return g, w
+
+    def angle(self, t: int, rng: Optional[np.random.Generator] = None) -> float:
+        """Latent angle θ_t ~ Uniform(0, 2π) of task ``t`` (``latent="fourier"``): the draw that follows the
+        teacher's private part and the gate in the task's generator (``rng`` in that state, else regenerated)."""
+        if rng is None:
+            c = self.cond
+            rng = np.random.default_rng([self.base, 1, t + _OFFSET])
+            rng.standard_normal(c.D)
+            rng.random(c.N)
+        return 2.0 * math.pi * rng.random()
 
     def init(self) -> tuple[np.ndarray, np.ndarray]:
         """W⁽⁰⁾ ~ N(0, 1) and a_i = ±√(δ₀ + Q_ii) (write-up, "Initialization"; δ₀ ≥ 0 here)."""
@@ -348,7 +371,8 @@ class JaxTrainer:
         B = len(self.models)
         f = lambda v: jnp.asarray(np.broadcast_to(np.asarray(v, np.float64), (B,)))
         p = self._Params(Delta0=f(c.delta0 / eta), eta=f(eta), h=f(h), pN=f(c.pN), lam=f(c.lam), gated=f(1.0),
-                         learn_a=f(1.0), do_proj=f(1.0), use_heads=f(0.0), sigma0=f(1.0), clock=f(0.0))
+                         learn_a=f(1.0), do_proj=f(1.0), use_heads=f(0.0), sigma0=f(1.0), clock=f(0.0),
+                         shared=f(0.0))          # unused: the kernel is handed the stream's teachers
         self.W, self.a = self.kernel(self.W, self.a, jnp.asarray(G), jnp.asarray(np.stack(ws)), p,
                                      self._fold(self._keys, t % (1 << 31)))
         W, a = np.asarray(self.W), np.asarray(self.a)

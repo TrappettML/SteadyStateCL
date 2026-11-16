@@ -73,7 +73,7 @@ def evaluate_probes(state: State, p: Params, ages: jnp.ndarray):
     k = state.t - ages
     valid = k >= 0
     idx = jnp.where(valid, k, 0)
-    wk, gk = jax.vmap(lambda i: probe_task(state.key, i, N, D, p.pN, p.gated))(idx)   # (n_ages, D), (n_ages, N)
+    wk, gk = jax.vmap(lambda i: probe_task(state.key, i, N, D, p.pN, p.gated, p.shared))(idx)   # (n_ages, D), (n_ages, N)
     ak = jnp.where(p.use_heads == 1.0, state.heads[idx], state.a[None, :])
     U = (gk * ak) @ state.W / p.pN                 # (n_ages, D)
     wn = (wk * wk).sum(-1)

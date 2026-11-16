@@ -17,6 +17,7 @@ T_per_N: 7.0                   # T_burn = T_meas = 7N tasks, as Stage 1 of the �
 T_factor: 10.0
 batch_size: 64
 clock: nominal                 # SGD always runs the nominal clock
+shared: 0.8                    # shared fraction of the teacher variance: similarity ρ = shared·κ(Δθ), random for every pair of tasks; 0 = independent teachers (--rho_zero)
 
 # --- replay -------------------------------------------------------------------------------------------------
 # methods (the traces): none = no buffer; fifo / random / priority = which stored samples a task's new samples

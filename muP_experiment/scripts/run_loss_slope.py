@@ -168,7 +168,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     plan = pool.plan(args, [(g, T) for g in groups(cells_).values()])
     r0 = runs[0]
     print(f"loss area vs task: N={args.N} κ={kappas} δ₀={args.delta0} λ={r0.lam} {r0.solver} n_steps={r0.n_steps} "
-          f"{r0.clock} clock T={T} seeds={args.seeds}  [{plan.describe()}]", flush=True)
+          f"{r0.clock} clock, {r0.teachers} T={T} seeds={args.seeds}  [{plan.describe()}]", flush=True)
     data = collect(cells_, T, plan)
 
     figs = {}                                                       # (N, δ₀, λ) → {κ label: {readout: {key: (T, n_seeds)}}}

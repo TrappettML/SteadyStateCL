@@ -24,7 +24,7 @@ from sscl_core import experiments as X
 from sscl_core import plotting as P
 from sscl_core import pool
 from sscl_core import replay as R
-from sscl_core.config import Config, make_runs
+from sscl_core.config import Config, add_teacher_args, make_runs, teacher_override
 
 #: Colour, label and line style of a replay method (bound to the method, never to rank); no replay is the
 #: grey dashed baseline.
@@ -74,6 +74,7 @@ def add_args(ap, name: str, N: Sequence[int], delta0_list: bool = False, seeds: 
     ap.add_argument("--write", default=None,
                     help="samples of each task stored after it, as --capacity (default: the config's, 0.125D)")
     ap.add_argument("--sgd_batch", type=int, default=None, help="fresh samples per SGD step (default: the config's, 16)")
+    add_teacher_args(ap)                      # --shared S | --rho_zero
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", name))
     pool.add_args(ap)
 
@@ -86,6 +87,7 @@ def build(args, name: str, mode: Optional[str] = None) -> list[R.RRun]:
             "lam": [args.lam if args.lam is not None else cfg.lam[0]], "seeds": args.seeds, "extra": (), "trace": False}
     if args.sgd_batch is not None:
         over["sgd_batch"] = int(args.sgd_batch)
+    over.update(teacher_override(args))
     base = make_runs(Config(**{**cfg.__dict__, **over}))
     return R.expand(base, args.method or rep["method"], args.capacity or rep["capacity"],
                     args.write if args.write is not None else rep["write"],
