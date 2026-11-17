@@ -6,9 +6,12 @@ The roles of the μP experiment's axes here:
     readout (the traces, one colour each)  replay method: none, fifo, random, priority (``METHOD_COLOR``)
     κ (columns / shades / one per figure)  replay size C, the buffer's capacity in samples (``--capacity``)
 
-The network is always the ungated learned shared readout (both layers learned, projection on), so there is no
-``--readout`` and no ``--kappa``.  ``none`` has no buffer, hence no C: like the ungated readouts of the μP
-figures it is trained once and drawn in every capacity's cell.
+The network is the learned shared readout (both layers learned, projection on), so there is no ``--readout``.
+``--gating`` picks its context gate: ``none`` (every unit active, readout ``learned_shared``), ``unit`` (κ-sparse
+unit gates, ``gated_shared``) or ``synapse`` (synaptic masks at the same density); ``--kappa`` is the one gate
+scale of a gated run.  Every figure and array name carries the gating (``RRun.gate_label``: ``ungated``,
+``unit_k1``, ``synapse_k1``).  ``none`` has no buffer, hence no C: like the ungated readouts of the μP figures it
+is trained once and drawn in every capacity's cell.
 """
 from __future__ import annotations
 
@@ -33,9 +36,16 @@ METHOD_LABEL = {"none": "no replay", "fifo": "FIFO", "random": "random replace",
 METHOD_STYLE = {"none": "--", "fifo": "-", "random": "-", "priority": "-"}
 MODE_LABEL = {"sleep": "sleep replay", "interleaved": "interleaved replay", "none": "no replay"}
 
+
+def mode_text(r) -> str:
+    """The replay schedule and gating of a run for titles and console headers: ``sleep replay, unit gating κ = 1``."""
+    g = "ungated" if r.gating == "none" else f"{GATING_LABEL[r.gating]} κ = {r.kappa_text()}"
+    return f"{MODE_LABEL[r.mode]}, {g}"
+
 #: Keys of ``configs/replay.yaml`` that are not ``sscl_core.config.Config`` fields, with their defaults.
 REPLAY_DEFAULTS = {"method": list(R.METHODS), "capacity": ["0.5D", "4D"], "write": "0.125D", "replay_ratio": 1.0,
-                   "replay_mode": "sleep"}
+                   "replay_mode": "sleep", "gating": "none"}
+GATING_LABEL = {"none": "ungated", "unit": "unit gating", "synapse": "synaptic gating"}
 
 
 def load_config(path: str) -> tuple[Config, dict]:
@@ -74,6 +84,13 @@ def add_args(ap, name: str, N: Sequence[int], delta0_list: bool = False, seeds: 
     ap.add_argument("--write", default=None,
                     help="samples of each task stored after it, as --capacity (default: the config's, 0.125D)")
     ap.add_argument("--sgd_batch", type=int, default=None, help="fresh samples per SGD step (default: the config's, 16)")
+    ap.add_argument("--gating", choices=R.GATINGS, default=None,
+                    help="context gating: 'none' = every unit active, 'unit' = κ-sparse unit gates, 'synapse' = "
+                         "synaptic masks of the same density; a replayed sample is trained under its own task's "
+                         "gate (default: the config's, none)")
+    ap.add_argument("--kappa", default=None,
+                    help="gate scale κ of a gated run (a float or sqrtN), 1 ≤ κ ≤ √N: κ√N units (or that share of "
+                         "every unit's synapses) active per task (default: the config's first kappa)")
     add_teacher_args(ap)                      # --shared S | --rho_zero
     ap.add_argument("--out", default=os.path.join(_path.ROOT, "results", name))
     pool.add_args(ap)
@@ -82,17 +99,41 @@ def add_args(ap, name: str, N: Sequence[int], delta0_list: bool = False, seeds: 
 def build(args, name: str, mode: Optional[str] = None) -> list[R.RRun]:
     """The runs of a script's grid: ``config.make_runs`` at readout ``learned_shared`` × method × capacity."""
     cfg, rep = load_config(args.config)
+    gating = gating_of(args)
     d0 = args.delta0 if isinstance(args.delta0, (list, tuple)) else [args.delta0]
-    over = {"name": name, "N": list(args.N), "readout": ["learned_shared"], "delta0": list(d0),
+    kappa = getattr(args, "kappa", None)
+    kappa = [cfg.kappa[0]] if kappa is None else [kappa if str(kappa) == "sqrtN" else float(kappa)]
+    over = {"name": name, "N": list(args.N), "readout": [R.GATING_READOUT[gating]], "kappa": kappa, "delta0": list(d0),
             "lam": [args.lam if args.lam is not None else cfg.lam[0]], "seeds": args.seeds, "extra": (), "trace": False}
     if args.sgd_batch is not None:
         over["sgd_batch"] = int(args.sgd_batch)
     over.update(teacher_override(args))
     base = make_runs(Config(**{**cfg.__dict__, **over}))
+    if not base:
+        raise SystemExit(f"no runs: κ = {kappa[0]} is outside 1 ≤ κ ≤ √N for every N of {list(args.N)}")
     return R.expand(base, args.method or rep["method"], args.capacity or rep["capacity"],
                     args.write if args.write is not None else rep["write"],
                     args.replay_ratio if args.replay_ratio is not None else rep["replay_ratio"],
-                    mode or getattr(args, "mode", None) or rep["replay_mode"])
+                    mode or getattr(args, "mode", None) or rep["replay_mode"], gating)
+
+
+def gating_of(args) -> str:
+    """The gating of a script's runs: ``--gating``, else the config's ``gating``."""
+    g = getattr(args, "gating", None)
+    if g is None:
+        g = load_config(args.config)[1]["gating"]
+    if g not in R.GATINGS:
+        raise SystemExit(f"unknown gating {g!r} in the config; known: {list(R.GATINGS)}")
+    return g
+
+
+def gate_tag(runs) -> str:
+    """The gating part of a figure or array name (``RRun.gate_label``); one gating per script call."""
+    runs = [runs] if isinstance(runs, R.RRun) else list(runs)
+    tags = {r.gate_label() for r in runs}
+    if len(tags) != 1:
+        raise ValueError(f"runs of several gatings in one figure: {sorted(tags)}")
+    return tags.pop()
 
 
 # ----------------------------------------------------------------------------
@@ -224,11 +265,21 @@ def cap_text(cap: str) -> str:
 
 def replay_text(r: R.RRun) -> str:
     """One caption clause stating a replay run's fixed settings."""
-    _, _, C, m, B_rep, n_sleep = r.spec
+    _, _, C, m, B_rep, n_sleep, _ = r.spec
     how = (f"sleep replay ({n_sleep} steps of {max(R.model.sgd_batch(r.solver), 1)} buffer samples after each task's "
            f"{r.n_steps} steps)" if r.mode == "sleep" else
            f"interleaved replay ({B_rep} buffer samples in each of a task's {r.n_steps} steps)")
-    return f"{how}, {m} samples of each task stored (D = {r.D})"
+    return f"{how}, {m} samples of each task stored (D = {r.D}); {gating_text(r)}"
+
+
+def gating_text(r: R.RRun) -> str:
+    """One caption clause stating the run's gating."""
+    if r.gating == "none":
+        return "ungated (every unit active)"
+    k = r.kappa_text()
+    what = "units" if r.gating == "unit" else "synapses of every unit"
+    return (f"{GATING_LABEL[r.gating]}, κ = {k}: {r.pN / r.N:.2g} of the {what} open per task, a replayed sample "
+            f"under its own task's gate")
 
 
 def seed_mean(Y: np.ndarray, axis: int = 1) -> tuple[np.ndarray, np.ndarray]:

@@ -7,7 +7,7 @@
 The replay counterpart of ``muP_experiment/scripts/run_stask.py`` and the companion of ``run_szero.py`` with
 the probe taken at steady state: train T tasks (default the config's T_burn + T_meas = 14N), by which the
 buffer has long been full, then follow the teacher of task T for τ = 0 … ``--tau`` more tasks.  One figure per
-cell (N, C, δ₀), ``results/stask/figures/stask_N{N}_C{C}_d0{δ₀}_lam{λ}_{mode}.png``: x = τ + 1 (log), y =
+cell (N, C, δ₀), ``results/stask/figures/stask_N{N}_C{C}_d0{δ₀}_lam{λ}_{mode}_{gating}.png``: x = τ + 1 (log), y =
 S_T(τ)/S_T(0), one trace per replay method (``none`` dashed grey), ±1 s.e. band, half-lives in the caption; the
 per-τ arrays ``ST_{method}`` (τ + 1, n_seeds) go to the ``.npz``.  A second figure per cell,
 ``stask_area_N{N}_…png``: the area under S_T(m)/S_T(0) from m = 0 to n against n (``run_szero.area_curve``), the

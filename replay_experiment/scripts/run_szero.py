@@ -5,9 +5,9 @@
                                 [--mode sleep|interleaved] [--stat mean|seed] [--gpus]
 
 The replay counterpart of ``muP_experiment/scripts/run_szero.py``.  From a fresh initialisation (and an empty
-buffer) the ungated learned shared readout trains the task stream, and after every task t (after its sleep) the
+buffer) the learned shared readout (``--gating``: ungated, unit- or synapse-gated) trains the task stream, and after every task t (after its sleep) the
 signal of the FIRST teacher is read, S₀(t) = u_t·w₀*/|w₀*|² with u = a W / N.  One figure per cell (N, C, δ₀),
-``results/szero/figures/szero_N{N}_C{C}_d0{δ₀}_lam{λ}_{mode}.png``: x = t + 1 (log), y = S₀(t)/S₀(0), one trace per
+``results/szero/figures/szero_N{N}_C{C}_d0{δ₀}_lam{λ}_{mode}_{gating}.png`` (gating ``ungated``, ``unit_k{κ}`` or ``synapse_k{κ}``): x = t + 1 (log), y = S₀(t)/S₀(0), one trace per
 replay method (``none`` dashed grey, the same runs in every capacity's figure), ±1 s.e. band, grey lines at 0
 and ½, the half-life m½ per method in the caption (``--stat``, ``sscl_core.halflife``).  The per-task arrays
 are written next to the figure as ``.npz``.  No equation is drawn: the write-up has none for replay.
@@ -113,11 +113,11 @@ def figure(S: dict[str, np.ndarray], run0: R.RRun, cap: Optional[str], path: str
         ax.set_xlabel(r"$\tau + 1$ (tasks after task $T$)")
         ax.set_ylabel(r"$S_T(\tau)\,/\,S_T(0)$,  $S_T(\tau) = u_{T+\tau}\cdot w_T^*/|w_T^*|^2$")
         what, ref = f"signal of teacher T = {steady} after task T + τ", "at τ = 0"
-    extra = f"N = {run0.N}" + (f", {C.cap_text(cap)}, {C.MODE_LABEL[run0.mode]}" if cap else "")
+    extra = f"N = {run0.N}" + (f", {C.cap_text(cap)}, {C.mode_text(run0)}" if cap else "")
     P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=extra)
     mtxt = ", ".join(f"{C.METHOD_LABEL[m]} {mhalf_text(mh[m], n - 1)}" for m in S)
     P.caption(fig, f"line: {LINE_TEXT[stat].format(what=what, ref=ref)}, drawn at +1 so age 0 is at 1 ({n_seeds} "
-                   f"seeds); band: ±1 s.e.; ungated learned shared readout"
+                   f"seeds); band: ±1 s.e.; learned shared readout, {C.gating_text(run0)}"
                    + (f", {C.replay_text(run0)}" if run0.method != "none" else "")
                    + f"; half-life m½ (tasks), first crossing of ½ (grey line), {MHALF_TEXT[stat]}: {mtxt}.")
     P.fig_legend(fig, handles=C.method_handles(list(S)))
@@ -169,7 +169,7 @@ def figure_area(S: dict[str, np.ndarray], run0: R.RRun, cap: Optional[str], path
     sym = "S_0" if steady is None else "S_T"
     ax.set_xlabel("$n$ (tasks after the first)" if steady is None else "$n$ (tasks after task $T$)")
     ax.set_ylabel(rf"area under ${sym}(m)/{sym}(0)$, $m \leq n$ (tasks)")
-    extra = f"N = {run0.N}" + (f", {C.cap_text(cap)}, {C.MODE_LABEL[run0.mode]}" if cap else "")
+    extra = f"N = {run0.N}" + (f", {C.cap_text(cap)}, {C.mode_text(run0)}" if cap else "")
     P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=extra)
     what = ("the mean curve (seed mean of the signal over its seed mean at age 0), band: jackknife ±1 s.e."
             if stat == "mean" else "each seed's own signal over its value at age 0, seed mean, band: ±1 s.e.")
@@ -196,7 +196,7 @@ def report_and_draw(res: dict, runs: list, out: str, stem: str, stat: str, stead
             continue
         cell = cells_[(N, cap, d0, lam)]
         run0 = next((r for r in cell if r.method != "none"), cell[0])
-        path = os.path.join(out, "figures", f"{stem}_N{N}_C{cap or 0}_d0{P.fmt(d0)}_lam{P.fmt(lam)}_{run0.mode}")
+        path = os.path.join(out, "figures", f"{stem}_N{N}_C{cap or 0}_d0{P.fmt(d0)}_lam{P.fmt(lam)}_{run0.mode}_{C.gate_tag(run0)}")
         outs.append(figure(S, run0, cap, path, stat, steady))
         print(f"wrote {outs[-1]} and {path}.npz")
         apath = path.replace(f"{stem}_N", f"{stem}_area_N")

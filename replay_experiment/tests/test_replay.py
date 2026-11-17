@@ -18,14 +18,14 @@ from sscl_core.config import Config, make_runs
 GPUS = [d for d in jax.devices() if d.platform in ("gpu", "cuda", "rocm")]
 
 
-def base(N=10, seeds=2, B=4, lam=1.0):
-    cfg = Config(name="t", N=[N], readout=["learned_shared"], delta0=[0.0], lam=[lam], seeds=seeds, solver="sgd",
-                 sgd_batch=B, T_per_N=1.0)
+def base(N=10, seeds=2, B=4, lam=1.0, gating="none", kappa=2.0):
+    cfg = Config(name="t", N=[N], readout=[R.GATING_READOUT[gating]], kappa=[kappa], delta0=[0.0], lam=[lam],
+                 seeds=seeds, solver="sgd", sgd_batch=B, T_per_N=1.0)
     return make_runs(cfg)
 
 
-def runs_of(methods, cap="1D", write="0.25D", mode="sleep", ratio=1.0, **kw):
-    return R.expand(base(**kw), methods, [cap], write, ratio, mode)
+def runs_of(methods, cap="1D", write="0.25D", mode="sleep", ratio=1.0, gating="none", **kw):
+    return R.expand(base(gating=gating, **kw), methods, [cap], write, ratio, mode, gating)
 
 
 def advance(runs, T):
@@ -48,9 +48,9 @@ def test_spec_and_replayed_samples():
     s = runs_of(["fifo"], mode="sleep", ratio=0.5)[0]
     i = runs_of(["fifo"], mode="interleaved", ratio=0.5)[0]
     n, B = s.n_steps, 4
-    assert s.spec == (n, "sgd4", 40, 10, 0, round(0.5 * n)) and i.spec == (n, "sgd4", 40, 10, 2, 0)
+    assert s.spec == (n, "sgd4", 40, 10, 0, round(0.5 * n), "none") and i.spec == (n, "sgd4", 40, 10, 2, 0, "none")
     assert s.spec[5] * B == i.spec[4] * n
-    assert runs_of(["none"])[0].spec == (n, "sgd4", 0, 0, 0, 0)
+    assert runs_of(["none"])[0].spec == (n, "sgd4", 0, 0, 0, 0, "none")
     assert R.parse_size("0.5D", 80) == (40, "0.5D") and R.parse_size(300, 80) == (300, "300")
 
 
@@ -154,8 +154,148 @@ def test_scripts_run(tmp_path):
     assert run_inter_vs_sleep.main(small + ["--T", "6", "--tau", "4"] + out("ivs")) == 0
     pngs = sorted(p.name for p in tmp_path.rglob("*.png"))
     assert len(pngs) == 4 + 4 + 2 + 2 + 1 + 1 + 1, pngs               # szero and stask: signal and area per capacity
-    assert "stask_area_N10_C4D_d00_lam1_interleaved.png" in pngs
-    assert "stask_N10_C4D_d00_lam1_interleaved.png" in pngs and "inter_vs_sleep_N10_d00_lam1.png" in pngs
+    assert "stask_area_N10_C4D_d00_lam1_interleaved_ungated.png" in pngs
+    assert "stask_N10_C4D_d00_lam1_interleaved_ungated.png" in pngs and "inter_vs_sleep_N10_d00_lam1_ungated.png" in pngs
+
+
+@pytest.mark.parametrize("gating", ["unit", "synapse"])
+def test_scripts_run_gated(tmp_path, gating):
+    """The scripts under ``--gating``: the figures are named with the gating and κ."""
+    import run_stask, run_training_verify
+    small = ["--N", "10", "--seeds", "2", "--sgd_batch", "4", "--lam", "1", "--gating", gating, "--kappa", "2"]
+    assert run_stask.main(small + ["--T", "4", "--tau", "3", "--capacity", "1D", "--mode", "interleaved",
+                                   "--out", str(tmp_path / "stask")]) == 0
+    assert run_training_verify.main(small[2:] + ["--cell", "10,1D,0", "--tasks", "6", "--out", str(tmp_path / "tv")]) == 0
+    pngs = sorted(p.name for p in tmp_path.rglob("*.png"))
+    assert f"stask_N10_C1D_d00_lam1_interleaved_{gating}_k2.png" in pngs, pngs
+    assert f"loss_N10_C1D_d00_sleep_{gating}_k2.png" in pngs, pngs
+
+
+# ----------------------------------------------------------------------------
+# gating
+# ----------------------------------------------------------------------------
+def test_gating_flag_sets_the_readout():
+    """``none`` runs the ungated readout, ``unit`` and ``synapse`` the κ-sparse one; a mismatch is refused."""
+    assert {r.readout for r in runs_of(["fifo"])} == {"learned_shared"}
+    for g in ("unit", "synapse"):
+        rr = runs_of(["none", "fifo"], gating=g)
+        assert {r.readout for r in rr} == {"gated_shared"} and {r.gating for r in rr} == {g}
+        assert all(r.spec[-1] == g and r.gate_label() == f"{g}_k2" for r in rr)
+    with pytest.raises(ValueError):
+        R.expand(base(gating="unit"), ["fifo"], ["1D"], "0.25D", 1.0, "sleep", "none")
+    u, sy = runs_of(["fifo"], gating="unit", seeds=1)[0], runs_of(["fifo"], gating="synapse", seeds=1)[0]
+    assert u.rng_seed() == sy.rng_seed() and u.label() != sy.label() and R.group_key(u) != R.group_key(sy)
+
+
+@pytest.mark.parametrize("B", [1, 4])
+def test_unit_gated_none_is_the_mup_gated_run(B):
+    """Unit gating, no buffer: the μP kernel's signal of ``gated_shared`` (block of active rows), to rounding."""
+    b = base(B=B, gating="unit")
+    got = R.signal_after_tasks(R.expand(b, ["none"], [], "0.25D", 1.0, "sleep", "unit"), 2, 5, 2)
+    np.testing.assert_allclose(got, X.signal_after_tasks(b, 2, 5, 2), rtol=0, atol=1e-9)
+
+
+def test_synapse_mask_is_that_of_the_synaptic_run():
+    """The regenerated mask is bit for bit ``synapse.draw_mask`` / ``probe_mask`` of the task."""
+    from sscl_core import model, synapse
+    key, N, D, pN = jax.random.PRNGKey(5), 10, 40, jnp.float64(6.0)
+    for k in (0, 3):
+        _, M = synapse.probe_mask(key, k, N, D, pN, 0.8)
+        np.testing.assert_array_equal(synapse.task_mask(key, k, N, D, pN), M)
+        assert 0.3 < float(M.mean()) < 0.9
+
+
+def _gated_setup(gating, b=6):
+    """One run's weights after 3 tasks, and b samples of three different tasks with their own gates."""
+    from sscl_core import model, synapse
+    runs = runs_of(["fifo"], gating=gating, seeds=1)
+    (rs, rp) = advance(runs, 3)
+    one = lambda tree: jax.tree_util.tree_map(lambda x: jnp.asarray(x[0]), tree)
+    s, buf, p = one(rs.s), one(rs.buf), one(rp.p)
+    N, D = s.W.shape
+    tasks = jnp.asarray([0, 0, 1, 1, 2, 2][:b], jnp.int32)
+    Xs = jax.random.normal(jax.random.PRNGKey(9), (b, D), dtype=jnp.float64)
+    y = jax.random.normal(jax.random.PRNGKey(8), (b,), dtype=jnp.float64)
+    if gating == "unit":
+        G = jnp.stack([model.probe_task(s.key, k, N, D, p.pN, p.gated, p.shared)[1] for k in tasks])
+        Gfull = G[:, :, None] * jnp.ones((1, 1, D))
+    else:
+        G = jnp.stack([synapse.task_mask(s.key, k, N, D, p.pN) for k in tasks])
+        Gfull = G
+    return s, buf, p, Xs, y, tasks, G, Gfull
+
+
+@pytest.mark.parametrize("gating", ["unit", "synapse"])
+def test_gated_step_is_the_gradient_under_each_samples_gate(gating):
+    """One step of ``gated_phase`` (projection off) against autodiff of Σ_j ½e_j², every sample through its own
+    gate: ΔW = −η pN ∂/∂W, Δa = −η pN/D ∂/∂a (the scaling of ``model.sgd_step``)."""
+    s, _, p, Xs, y, tasks, G, Gfull = _gated_setup(gating)
+    p = p._replace(do_proj=jnp.float64(0.0))
+    D = s.W.shape[1]
+    wgt = jnp.asarray([1.0, 1.0, 1.0, 0.0, 1.0, 1.0])               # one sample weighted out
+    W1, a1, _ = R.gated_phase(s.W, s.a, p, lambda i: (Xs, y, wgt, G), 1, gating)
+
+    def loss(W, a):
+        h = jnp.einsum("jid,id,jd->ji", Gfull, W, Xs) / jnp.sqrt(D)
+        e = h @ a / p.pN - y
+        return 0.5 * (wgt * e * e).sum()
+    gW, ga = jax.grad(loss, (0, 1))(s.W, s.a)
+    np.testing.assert_allclose(s.W - W1, p.eta * p.pN * gW, rtol=1e-9, atol=1e-13)
+    np.testing.assert_allclose(s.a - a1, p.eta * p.pN / D * ga, rtol=1e-9, atol=1e-13)
+    if gating == "unit":                                            # a unit no weighted sample opened is untouched,
+        p1 = p._replace(do_proj=jnp.float64(1.0))                  # projection included
+        w1 = jnp.asarray([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])            # only sample 0 (task 0) counts
+        W2, a2, _ = R.gated_phase(s.W, s.a, p1, lambda i: (Xs, y, w1, G), 1, gating)
+        shut = np.asarray((G * w1[:, None]).max(0) == 0.0)
+        assert shut.any() and (~shut).any()
+        np.testing.assert_array_equal(np.asarray(W2)[shut], np.asarray(s.W)[shut])
+        np.testing.assert_array_equal(np.asarray(a2)[shut], np.asarray(s.a)[shut])
+    else:                                                           # a closed synapse of every sample is untouched
+        closed = np.asarray(Gfull.max(0) == 0.0)
+        assert closed.any()
+        np.testing.assert_array_equal(np.asarray(W1)[closed], np.asarray(s.W)[closed])
+
+
+@pytest.mark.parametrize("gating", ["unit", "synapse"])
+def test_gated_grad_norm_is_the_gradient_norm(gating):
+    """The priority under the sample's own gate against autodiff of ½e² w.r.t. (W, a)."""
+    s, _, p, Xs, y, tasks, G, Gfull = _gated_setup(gating)
+    D = s.W.shape[1]
+    got = R.grad_norm(s.W, s.a, p, Xs, y, G if gating == "unit" else None, tasks, s.key, gating)
+    for j in range(len(y)):
+        loss = lambda W, a: 0.5 * (a @ ((Gfull[j] * W) @ Xs[j]) / (jnp.sqrt(D) * p.pN) - y[j]) ** 2
+        gW, ga = jax.grad(loss, (0, 1))(s.W, s.a)
+        np.testing.assert_allclose(got[j], jnp.sqrt((gW ** 2).sum() + (ga ** 2).sum()), rtol=1e-10)
+
+
+def test_buffer_stores_each_tasks_unit_gate():
+    """Unit gating: every stored sample carries the gate of the task it came from, and the tasks' gates differ."""
+    from sscl_core import model
+    runs = runs_of(["fifo"], gating="unit", seeds=1)
+    (rs, rp) = advance(runs, 5)
+    N, D = rs.s.W.shape[1:]
+    p = jax.tree_util.tree_map(lambda x: x[0], rp.p)
+    gates = {k: np.asarray(model.probe_task(rs.s.key[0], k, N, D, p.pN, p.gated, p.shared)[1]) for k in range(5)}
+    for slot in range(int(rs.buf.n[0])):
+        np.testing.assert_array_equal(np.asarray(rs.buf.G[0, slot]), gates[int(rs.buf.task[0, slot])])
+    assert len({tuple(g) for g in gates.values()}) > 1
+
+
+@pytest.mark.parametrize("gating", ["unit", "synapse"])
+@pytest.mark.parametrize("mode", R.MODES)
+def test_gated_replay_runs(gating, mode):
+    """Gated replay end to end: task 0 (empty buffer) is the gated no-replay task, later tasks differ, every
+    observable is finite, and the chunked and traced kernels agree."""
+    runs = runs_of(["fifo", "priority"], mode=mode, gating=gating, seeds=1)
+    none = runs_of(["none"], gating=gating, seeds=1)
+    np.testing.assert_allclose(R.signal_after_tasks(runs, 0, 1, 0)[:, 0], R.signal_after_tasks(none, 0, 1, 0)[:, 0],
+                               atol=1e-9)
+    assert abs(R.signal_after_tasks(runs, 0, 3, 0)[2, 0] - R.signal_after_tasks(none, 0, 3, 0)[2, 0]) > 1e-6
+    np.testing.assert_allclose(R.signal_after_tasks(runs, 2, 3, 2, chunk=1), R.signal_after_tasks(runs, 2, 3, 2, chunk=3),
+                               atol=1e-10)
+    L = R.loss_curves(runs, [0, 3], 4)
+    assert np.isfinite(L).all() and (L[:, :, -1] < L[:, :, 0]).all()
+    np.testing.assert_allclose(R.norms_over_tasks(runs, 4)["loss_end"][:, [0, 3]], L[:, :, -1], atol=1e-10)
 
 
 @pytest.mark.skipif(not GPUS, reason="no GPU visible to JAX")

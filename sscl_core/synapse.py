@@ -55,13 +55,23 @@ def draw_mask(k_teach: jnp.ndarray, N: int, D: int, pN: jnp.ndarray, run_key=Non
     w ~ N(0, I_D) without a run key or at ``shared`` = 0), and mask γ_ij ~ Bernoulli(pN/N), (N, D) 0/1 floats."""
     kw, kg = jax.random.split(k_teach)
     w = model.draw_teacher(kw, D, run_key, shared)
+    return w, mask_from_key(kg, N, D, pN)
+
+
+def mask_from_key(kg: jnp.ndarray, N: int, D: int, pN: jnp.ndarray) -> jnp.ndarray:
+    """Mask γ_ij ~ Bernoulli(pN/N), (N, D) 0/1 floats, from the gate half ``kg`` of a task's ``k_teach``."""
     # 32 random bits per synapse against the threshold p·2³² (half the generator work of a float64 uniform;
     # p is resolved to 2⁻³²); p ≥ 1 opens every synapse exactly
     dens = pN / N
     thresh = jnp.clip(dens, 0.0, 1.0) * 4294967296.0
     bits = jax.random.bits(jax.random.fold_in(kg, 1), (N, D), dtype=jnp.uint32)
-    M = ((bits.astype(jnp.float64) < thresh) | (dens >= 1.0)).astype(jnp.float64)
-    return w, M
+    return ((bits.astype(jnp.float64) < thresh) | (dens >= 1.0)).astype(jnp.float64)
+
+
+def task_mask(key: jnp.ndarray, k, N: int, D: int, pN: jnp.ndarray) -> jnp.ndarray:
+    """Mask of task ``k`` of a run, regenerated from the run key without its teacher (bit for bit that of
+    ``draw_mask`` / ``probe_mask``)."""
+    return mask_from_key(jax.random.split(model.task_keys(key, k)[0])[1], N, D, pN)
 
 
 def probe_mask(key: jnp.ndarray, k, N: int, D: int, pN: jnp.ndarray, shared=0.0) -> tuple[jnp.ndarray, jnp.ndarray]:

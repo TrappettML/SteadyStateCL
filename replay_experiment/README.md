@@ -1,8 +1,8 @@
 # replay_experiment
 
-The μP student of `muP_experiment` with every unit active and both layers
-learned (readout `learned_shared`: projection on, no gating, no task
-heads), trained by SGD on the same unbounded stream of teacher–student
+The μP student of `muP_experiment` with both layers learned and one shared
+readout (projection on, no task heads), ungated or context-gated
+(`--gating none|unit|synapse`), trained by SGD on the same unbounded stream of teacher–student
 tasks, with a **buffer of stored samples that is replayed**.  JAX,
 float64, CPU or GPU.  The kernel is `../sscl_core/replay.py`; there is no
 write-up for this experiment yet, so its docstring is the specification.
@@ -15,7 +15,33 @@ The scripts and figures follow `muP_experiment`, with the axes swapped:
 | κ (columns, shades, or one figure each) | **replay size C**, the buffer's capacity in samples (`--capacity`) |
 
 Replay size is the only replay hyper-parameter the scripts sweep.  The
-network is fixed, so there is no `--readout` and no `--kappa`.
+readout is fixed, so there is no `--readout`; the gating is one setting
+per call (`--gating`, `--kappa`).
+
+## Gating
+
+| `--gating` | readout | the gate of task k |
+|---|---|---|
+| `none` (default) | `learned_shared` | every unit active, pN = N (the runs before gating was added) |
+| `unit` | `gated_shared` | g_k,i ~ Bernoulli(κ/√N) per hidden unit; u_k = (g_k ⊙ a)W/pN, pN = κ√N |
+| `synapse` | `gated_shared` | a mask Γ_k ∈ {0,1}^{N×D} of i.i.d. Bernoulli(κ/√N) entries (`../sscl_core/synapse.py`); u_k,j = Σ_i γ_kij a_i W_ij/pN |
+
+**A sample is always trained under the gate of the task it came from**: a
+fresh sample under the current task's gate, a replayed sample under its
+stored task's (the unit gate is stored with the sample, the synaptic mask
+is regenerated from the run key and the sample's task index).  An inactive
+unit or closed synapse gets exactly zero from that sample.  The priority
+of `priority` replace is the gradient norm under the sample's own gate,
+and the loss and signal observables read each task through its own gate.
+After every step the projection runs on the units the step touched (unit:
+the union of its samples' gates; synapse: every unit, as in the synaptic
+μP run).  The unit- and synapse-gated runs of a seed share the run key, so
+they see the same teachers and inputs.  Synaptic gating costs about B
+times an ungated step (one N×D mask per replayed sample).
+
+Every figure and `.npz` name ends in the gating, `ungated`, `unit_k{κ}` or
+`synapse_k{κ}` (e.g. `stask_N100_C4D_d00_lam4_sleep_unit_k1.png`), and
+titles and captions state it.
 
 ## The model
 
@@ -125,13 +151,15 @@ shared package are `../muP_experiment/tests`.
 | `--mode sleep\|interleaved` | when the buffer is replayed (default `sleep`; `run_inter_vs_sleep.py` runs both). |
 | `--replay-ratio ρ` | replayed samples per fresh sample (default 1). |
 | `--write m` | samples of each task stored after it, as `--capacity` (default `0.125D`). |
+| `--gating none\|unit\|synapse` | context gating (default: the config's `gating`, `none`); see "Gating". |
+| `--kappa κ` | gate scale of a gated run, 1 ≤ κ ≤ √N (default: the config's first `kappa`, 1). |
 | `--delta0`, `--lam`, `--seeds`, `--sgd_batch`, `--out` | as in `muP_experiment`. |
 | `--shared s`, `--rho_zero` | teacher similarity, as in `muP_experiment`: every task draws a latent angle and two teachers have similarity ρ = s·κ(Δθ), random for every pair of tasks (default: the config's `shared`, 0.8); `--rho_zero` draws independent teachers, ρ = 0, the stream of every run before 2026-11-15. A stored sample (x, y) carries the label of its own task's teacher under either. |
 | `--T`, `--tau`, `--tasks` | stream lengths, per script (`--help`); in units of N where a script takes several widths (`run_Nscaling.py`, `run_weight_norms.py`). |
 
 The placement flags (`--gpus`, `--workers`, `--per-gpu`, `--chunk`,
 `--split`) are those of `../sscl_core/pool.py`: every method and seed of
-one (N, C, mode) is one `vmap` batch with the method a per-run constant,
+one (N, C, mode, gating) is one `vmap` batch with the method a per-run constant,
 and the batches are the jobs spread over the cards.  The buffer adds
 8·C·(D + 3) bytes per run to the planner's memory estimate.
 

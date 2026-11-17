@@ -12,7 +12,7 @@ tasks: the first two, the middle two and the last two.  Under sleep replay the c
 sleep steps that follow the task's own (``replay.replay_task``), so the figure shows what the sleep does to the
 task just learned; ``none`` has no sleep and its curve ends with the task.
 
-Output, in ``results/training_verify/``: ``loss_N{N}_C{C}_d0{δ₀}_{mode}.png`` — three panels on a broken x axis
+Output, in ``results/training_verify/``: ``loss_N{N}_C{C}_d0{δ₀}_{mode}_{gating}.png`` (gating ``ungated``, ``unit_k{κ}`` or ``synapse_k{κ}``) — three panels on a broken x axis
 (first two | middle two | last two tasks), y = loss (log), one trace per replay method (``none`` dashed grey),
 seed mean ± 1 s.e. band; faint dotted lines mark the start of a sleep, a solid grey line the task switch.
 ``loss_….npz`` holds the curves ``{method}`` (n_seeds, 6, steps + 1), with ``tasks``, ``n_steps``, ``n_sleep``.
@@ -79,7 +79,7 @@ def figure(curves: dict[str, np.ndarray], run0: R.RRun, cap: str, T: int, path: 
             ax.tick_params(axis="y", length=0)
     axes[0, 0].set_ylabel(r"$L_c = |u - w_c|^2 / 2D$ of the task being trained")
     P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta,
-                 extra=f"N = {run0.N}, {C.cap_text(cap)}, {C.MODE_LABEL[run0.mode]}, {n_seeds} seeds")
+                 extra=f"N = {run0.N}, {C.cap_text(cap)}, {C.mode_text(run0)}, {n_seeds} seeds")
     P.caption(fig, f"population loss of the task being trained, before its first step and after each step, for the "
                    f"first two, the middle two and the last two of the stream's {T} tasks (broken x axis); line: "
                    f"seed mean, band: ±1 s.e.; grey line: the task switch"
@@ -108,7 +108,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         run0 = next((r for r in runs if r.method != "none"), runs[0])
         cap_label = run0.cap_label
         print(f"training verify: N={N} C={cap_label} δ₀={d0} λ={run0.lam} {run0.solver} n_steps={run0.n_steps} "
-              f"{C.MODE_LABEL[run0.mode]} T={T} seeds={args.seeds}", flush=True)
+              f"{C.mode_text(run0)} T={T} seeds={args.seeds}", flush=True)
         cols, _ = C.collect("loss_curves", runs, T, {"tasks": windows(T), "T": T}, lambda Lc, j: Lc[j], args,
                             out_per_task=8.0)
         curves = {m: np.stack(v) for m, v in C.by_method(runs, cols).items()}
@@ -118,7 +118,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"  {C.METHOD_LABEL[m]:16s} first task: start {mean[0, 0]:.3e} → trained {mean[0, n]:.3e} → after sleep "
                   f"{mean[0, -1]:.3e};  last task: start {mean[-1, 0]:.3e} → trained {mean[-1, n]:.3e} → after sleep "
                   f"{mean[-1, -1]:.3e}", flush=True)
-        stem = os.path.join(args.out, f"loss_N{N}_C{cap_label}_d0{P.fmt(d0)}_{run0.mode}")
+        stem = os.path.join(args.out, f"loss_N{N}_C{cap_label}_d0{P.fmt(d0)}_{run0.mode}_{C.gate_tag(run0)}")
         outs.append(figure(curves, run0, cap_label, T, stem))
         print(f"wrote {outs[-1]} and {stem}.npz")
     return 0

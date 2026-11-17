@@ -10,7 +10,7 @@ steps, and the area between that curve and L = 0 is taken over the task's ``n_st
 rule, loss × steps; ``replay.loss_slopes``) — the sleep steps are not part of the area, so the two replay modes
 and no replay are compared over the same steps.  The loss at the end of the sleep is recorded beside it.
 
-Output, in ``results/loss_slope/figures/``: ``loss_slope_N{N}_d0{δ₀}_lam{λ}_{mode}.png`` — one column per replay
+Output, in ``results/loss_slope/figures/``: ``loss_slope_N{N}_d0{δ₀}_lam{λ}_{mode}_{gating}.png`` (gating ``ungated``, ``unit_k{κ}`` or ``synapse_k{κ}``) — one column per replay
 size C, x = task + 1 (log), y = the area, seed mean ± 1 s.e. band, one trace per replay method (``none`` dashed
 grey, the same runs in every column).  ``loss_slope_….npz`` holds ``area_C{C}_{method}``, ``slope_…`` (the
 least-squares slope of the curve per step), ``loss_start_…``, ``loss_end_…`` (after the last training step)
@@ -59,7 +59,7 @@ def figure(cols: dict[str, dict[str, dict[str, np.ndarray]]], run0: R.RRun, path
     axes[0, 0].set_ylabel("area under $L_c$ of the current task\n(loss × steps)")
     figdata["task"] = np.arange(T)
     P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta,
-                 extra=f"N = {run0.N}, {C.MODE_LABEL[run0.mode]}")
+                 extra=f"N = {run0.N}, {C.mode_text(run0)}")
     P.caption(fig, f"area between the population loss $L_c = |u - w_c|^2/2D$ of the task being trained and 0 over its "
                    f"{run0.n_steps} training steps (trapezoid rule; smaller = lower loss during the task), drawn at "
                    f"t + 1 so task 0 is at 1; line: seed mean ({n_seeds} seeds), band: ±1 s.e.; no replay is the same "
@@ -99,7 +99,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                           f"{mm['area'][half:].mean():8.2f}   loss there: start {mm['loss_start'][half:].mean():.3f} → "
                           f"trained {mm['loss_end'][half:].mean():.3e} → after sleep {mm['loss_sleep'][half:].mean():.3e}",
                           flush=True)
-            stem = os.path.join(args.out, "figures", f"loss_slope_N{N}_d0{P.fmt(d0)}_lam{P.fmt(run0.lam)}_{run0.mode}")
+            stem = os.path.join(args.out, "figures", f"loss_slope_N{N}_d0{P.fmt(d0)}_lam{P.fmt(run0.lam)}_{run0.mode}_{C.gate_tag(run0)}")
             print(f"wrote {figure(fig_cols, run0, stem)} and {stem}.npz")
     return 0
 

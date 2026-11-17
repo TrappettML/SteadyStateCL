@@ -102,9 +102,9 @@ def fig_methods(cond: dict, Ns: list[int], cap: str, methods: list[str], run0: R
     axes_style(ax, Ns)
     ax.set_ylabel(r"half-life $m_{1/2}$ (tasks)")
     P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta,
-                 extra=f"{C.cap_text(cap)}, {C.MODE_LABEL[run0.mode]}")
+                 extra=f"{C.cap_text(cap)}, {C.mode_text(run0)}")
     P.caption(fig, f"{H.STAT_TEXT[stat]}; S_T(m) the signal of the teacher of task T after m more tasks, at steady "
-                   f"state; ungated learned shared readout, {C.replay_text(run0)} at N = {run0.N}; no replay has no "
+                   f"state; learned shared readout, {C.replay_text(run0)} at N = {run0.N}; no replay has no "
                    f"buffer.")
     P.fig_legend(fig, handles=C.method_handles(methods, marker="o"))
     return P.save(fig, path, figdata=figdata)
@@ -124,7 +124,7 @@ def fig_caps(cond: dict, Ns: list[int], caps: list[str], methods: list[str], run
         ax.set_title(C.METHOD_LABEL[m], color=C.METHOD_COLOR[m], fontsize=P.FS_MIN + 1)
         axes_style(ax, Ns)
     axes[0, 0].set_ylabel(r"half-life $m_{1/2}$ (tasks)")
-    P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=C.MODE_LABEL[run0.mode])
+    P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=C.mode_text(run0))
     P.caption(fig, f"{H.STAT_TEXT[stat]}; replay size C in shades of the method's colour, lightest = smallest; "
                    f"dashed grey: no replay.")
     handles = [P.Line2D([], [], color=C.cap_shade(i, len(caps)), lw=1.6, label=C.cap_text(c)) for i, c in enumerate(caps)]
@@ -144,7 +144,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     run0 = next((r for r in runs if r.method != "none"), runs[0])
     caps, methods, Ns = C.cap_labels(runs), C.methods_of(runs), sorted(set(args.N))
     print(f"half-life vs N: N={Ns} C={caps} methods={methods} δ₀={run0.delta0} λ={run0.lam} {run0.solver} "
-          f"{C.MODE_LABEL[run0.mode]} seeds={args.seeds} statistic={args.stat}", flush=True)
+          f"{C.mode_text(run0)} seeds={args.seeds} statistic={args.stat}", flush=True)
     cond = collect(runs, args.T, args.tau, args.stat, args)
 
     for key in sorted(cond, key=lambda k: (k[0], R.METHODS.index(k[2]), k[1])):
@@ -155,7 +155,7 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"{int(np.isnan(d['mhalf']).sum())}/{len(d['mhalf'])}", flush=True)
 
     fdir = os.path.join(args.out, "figures")
-    tag = f"d0{P.fmt(run0.delta0)}_lam{P.fmt(run0.lam)}_{run0.mode}"
+    tag = f"d0{P.fmt(run0.delta0)}_lam{P.fmt(run0.lam)}_{run0.mode}_{C.gate_tag(runs)}"
     outs = []
     if caps:
         outs.append(fig_methods(cond, Ns, caps[0], methods, run0, os.path.join(fdir, f"mhalf_vs_N_C{caps[0]}_{tag}"), args.stat))

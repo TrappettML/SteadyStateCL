@@ -11,7 +11,7 @@ T_burn + T_meas), follow the teacher of task T for ``--tau`` more (default 200),
 crossing of half its own S_T(0) (``halflife.per_seed``) — a box needs one value per seed, so this is the
 per-seed statistic, not the root of the mean curve; that one is drawn on top as a diamond.
 
-One figure per (N, δ₀), ``results/inter_vs_sleep/figures/inter_vs_sleep_N{N}_d0{δ₀}_lam{λ}.png``: one column per
+One figure per (N, δ₀), ``results/inter_vs_sleep/figures/inter_vs_sleep_N{N}_d0{δ₀}_lam{λ}_{gating}.png``: one column per
 replay size C; x = replay method (no replay, FIFO, random replace, priority replace), two boxes per method —
 sleep (filled) and interleaved (hollow) — and one for no replay; y = m½ in tasks.  Box: quartiles and median
 over seeds, whiskers to the farthest seed within 1.5 IQR, dots: the seeds; diamond: m½ of the seed-mean curve.
@@ -88,7 +88,7 @@ def figure(cond: dict, N: int, d0: float, caps: list[str], methods: list[str], r
     axes[0, 0].set_ylabel(r"half-life $m_{1/2}$ (tasks)")
     for ax in axes[0]:
         ax.set_xlabel("replay method")
-    P.cell_title(fig, d0=d0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=f"N = {N}, {n_seeds} seeds")
+    P.cell_title(fig, d0=d0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=f"N = {N}, {n_seeds} seeds, {C.gating_text(run0)}")
     P.caption(fig, f"each seed's first crossing of half its own S_T(0), the signal of teacher T followed for {tau} "
                    f"tasks at steady state; box: quartiles and median over seeds, whiskers to 1.5 IQR, dots: seeds, "
                    f"diamond: m½ of the seed-mean curve; filled: sleep replay, hollow: interleaved replay, same "
@@ -133,7 +133,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     for N in sorted(set(args.N)):
         for d0 in sorted(set(args.delta0)):
             run0 = next(r for r in runs if r.N == N and r.delta0 == d0)
-            stem = os.path.join(args.out, "figures", f"inter_vs_sleep_N{N}_d0{P.fmt(d0)}_lam{P.fmt(run0.lam)}")
+            stem = os.path.join(args.out, "figures", f"inter_vs_sleep_N{N}_d0{P.fmt(d0)}_lam{P.fmt(run0.lam)}_{C.gate_tag(run0)}")
             print(f"wrote {figure(cond, N, d0, caps, methods, run0, args.tau, stem)} and {stem}.npz")
     return 0
 

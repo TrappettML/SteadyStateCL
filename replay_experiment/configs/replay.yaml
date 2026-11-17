@@ -5,7 +5,8 @@
 # sweep is the replay size C (--capacity), where the μP scripts sweep κ.
 name: replay
 N: [10, 20, 50, 100]
-readout: [learned_shared]      # ungated, both layers learned, projection on; fixed for this experiment
+readout: [learned_shared]      # both layers learned, projection on; set from `gating` below by the scripts
+kappa: [1.0]                   # gate scale of the gated runs (gating unit | synapse): κ√N units / that share of synapses per task
 delta0: [0.0]
 lam: [4.0]                     # hidden-layer learning per task
 seeds: 8
@@ -33,3 +34,7 @@ write: "0.125D"
 # replay_ratio·B buffer samples to every step
 replay_ratio: 1.0
 replay_mode: sleep             # sleep | interleaved (--mode)
+# context gating (--gating): none = every unit active (readout learned_shared); unit = κ-sparse unit gates
+# (gated_shared); synapse = synaptic masks of the same density (gated_shared, sscl_core/synapse.py).  A replayed
+# sample is trained and scored under the gate of the task it came from.  Figures and arrays are named with it.
+gating: none

@@ -11,6 +11,7 @@
 #   ./run_all.sh --list                   the step names
 #   PLACE="--workers 48" ./run_all.sh     CPU workers instead of the GPUs ("" = in-process)
 #   MODE=interleaved ./run_all.sh         interleaved instead of sleep replay
+#   GATING=unit KAPPA=2 ./run_all.sh      unit-gated network (none | unit | synapse) at gate scale κ
 #   nohup ./run_all.sh > run_all.out 2>&1 &     detached, e.g. on cyclops
 #
 # Logs: results/logs/run_all_<date>_<time>/<NN>_<step>.log, and summary.txt with the
@@ -28,6 +29,8 @@ cd "$(dirname "$0")" || exit 1
 PY=${PY:-python}
 PLACE=${PLACE---gpus}                    # every card of the node, planned by sscl_core.pool
 MODE=${MODE:-sleep}                      # replay schedule: sleep (default) | interleaved
+GATING=${GATING:-none}                   # context gating: none (default) | unit | synapse; names every figure
+KAPPA=${KAPPA:-1}                        # gate scale κ of a gated run, 1 ≤ κ ≤ √N (ignored when GATING=none)
 LAM=4                                    # hidden-layer learning per task λ (configs/replay.yaml: lam [4.0])
 STAT=mean                                # half-life: mean = first crossing of ½ by the seed-mean curve; seed = per-seed mean
 SEEDS=8                                  # seeds 0 … SEEDS−1
@@ -36,14 +39,14 @@ N_GRID="10 20 50 100"                    # widths of Nscaling and weight_norms
 CAPS="0.5D 4D"                           # replay sizes C: one small, one large (multiples of D)
 WRITE=0.125D                             # samples of each task stored after it
 RATIO=1                                  # replayed samples per fresh sample
-REPLAY="--capacity $CAPS --method none fifo random priority --write $WRITE --replay-ratio $RATIO"
+REPLAY="--capacity $CAPS --method none fifo random priority --write $WRITE --replay-ratio $RATIO --gating $GATING --kappa $KAPPA"
 
 declare -A CMD
 
 # 1. Is every task learned under replay: loss of the task being trained, first / middle / last two tasks.
 #    Cells are N,C,δ₀; the stream is the config's T_burn + T_meas = 14N tasks.
 CMD[training_verify]="scripts/run_training_verify.py --cell $N,0.5D,0 $N,4D,0 --method none fifo random priority
-    --write $WRITE --replay-ratio $RATIO --mode $MODE --lam $LAM --seeds $SEEDS"
+    --write $WRITE --replay-ratio $RATIO --gating $GATING --kappa $KAPPA --mode $MODE --lam $LAM --seeds $SEEDS"
 
 # 2. Signal of the first task from a fresh start and an empty buffer, S₀(t), for 14N tasks.
 CMD[szero]="scripts/run_szero.py --N $N $REPLAY --mode $MODE --delta0 0 --lam $LAM --seeds $SEEDS --tasks 1400 --stat $STAT"
@@ -74,7 +77,7 @@ for a in "$@"; do
     case $a in
         (-n|--dry-run) DRY=1 ;;
         (--list) printf '%s\n' "${ORDER[@]}"; exit 0 ;;
-        (-h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+        (-h|--help) sed -n '2,18p' "$0"; exit 0 ;;
         (*) [[ -n ${CMD[$a]+x} ]] || { echo "unknown step: $a (see --list)" >&2; exit 2; }; SEL+=("$a") ;;
     esac
 done

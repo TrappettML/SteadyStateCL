@@ -88,7 +88,7 @@ def fig_vs_task(res: dict, Ns: list[int], cap: str, methods: list[str], run0: R.
         axes[-1, c].set_xlabel("task")
     P.label_cols_N(axes, Ns)
     P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta,
-                 extra=f"{C.cap_text(cap)}, {C.MODE_LABEL[run0.mode]}")
+                 extra=f"{C.cap_text(cap)}, {C.mode_text(run0)}")
     P.caption(fig, "after every task: line = seed mean, band = ±1 s.e.; grey: the burn-in half of the stream; buffer "
                    "age in tasks (no replay has no buffer).")
     P.fig_legend(fig, handles=C.method_handles(methods))
@@ -122,7 +122,7 @@ def fig_vs_N(res: dict, Ns: list[int], caps: list[str], methods: list[str], run0
                 ax.set_ylabel(lab)
         axes[0, c].set_title(C.cap_text(cap), fontsize=P.FS_MIN + 1)
         axes[-1, c].set_xlabel("$N$")
-    P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=C.MODE_LABEL[run0.mode])
+    P.cell_title(fig, d0=run0.delta0, lam=run0.lam, solver=run0.solver, eta=run0.eta, extra=C.mode_text(run0))
     P.caption(fig, "steady state = mean over the second half of the stream; point = seed mean, bars = ±1 s.e.; no "
                    "replay is the same runs in every column.")
     P.fig_legend(fig, handles=C.method_handles(methods, marker="o"))
@@ -140,7 +140,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     caps, methods, Ns = C.cap_labels(runs), C.methods_of(runs), sorted(set(args.N))
     T_of = {r.N: (int(round(args.tasks * r.N)) if args.tasks else r.T_burn + r.T_meas) for r in runs}
     print(f"weight norms: N={Ns} C={caps} methods={methods} δ₀={run0.delta0} λ={run0.lam} {run0.solver} "
-          f"{C.MODE_LABEL[run0.mode]} tasks={T_of} seeds={args.seeds}", flush=True)
+          f"{C.mode_text(run0)} tasks={T_of} seeds={args.seeds}", flush=True)
     res = collect(runs, T_of, args)
 
     for (N, cap, m), d in sorted(res.items(), key=lambda kv: (kv[0][0], R.METHODS.index(kv[0][2]), kv[0][1])):
@@ -150,7 +150,7 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"({d['Q_all'].shape[0]} seeds)", flush=True)
 
     fdir = os.path.join(args.out, "figures")
-    tag = f"d0{P.fmt(run0.delta0)}_lam{P.fmt(run0.lam)}_{run0.mode}"
+    tag = f"d0{P.fmt(run0.delta0)}_lam{P.fmt(run0.lam)}_{run0.mode}_{C.gate_tag(runs)}"
     outs = []
     if caps:
         outs.append(fig_vs_task(res, Ns, caps[0], methods, run0, os.path.join(fdir, f"norms_vs_task_C{caps[0]}_{tag}")))
